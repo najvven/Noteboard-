@@ -1,0 +1,22 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.tmp/
+release/
+*.tmp
+*.bak
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local runtime state and generated audit artifacts
+data/boards/
+data/settings.json
+.ai/
+.codex/
+.playwright-cli/
+graphify-out/
+backups/

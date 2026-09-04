@@ -1,0 +1,82 @@
+{
+  "name": "noteboard-plus",
+  "description": "Desktop whiteboard and spatial note-taking application.",
+  "author": "Noteboard+ contributors",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "preview": "cross-env NODE_ENV=production node dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsc --noEmit",
+    "typecheck": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsc --noEmit",
+    "test": "tsx --test tests/*.test.mjs tests/*.test.ts tests/*.test.tsx",
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 tests/*.test.mjs tests/*.test.ts tests/*.test.tsx",
+    "test:e2e": "npm run build && playwright test",
+    "test:stress": "node tests/storage-stress.mjs",
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron .\"",
+    "make": "npm run build && electron-builder"
+  },
+  "build": {
+    "appId": "com.noteboard.plus",
+    "productName": "Noteboard+",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Noteboard+",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/installerIcon.ico",
+      "uninstallerIcon": "build/uninstallerIcon.ico"
+    },
+    "files": [
+      "dist/**/*",
+      "build/**/*",
+      "main.js",
+      "preload.cjs",
+      "shared/**/*"
+    ]
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "express": "^4.21.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.5.0",
+    "tldts": "^7.4.9"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.3.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.1",
+    "sharp": "^0.35.2",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.23.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.4.3",
+    "wait-on": "^9.0.5"
+  }
+}

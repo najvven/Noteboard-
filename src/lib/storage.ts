@@ -11,6 +11,14 @@ type WebSessionPayload = {
   settings: Record<string, unknown>;
 };
 
+export interface WebBlockingStatus {
+  ads: number;
+  cookies: number;
+  popups: number;
+  filtersUpdatedAt: string | null;
+  filterRules: number;
+}
+
 interface NoteboardDesktopApi {
   loadPages: () => Promise<Page[]>;
   savePage: (page: Page) => Promise<boolean>;
@@ -21,6 +29,9 @@ interface NoteboardDesktopApi {
   saveSettings: (settings: { brightness: number }) => Promise<boolean>;
   openBoardsFolder: () => Promise<string>;
   configureWebSession: (payload: WebSessionPayload) => Promise<boolean>;
+  configureWebViewport: (payload: { guestId: number; deviceMode: string; width: number; height: number }) => Promise<boolean>;
+  getWebHostZoom: () => number;
+  getWebBlockingStatus?: (partition: string) => Promise<WebBlockingStatus | null>;
   clearWebSession: (partition: string) => Promise<boolean>;
   onBoardsChanged: (callback: () => void) => () => void;
 }
@@ -173,6 +184,10 @@ export async function configureWebSession(payload: WebSessionPayload): Promise<b
 export async function clearWebSession(partition: string): Promise<boolean> {
   const api = desktopApi();
   return api ? api.clearWebSession(partition) : false;
+}
+
+export async function getWebBlockingStatus(partition: string): Promise<WebBlockingStatus | null> {
+  return desktopApi()?.getWebBlockingStatus?.(partition) ?? null;
 }
 
 export function subscribeToBoardChanges(callback: () => void): () => void {

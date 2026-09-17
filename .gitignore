@@ -13,8 +13,7 @@ release/
 !.env.example
 
 # Local runtime state and generated audit artifacts
-data/boards/
-data/settings.json
+data/
 .ai/
 .codex/
 .playwright-cli/

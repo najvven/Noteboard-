@@ -20,12 +20,10 @@ test("tool settings render as a collapsed footer by default", () => {
   assert.match(markup, /aria-expanded="false"/);
   assert.match(markup, /lucide-settings-2/);
   assert.match(markup, /menu-settings-block/);
-  assert.match(markup, /data-menu-settings-height="32"/);
-  assert.match(markup, /menu-settings-header[^>]*h-8/);
+  assert.match(markup, /data-menu-settings-height="24"/);
+  assert.match(markup, /menu-settings-header[^>]*h-6/);
   assert.match(markup, /data-menu-settings-caption="true"[^>]*menu-settings-caption[^>]*leading-4/);
   assert.match(markup, /menu-settings-block[^>]*pt-2/);
-  assert.match(markup, /menu-settings-caption[^>]*translate-y-px/);
-  assert.match(markup, /lucide-chevron-down[^>]*translate-y-px/);
   assert.match(markup, /Tool settings/);
   assert.doesNotMatch(markup, /Always on top/);
   assert.doesNotMatch(markup, /Tool mode/);
@@ -48,7 +46,7 @@ test("a footer-only tool menu can remove the redundant top separator", () => {
   assert.match(markup, /data-compact="true"/);
   assert.match(markup, /border-t-0/);
   assert.doesNotMatch(markup, /before:absolute/);
-  assert.match(markup, /menu-settings-header[^>]*h-8/);
+  assert.match(markup, /menu-settings-header[^>]*h-6/);
   assert.match(markup, /data-menu-settings-caption="true"/);
 });
 

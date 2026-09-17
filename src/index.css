@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source not "../build/web-filters";
 
 @layer base {
   button, [role="button"], label, input[type="file"], input[type="checkbox"], input[type="color"] {
@@ -25,12 +26,83 @@
   background-attachment: local;
 }
 
+.content-editable-text[contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+  caret-color: #2563eb;
+}
+
+[data-board-root] img, [data-board-root] video {
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.toolbar-dropdown::-webkit-scrollbar { width: 6px; }
+.toolbar-dropdown::-webkit-scrollbar-thumb,
+.bottom-toolbar-scroll::-webkit-scrollbar-thumb {
+  background: #9ca3af;
+  border-radius: 999px;
+}
+.toolbar-dropdown::-webkit-scrollbar-track { margin-block: 12px; }
+.menu-scroll-viewport {
+  scrollbar-gutter: stable;
+  padding-right: 4px;
+}
+.menu-scroll-viewport::-webkit-scrollbar { width: 6px; }
+.menu-scroll-viewport::-webkit-scrollbar-thumb { background: #9ca3af; border-radius: 999px; }
+.menu-scroll-viewport::-webkit-scrollbar-track { margin-block: 4px; }
+.menu-scroll-viewport::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+.toolbar-dropdown::-webkit-scrollbar-button,
+.bottom-toolbar-scroll::-webkit-scrollbar-button { display: none; }
+.bottom-toolbar-scroll { scrollbar-width: none; }
+.bottom-toolbar-scroll::-webkit-scrollbar { display: none; }
+.bottom-toolbar-scroll::-webkit-scrollbar-track { margin-inline: 6px; }
+.bottom-toolbar-scroll > * { flex-shrink: 0; }
+.layers-scroll { overflow-anchor: none; }
+[data-more-drop-active="true"] {
+  border-color: #16a34a !important;
+  box-shadow: 0 0 0 2px #22c55e !important;
+  background: #f0fdf4 !important;
+}
+[data-more-dragging="true"] {
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 2px #3b82f6;
+  cursor: grab;
+}
+
+/* Numeric settings are typed directly; spinner controls only consume space. */
+.toolbar-dropdown input[type="number"] { appearance: textfield; }
+.toolbar-dropdown input[type="number"]::-webkit-inner-spin-button,
+.toolbar-dropdown input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.color-palette > button, .color-palette > label { flex-shrink: 0; }
+.toolbar-dropdown .menu-settings-header { line-height: 1; }
+.toolbar-dropdown .menu-settings-content-inner > div,
+.toolbar-dropdown .menu-settings-content-inner > button { min-height: 24px; }
+
 /* Keep every menu containing the shared settings footer wide enough for its
    compact controls without changing the wider More menu on larger screens. */
 .toolbar-dropdown {
   box-sizing: border-box;
   scale: var(--toolbar-dropdown-inverse-scale, 1);
   transform-origin: top center;
+}
+
+.toolbar-dropdown:has(> .tool-menu-title) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+}
+.toolbar-dropdown > .tool-menu-title {
+  margin: -8px -8px 0;
+  padding: 6px 8px;
+}
+.toolbar-dropdown div.flex.items-center.justify-between.text-xs,
+.toolbar-dropdown button.flex.items-center.justify-between {
+  min-height: 24px;
 }
 
 .toolbar-dropdown:has(.menu-settings-block:not([data-narrow="true"])) {
@@ -59,8 +131,8 @@
    Compact menus may remove the divider, but never shrink the usable row. */
 .menu-settings-header {
   box-sizing: border-box;
-  height: 2rem;
-  min-height: 2rem;
+  height: 1.5rem;
+  min-height: 1.5rem;
 }
 
 /* Settings rows can wrap at narrow widths, so horizontal scrolling is never
@@ -89,3 +161,11 @@
   border-color: rgb(55 65 81 / 0.6);
   box-shadow: 0 0 0 1.5px rgb(55 65 81 / 0.48);
 }
+
+.toolbar-dropdown .flex-col.gap-3 { gap: 8px; }
+.toolbar-dropdown .menu-settings-content-inner { gap: 6px; }
+[data-toolbar-drag-suppressed="true"] { opacity: 0 !important; pointer-events: none; }
+
+/* Native guests must not intercept pointer release during editor gestures. */
+[data-board-interacting="true"] :is(iframe, webview),
+html[data-board-pointer-capture] :is(iframe, webview) { pointer-events: none !important; }

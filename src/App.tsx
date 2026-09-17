@@ -42,6 +42,9 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<Screen>('home');
   const [pages, setPages] = useState<Page[]>([]);
   const [userPresets, setUserPresets] = useState<Preset[]>([]);
+  const userPresetsRef = useRef<Preset[]>([]);
+  const persistedPresetsRef = useRef<Preset[]>([]);
+  const presetSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
   const [storageHydrated, setStorageHydrated] = useState(false);
@@ -62,6 +65,8 @@ export default function App() {
           loadSettings()
         ]);
         setPages(fetchedPages);
+        userPresetsRef.current = fetchedPresets;
+        persistedPresetsRef.current = fetchedPresets;
         setUserPresets(fetchedPresets);
         if (settingsRes && settingsRes.brightness) {
           setGlobalBrightness(settingsRes.brightness);
@@ -91,20 +96,26 @@ export default function App() {
     };
   }, [currentScreen, refreshPagesFromStorage]);
 
-  const skipNextPresetsSaveRef = useRef(true);
-  useEffect(() => {
-    if (!storageHydrated) return;
-    if (skipNextPresetsSaveRef.current) {
-      // The first value is loaded from disk. It is not a user edit and must
-      // not be written back, otherwise Vite can reload the page in a loop.
-      skipNextPresetsSaveRef.current = false;
-      return;
-    }
-    savePresets(userPresets).catch((error) => {
-      console.error(error);
-      setStorageError("Could not save presets. Please try again.");
+  const updateUserPresets = (change: (presets: Preset[]) => Preset[]): Promise<boolean> => {
+    const next = change(userPresetsRef.current);
+    userPresetsRef.current = next;
+    setUserPresets(next);
+    const operation = presetSaveQueueRef.current.then(async () => {
+      await savePresets(next);
+      persistedPresetsRef.current = next;
+      setStorageError(null);
     });
-  }, [storageHydrated, userPresets]);
+    presetSaveQueueRef.current = operation.catch(() => undefined);
+    return operation.then(() => true).catch(error => {
+      console.error(error);
+      if (userPresetsRef.current === next) {
+        userPresetsRef.current = persistedPresetsRef.current;
+        setUserPresets(persistedPresetsRef.current);
+      }
+      setStorageError('Could not save templates. Please try again.');
+      return false;
+    });
+  };
 
   const skipNextSettingsSaveRef = useRef(true);
   useEffect(() => {
@@ -149,10 +160,18 @@ export default function App() {
     setCurrentScreen('editor');
   };
 
-  const handleSaveAsPage = (newPage: Page) => {
+  const handleSaveAsPage = async (newPage: Page): Promise<boolean> => {
     const migratedPage = migratePage(newPage);
-    setPages((prev) => [migratedPage, ...prev]);
-    savePageToServer(migratedPage);
+    try {
+      await savePage(migratedPage);
+      setPages(prev => [migratedPage, ...prev]);
+      setStorageError(null);
+      return true;
+    } catch (error) {
+      console.error(error);
+      setStorageError('Could not save the new board. Please try again.');
+      return false;
+    }
   };
 
   const handleStartFromPreset = (title: string, width: number, height: number, workspaceWidth: number, workspaceHeight: number, snapToGrid: boolean, preset: Preset | null) => {
@@ -351,8 +370,8 @@ export default function App() {
           userPresets={userPresets}
           onStart={handleStartFromPreset}
           onBack={handleBackToHome}
-          onDeletePreset={(id) => setUserPresets(prev => prev.filter(p => p.id !== id))}
-          onRenamePreset={(id, newName) => setUserPresets(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p))}
+          onDeletePreset={(id) => { void updateUserPresets(prev => prev.filter(p => p.id !== id)); }}
+          onRenamePreset={(id, newName) => { void updateUserPresets(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p)); }}
         />
       )}
       
@@ -366,9 +385,7 @@ export default function App() {
               savePageToServer(updatedPage, options);
             }}
             onSaveAs={handleSaveAsPage}
-            onSavePreset={(preset) => {
-              setUserPresets((prev) => [...prev, preset]);
-            }}
+            onSavePreset={(preset) => updateUserPresets(prev => [...prev, preset])}
           />
         </Suspense>
       )}

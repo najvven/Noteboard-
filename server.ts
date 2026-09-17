@@ -100,8 +100,10 @@ async function startServer() {
         res.status(400).json({ error: "Pages must be an array" });
         return;
       }
+      // Validate the whole import before replacing any existing board.
+      // A later invalid item must not leave an earlier item partially saved.
+      pages.forEach(assertValidBoard);
       for (const page of pages) {
-        assertValidBoard(page);
         const filePath = boardFile(page.id);
         await enqueueWrite(filePath, () => atomicWriteJson(filePath, page));
       }

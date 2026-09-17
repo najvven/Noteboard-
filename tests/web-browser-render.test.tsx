@@ -36,7 +36,7 @@ const renderWebBoard = (popupBlocker: boolean) => {
   );
 };
 
-test("browser preview blocks iframe popups by default without showing desktop-only session clearing", () => {
+test("browser preview blocks requested popups while keeping iframe isolation", () => {
   const markup = renderWebBoard(true);
   const iframe = markup.match(/<iframe[^>]+>/)?.[0];
 
@@ -46,7 +46,7 @@ test("browser preview blocks iframe popups by default without showing desktop-on
   assert.doesNotMatch(markup, /Clear Web Session/);
 });
 
-test("browser preview grants popup sandbox permissions only after the blocker is disabled", () => {
+test("browser preview permits popup navigation when blocking is off", () => {
   const markup = renderWebBoard(false);
   const iframe = markup.match(/<iframe[^>]+>/)?.[0];
 

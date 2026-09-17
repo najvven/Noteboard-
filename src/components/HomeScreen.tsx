@@ -2,12 +2,11 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Page } from '../types';
 import { Search, Pin, MoreHorizontal, Files, Plus, Trash2, Check, ArrowRight, CornerUpRight, AlertTriangle, Download, LoaderCircle, X, Settings2 } from 'lucide-react';
-import JSZip from 'jszip';
 import { openBoardStorageFolder } from '../lib/storage';
 import { filterAndSortPages } from '../features/home/page-search';
 import {
   BoardPackageCancelledError,
-  extensionFromMime,
+  downloadBoardArchive,
   readBoardPackageFile,
 } from '../features/board/board-package';
 import {
@@ -461,47 +460,7 @@ function PageCard({ page, onClick, onDelete, onRename, onTogglePin, onMove, onRe
     e.preventDefault();
     setShowMoveMenu(false);
     
-    // Add compatibility (versioning)
-    const exportData = {
-      ...page,
-      version: page.version || 3 // Current version of the app
-    };
-    
-    const zip = new JSZip();
-    const assetsFolder = zip.folder("assets");
-
-    exportData.elements = exportData.elements.map(el => {
-      if (
-        (el.type === 'image' || el.type === 'media') &&
-        typeof el.content === 'string' &&
-        el.content.startsWith('data:')
-      ) {
-        const match = el.content.match(/^data:([^;]+);base64,(.+)$/);
-        if (match && assetsFolder) {
-          const mime = match[1];
-          const filename = `${el.id}.${extensionFromMime(mime)}`;
-          assetsFolder.file(filename, match[2], { base64: true });
-          return {
-            ...el,
-            mediaMime: el.type === 'media' ? (el.mediaMime || mime) : el.mediaMime,
-            content: `assets/${filename}`,
-          };
-        }
-      }
-      return el;
-    });
-
-    zip.file("board.json", JSON.stringify(exportData, null, 2));
-
-    const content = await zip.generateAsync({ type: "blob" });
-    const url = URL.createObjectURL(content);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${page.title.replace(/\s+/g, '_')}_noteboard.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    await downloadBoardArchive(page);
   };
 
   return (
@@ -613,7 +572,7 @@ function PageCard({ page, onClick, onDelete, onRename, onTogglePin, onMove, onRe
         </div>
       </div>
       <div className="relative p-4 pt-3 flex items-center justify-between z-20 bg-white rounded-b-xl">
-        <div className="flex-1 flex flex-col" style={{ overflow: isEditing ? 'visible' : 'hidden', textOverflow: 'ellipsis', whiteSpace: isEditing ? 'normal' : 'nowrap' }}>
+        <div className="min-w-0 flex-1 flex flex-col">
           <div className="h-7 flex items-center w-full relative">
             {isEditing ? (
                <div className="relative flex items-center w-full h-full" onClick={e => e.stopPropagation()}>
@@ -647,7 +606,7 @@ function PageCard({ page, onClick, onDelete, onRename, onTogglePin, onMove, onRe
               <button
                 type="button"
                 aria-label={`Rename ${page.title || 'Untitled board'}`}
-                className="font-bold text-[#1A1A1A] text-sm text-left hover:bg-gray-100 hover:ring-1 hover:ring-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-md px-1.5 py-0 h-7 border border-transparent transition-all w-[calc(100%-8px)] leading-tight flex items-center overflow-hidden mx-1 cursor-text"
+                className="font-bold text-[#1A1A1A] text-sm text-left hover:bg-gray-100 hover:border-gray-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-md px-1.5 py-0 h-7 border border-transparent transition-all w-[calc(100%-8px)] leading-tight flex items-center overflow-hidden mx-1 cursor-text"
                 onClick={(e) => {
                   e.stopPropagation();
                   setIsEditing(true);

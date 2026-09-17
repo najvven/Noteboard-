@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -46,6 +47,10 @@ try {
     readJsonWithBackup(path.join(directory, file)),
   );
   const readMs = performance.now() - readStarted;
+  assert.equal(boards.length, smallBoardCount + largeBoardCount);
+  for (const board of boards) {
+    assert.equal(board.elements[0].content, board.id.startsWith('large-') ? largeContent : 'note');
+  }
   const memoryAfter = process.memoryUsage().rss;
 
   console.log(
@@ -64,5 +69,7 @@ try {
     ),
   );
 } finally {
+  const target = path.resolve(directory);
+  assert.ok(target.startsWith(path.resolve(os.tmpdir()) + path.sep) && path.basename(target).startsWith('noteboard-stress-'));
   await fs.rm(directory, { recursive: true, force: true });
 }

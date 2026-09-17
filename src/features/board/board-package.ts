@@ -22,6 +22,36 @@ import { assertSafeZipDirectory } from "../../../shared/zip-preflight.js";
 
 export { mimeFromAssetPath } from "../../../shared/board-package-stream.js";
 
+/** Shared portable export used by both the workspace and Save as File. */
+export async function createBoardArchive(page: Page): Promise<Uint8Array> {
+  assertValidBoard(page);
+  const zip = new JSZip();
+  const elements = page.elements.map(element => {
+    if ((element.type !== 'image' && element.type !== 'media') || typeof element.content !== 'string') return element;
+    const data = element.content.match(/^data:([^;]+);base64,(.+)$/);
+    if (!data) return element;
+    const assetPath = `assets/${element.id}.${extensionFromMime(data[1])}`;
+    zip.file(assetPath, data[2], { base64: true });
+    return { ...element, mediaMime: element.type === 'media' ? element.mediaMime || data[1] : element.mediaMime, content: assetPath };
+  });
+  zip.file('board.json', JSON.stringify({ ...page, version: page.version || 3, elements }, null, 2));
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+export async function downloadBoardArchive(page: Page, name = page.title): Promise<void> {
+  const bytes = await createBoardArchive(page);
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  const url = URL.createObjectURL(new Blob([copy.buffer], { type: 'application/zip' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${(name || 'Untitled board').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/\s+/g, '_').replace(/[. ]+$/, '') || 'noteboard'}_noteboard.zip`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export interface BoardPackageLimits {
   boardFileBytes: number;
   expandedArchiveBytes: number;

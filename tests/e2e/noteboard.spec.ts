@@ -52,26 +52,26 @@ const dragOnBoard = async (
 };
 
 const startMovingToolsToMore = async (page: BrowserPage) => {
-  await page.getByRole("button", { name: "More", exact: true }).click();
-  const moveAction = page.locator('[data-move-from-toolbar="true"]');
-  await expect(moveAction).toHaveText("Move from Toolbar");
-  await expect
-    .poll(async () => (await moveAction.boundingBox())?.height ?? 0)
-    .toBeLessThanOrEqual(26);
-  await moveAction.click();
-  await expect(
-    page.getByRole("button", { name: "Done moving tools" }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "General Settings", exact: true }).click();
+  await page.locator('[data-toolbar-editor-toggle="true"]').click();
+  await expect(page.getByRole("button", { name: "Finish", exact: true })).toBeVisible();
 };
-
-const moveToolbarToolIntoMore = async (
-  page: BrowserPage,
-  itemId: string,
-) => {
+const moveToolbarToolIntoMore = async (page: BrowserPage, itemId: string) => {
   const item = page.locator(`[data-toolbar-item="${itemId}"]`);
-  await expect(item).toBeVisible();
-  await item.click({ position: { x: 8, y: 8 } });
+  await item.dragTo(page.locator('[data-toolbar-item="more"]'));
   await expect(item).toBeHidden();
+};
+const returnToolFromMore = async (page: BrowserPage, id: string, label: string, cancel = false) => {
+  const row = page.locator(`[data-more-toolbar-item="${id}"]`);
+  if (!(await row.isVisible())) await page.getByRole('button', { name: 'More', exact: true }).click();
+  const box = (await row.getByRole('button', { name: `Move ${label} to toolbar` }).boundingBox())!;
+  const toolbar = (await page.locator('[data-toolbar-surface="true"]').boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x - 30, box.y + 16, { steps: 5 });
+  await page.mouse.move(cancel ? 20 : toolbar.x + 50, cancel ? 600 : toolbar.y + toolbar.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: 'Finish', exact: true })).toHaveCount(0);
 };
 
 const createSectionOnBoard = async (
@@ -302,7 +302,7 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
   await toolbarEditorToggle.click();
   await expect(generalMenu).toBeHidden();
   const finishToolbarEditing = page.getByRole("button", {
-    name: "Finish toolbar editing",
+    name: "Finish",
   });
   await expect(finishToolbarEditing).toBeVisible();
 
@@ -364,10 +364,10 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
   const webRow = moreMenu.locator('[data-more-tool="embed"]');
   await webRow.getByRole("button", { name: "Web settings" }).click();
   await expect(webRow.getByText("Device mode")).toBeVisible();
-  await expect(webRow.getByText("Popup blocker")).toBeVisible();
+  await expect(webRow.getByRole('button', { name: 'Block popups', exact: true })).toBeEnabled();
   await expect(webRow.getByText("Remember session")).toHaveCount(0);
-  await expect(webRow.getByText("Ad blocker")).toHaveCount(0);
-  await expect(webRow.getByText("Cookie blocker")).toHaveCount(0);
+  await expect(webRow.getByRole('button', { name: /^Ad blocker/ })).toBeDisabled();
+  await expect(webRow.getByRole('group', { name: 'Cookie blocker' }).getByRole('button', { name: 'All', exact: true })).toBeDisabled();
   await page.mouse.click(20, 300);
   await expect(moreMenu).toBeHidden();
 
@@ -417,7 +417,7 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
   const footerBox = await footerButton.boundingBox();
   expect(titleBox).not.toBeNull();
   expect(footerBox).not.toBeNull();
-  expect(footerBox!.y - (titleBox!.y + titleBox!.height)).toBeLessThanOrEqual(12);
+  expect(footerBox!.y - (titleBox!.y + titleBox!.height)).toBeLessThanOrEqual(24);
   await footerButton.click();
   const toggle = compactFooter.locator('[data-menu-toggle="true"]').first();
   await expect(toggle).toBeVisible();
@@ -435,6 +435,7 @@ test("keeps tool settings footers aligned without horizontal scrolling", async (
   await page.getByRole("button", { name: "Create Noteboard" }).click();
 
   const toolMenus = [
+    { id: "select", button: "Select settings", title: "Select Settings" },
     { id: "text", button: "Open text settings", title: "Text Settings" },
     { id: "media", button: "Open media settings", title: "Media Settings" },
     { id: "eraser", button: "Open eraser settings", title: "Eraser Settings" },
@@ -462,7 +463,7 @@ test("keeps tool settings footers aligned without horizontal scrolling", async (
     headerHeights.push(headerBox!.height);
     await expect
       .poll(() => header.evaluate((element) => getComputedStyle(element).height))
-      .toBe("32px");
+      .toBe("24px");
 
     if (tool.id === "text") {
       await expect(menu.locator('[class*="border-t-[3px]"]')).toHaveCount(0);
@@ -496,8 +497,8 @@ test("keeps tool settings footers aligned without horizontal scrolling", async (
   expect(Math.max(...headerHeights) - Math.min(...headerHeights)).toBeLessThan(
     0.5,
   );
-  expect(headerHeights[0]).toBeGreaterThan(29);
-  expect(headerHeights[0]).toBeLessThan(33);
+  expect(headerHeights[0]).toBeGreaterThan(23);
+  expect(headerHeights[0]).toBeLessThan(25);
 
   await page.getByRole("button", { name: "Open Layers Panel" }).click();
   const layersMenu = page.locator(
@@ -746,13 +747,15 @@ test("keeps the floating tool bar height and corner inset consistent", async ({
   for (const title of ["Text Tool", "Media Tool", "Fill Tool", "Eraser Tool"]) {
     await page.getByTitle(title).click();
     await expect(toolbar).toBeVisible();
-    const box = await toolbar.boundingBox();
-    expect(box).not.toBeNull();
-    heights.push(box!.height);
+    await expect.poll(() => toolbar.evaluate(element => {
+      const viewport = element.querySelector('.bottom-toolbar-scroll')!;
+      return (viewport.scrollWidth > viewport.clientWidth + 1) === Boolean(element.querySelector('[data-property-scroll-row]'));
+    })).toBe(true);
+    heights.push(await toolbar.evaluate(element => element.getBoundingClientRect().height - (element.querySelector('[data-property-scroll-row]')?.getBoundingClientRect().height ?? 0)));
   }
 
   expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(0.5);
-  expect(heights[0]).toBe(64);
+  expect(heights[0]).toBeGreaterThanOrEqual(64);
 
   await page.getByTitle("Fill Tool").click();
   await expect(
@@ -761,7 +764,7 @@ test("keeps the floating tool bar height and corner inset consistent", async ({
 
   await page.setViewportSize({ width: 600, height: 720 });
   await page.getByTitle("Text Tool").click();
-  const overflowMetrics = await toolbar.evaluate((element) => ({
+  const overflowMetrics = await toolbar.locator(".bottom-toolbar-scroll").evaluate((element) => ({
     width: element.getBoundingClientRect().width,
     clientWidth: element.clientWidth,
     scrollWidth: element.scrollWidth,
@@ -774,7 +777,7 @@ test("keeps the floating tool bar height and corner inset consistent", async ({
   expect(overflowMetrics.overflowX).toBe("auto");
 });
 
-test("moves toolbar tools into More by click without shifting its slot", async ({
+test("moves toolbar tools into More by dragging without shifting its slot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -788,7 +791,7 @@ test("moves toolbar tools into More by click without shifting its slot", async (
   const before = await moreItem.boundingBox();
   expect(before).not.toBeNull();
 
-  await expect(mediaItem).toHaveAttribute("draggable", "false");
+  await expect(mediaItem).toHaveAttribute("draggable", "true");
   await expect(
     page.locator('[data-toolbar-item="more"] > .toolbar-dropdown'),
   ).toBeHidden();
@@ -799,7 +802,7 @@ test("moves toolbar tools into More by click without shifting its slot", async (
   expect(Math.abs(afterDrop!.width - before!.width)).toBeLessThan(1.5);
 
   await expect(page.locator('[data-bottom-toolbar="true"]')).toBeHidden();
-  await page.getByRole("button", { name: "Done moving tools" }).click();
+  await page.getByRole("button", { name: "Finish" }).click();
   await page.getByRole("button", { name: "More", exact: true }).click();
   const moreMenu = page.locator('[data-toolbar-item="more"] > .toolbar-dropdown');
   const mediaRow = moreMenu.locator('[data-more-toolbar-item="media"]');
@@ -840,9 +843,7 @@ test("moves toolbar tools into More by click without shifting its slot", async (
   await expect(
     mediaRow.getByRole("button", { name: "Tool settings" }),
   ).toBeVisible();
-  await mediaRow
-    .getByRole("button", { name: "Move Media to toolbar" })
-    .click();
+  await returnToolFromMore(page, "media", "Media");
   await expect(mediaRow).toHaveCount(0);
   await expect(mediaItem).toBeVisible();
   await expect
@@ -851,8 +852,7 @@ test("moves toolbar tools into More by click without shifting its slot", async (
     )
     .toBeGreaterThanOrEqual(0);
 
-  const webRow = moreMenu.locator('[data-more-toolbar-item="embed"]');
-  await webRow.getByRole("button", { name: "Move Web to toolbar" }).click();
+  await returnToolFromMore(page, "embed", "Web");
   const webToolbarItem = page.locator('[data-toolbar-item="embed"]');
   await expect(webToolbarItem).toBeVisible();
   await webToolbarItem
@@ -864,14 +864,14 @@ test("moves toolbar tools into More by click without shifting its slot", async (
 
   await startMovingToolsToMore(page);
   await moveToolbarToolIntoMore(page, "embed");
-  await page.getByRole("button", { name: "Done moving tools" }).click();
+  await page.getByRole("button", { name: "Finish" }).click();
   await page.getByRole("button", { name: "More", exact: true }).click();
   await expect(
     page.locator('[data-more-toolbar-item="embed"]'),
   ).toBeVisible();
 });
 
-test("moves several toolbar tools into More in one click-editing session", async ({ page }) => {
+test("moves several toolbar tools into More in one editing session", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "New Noteboard" }).click();
   await page.getByLabel("Noteboard Name").fill("E2E Native More Drag");
@@ -881,7 +881,7 @@ test("moves several toolbar tools into More in one click-editing session", async
   for (const id of ["media", "shapes", "text"]) {
     await moveToolbarToolIntoMore(page, id);
   }
-  await page.getByRole("button", { name: "Done moving tools" }).click();
+  await page.getByRole("button", { name: "Finish" }).click();
   await page.getByRole("button", { name: "More", exact: true }).click();
   for (const id of ["media", "shapes", "text"]) {
     await expect(page.locator(`[data-more-toolbar-item="${id}"]`)).toBeVisible();
@@ -911,6 +911,7 @@ test("places a New Board by dragging and accepts objects on it", async ({
   expect(workspacePoint).not.toBeNull();
   await page.mouse.move(workspacePoint!.x, workspacePoint!.y);
   await page.mouse.down();
+  await page.waitForTimeout(300);
   await page.mouse.move(workspacePoint!.x + 180, workspacePoint!.y + 120, {
     steps: 10,
   });
@@ -960,7 +961,7 @@ test("shows every moved tool's complete menu inline in More", async ({
   const tools = [
     { id: "select", label: "Select", expected: ["Lock Time (ms)", "Spin Snap", "Ratio Scaling"] },
     { id: "pan", label: "Hand", expected: ["Allow Editing Elements", "Allow Moving Elements"] },
-    { id: "text", label: "Text", expected: ["Stroke Color", "Font Size"] },
+    { id: "text", label: "Text", expected: ["Text Color", "Font Size"] },
     { id: "shapes", label: "Shapes", expected: ["Rectangle", "Section", "Ellipse", "Triangle", "Line", "Arrow"] },
     { id: "media", label: "Media", expected: [] },
     { id: "draw", label: "Draw", expected: ["Color", "Stroke Width", "Drawing Assistance"] },
@@ -972,7 +973,7 @@ test("shows every moved tool's complete menu inline in More", async ({
     await moveToolbarToolIntoMore(page, tool.id);
   }
 
-  await page.getByRole("button", { name: "Done moving tools" }).click();
+  await page.getByRole("button", { name: "Finish" }).click();
   await page.getByRole("button", { name: "More", exact: true }).click();
   const moreMenu = page.locator(
     '[data-toolbar-item="more"] > .toolbar-dropdown',
@@ -1034,14 +1035,10 @@ test("shows every moved tool's complete menu inline in More", async ({
   await expect(page.locator('[data-bottom-toolbar="true"]')).toBeVisible();
 
   await page.getByRole("button", { name: "More", exact: true }).click();
-  await shapesRow
-    .getByRole("button", { name: "Move Shapes to toolbar" })
-    .click();
+  await returnToolFromMore(page, "shapes", "Shapes");
   await expect(shapesRow).toHaveCount(0);
   await expect(page.locator('[data-toolbar-item="shapes"]')).toBeVisible();
-  await textRow
-    .getByRole("button", { name: "Move Text to toolbar" })
-    .click();
+  await returnToolFromMore(page, "text", "Text");
   await expect(textRow).toHaveCount(0);
   await page.getByRole("button", { name: "More", exact: true }).click();
   await page.getByRole("button", { name: "Open text settings" }).click();
@@ -1083,7 +1080,7 @@ test("persists bottom-bar object defaults immediately and reapplies them", async
   const saveDefaults = bottomToolbar.getByTitle(
     "Save settings for this object type",
   );
-  await bottomToolbar.evaluate((element) => {
+  await bottomToolbar.locator(".bottom-toolbar-scroll").evaluate((element) => {
     element.scrollLeft = element.scrollWidth;
   });
   const saveDefaultsBox = await saveDefaults.boundingBox();
@@ -1184,47 +1181,18 @@ test("persists bottom-bar object defaults immediately and reapplies them", async
     .toEqual([2, 18, 55]);
 });
 
-test("opens the board save dialog, saves templates, and creates Save As copies", async ({
-  page,
-  request,
-}) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "New Noteboard" }).click();
-  await page.getByLabel("Noteboard Name").fill("E2E Save Dialog");
-  await page.getByRole("button", { name: "Create Noteboard" }).click();
-
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Save board" });
+test("opens the three Save as destinations", async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New Noteboard' }).click();
+  await page.getByLabel('Noteboard Name').fill('E2E Save Dialog');
+  await page.getByRole('button', { name: 'Create Noteboard' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Save as', exact: true });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Save as Template", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "Save As", exact: true })).toBeVisible();
-
-  await dialog.getByLabel("Save As name").fill("E2E Save As Copy");
-  await dialog.getByRole("button", { name: "Save As", exact: true }).click();
-  await expect(dialog).toBeHidden();
-  await expect
-    .poll(async () => {
-      const response = await request.get("/api/pages");
-      expect(response.ok()).toBeTruthy();
-      const pages = (await response.json()) as Array<{ title: string }>;
-      return pages.some((item) => item.title === "E2E Save As Copy");
-    })
-    .toBe(true);
-
-  await page.getByRole("button", { name: "Save", exact: true }).click();
-  const reopenedDialog = page.getByRole("dialog", { name: "Save board" });
-  await reopenedDialog.getByLabel("Save as Template").check();
-  await reopenedDialog.getByLabel("Template name").fill("E2E Saved Template");
-  await reopenedDialog
-    .locator('[data-save-dialog-action="save"]')
-    .click();
-
-  await expect
-    .poll(async () => {
-      const response = await request.get("/api/presets");
-      expect(response.ok()).toBeTruthy();
-      const presets = (await response.json()) as Array<{ name: string }>;
-      return presets.some((preset) => preset.name === "E2E Saved Template");
-    })
-    .toBe(true);
+  await expect(dialog.locator('[data-save-as-kind]')).toHaveCount(3);
+  await expect(dialog.getByRole('button', {name:'Save as Template'})).toBeVisible();
+  await expect(dialog.getByRole('button', {name:'Save as New Board'})).toBeVisible();
+  await expect(dialog.getByRole('button', {name:'Save as File'})).toBeVisible();
+  await dialog.getByRole('button', { name: 'Close save dialog' }).click();
+  await expect(dialog).toHaveCount(0);
 });

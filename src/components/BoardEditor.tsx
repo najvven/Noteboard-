@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   Page,
@@ -17,7 +17,6 @@ import {
 import {
   BUILT_IN_MORE_TOOL_IDS,
   canMoveToolbarItemToMore,
-  chooseToolbarReturnSlot,
   evaluateToolbarReorderPreview,
   getGeneralSettingsSections,
   isGeneralSettingsSection,
@@ -26,8 +25,22 @@ import {
   type GeneralSettingsSectionId,
   normalizeToolbarLayout,
 } from "../features/toolbar/model";
-import { normalizeWebUrl } from "../features/web/model";
-import { mergeLiveWebviewUrls } from "../features/web/webview-state";
+import { getBrowserWebSource, normalizeWebUrl } from "../features/web/model";
+import { createToolbarDragPreview, TOOLBAR_EDITING_CLASSES } from "../features/toolbar/drag-preview";
+import { mergeLiveWebviewUrls, readLiveWebviewUrl } from "../features/web/webview-state";
+import { colorTextRange, replaceTextEditorHtml } from "../features/board/rich-text-formatting";
+import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle } from "../features/board/board-surfaces";
+import { elementPolygon, getPlacementSection, getSectionClipPath } from "../features/board/section-clipping";
+import { getElementPermissions } from "../features/board/interaction-permissions";
+import ToolPropertiesBar from "./ToolPropertiesBar";
+import WebBlockingBadge from "./WebBlockingBadge";
+import NativeWebView from "./NativeWebView";
+import { WEB_DEVICE_PROFILES, normalizeWebDeviceMode } from "../../shared/web-device.js";
+import SegmentedControl from "./SegmentedControl";
+import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
+import { elementColors, defaultFillColor } from "../features/board/element-colors";
+import SaveAsDialog from "./SaveAsDialog";
+import { createSavedBoard, createSavedTemplate, type SaveAsKind } from "../features/board/save-as";
 import MenuSettingsBlock, { type PreviewMode } from "./MenuSettingsBlock";
 import {
   resolveToolMenuSettingsForId,
@@ -36,10 +49,11 @@ import {
   type ToolMenuSettings,
   type ToolMenuSettingsOverrides,
 } from "../features/tool-settings/model";
-import { readBoardPackageFile } from "../features/board/board-package";
+import { downloadBoardArchive, readBoardPackageFile } from "../features/board/board-package";
 import { placeBoardPackage } from "../features/board/board-package-placement";
-import { createElementHierarchy } from "../features/board/element-hierarchy";
+import { createElementHierarchy, type ElementHierarchy } from "../features/board/element-hierarchy";
 import { constrainProportionalSize } from "../features/board/resize-geometry";
+import { getTextScale, isScalableText, isTextScaling, displayedTextFontSize, resizedTextScale } from "../features/board/text-scaling";
 import {
   getMinimumAreaRect,
   hasMeaningfulAreaDrag,
@@ -64,6 +78,7 @@ import {
   configureWebSession as configureDesktopWebSession,
 } from "../lib/storage";
 import {
+  Move,
   ArrowLeft,
   Undo2,
   Redo2,
@@ -84,7 +99,6 @@ import {
   Repeat2,
   PenTool,
   ArrowUpRight,
-  ArrowDownToLine,
   Palette,
   Copy,
   ClipboardPaste,
@@ -95,7 +109,6 @@ import {
   MousePointer2,
   ChevronDown,
   ChevronRight,
-  CornerUpLeft,
   Lock,
   Unlock,
   Hand,
@@ -132,7 +145,6 @@ import {
   Shield,
   ShieldOff,
   Cookie,
-  Ban,
   RotateCcw,
   Ellipsis,
   Wrench,
@@ -233,7 +245,7 @@ function simplifyPoints(
 // Get SVG path from points (constant thickness, optional smoothing)
 function getSvgPathFromPoints(
   points: { x: number; y: number }[],
-  smooth: boolean = true,
+  smooth: boolean = false,
   strength: number = 5,
 ) {
   if (!points || points.length === 0) return "";
@@ -275,8 +287,8 @@ interface Props {
   onBack: () => void;
   onSave: (page: Page, options?: { keepalive?: boolean }) => void;
   /** Persist a duplicate board without replacing the currently open board. */
-  onSaveAs?: (page: Page) => void;
-  onSavePreset: (preset: Preset) => void;
+  onSaveAs?: (page: Page) => void | Promise<boolean>;
+  onSavePreset: (preset: Preset) => void | Promise<boolean>;
 }
 
 const QUICK_ADD_TOOLS: {
@@ -307,46 +319,18 @@ type ObjectDefaults = Partial<Record<ElementType, Partial<BoardElement>>>;
 type WebDeviceMode = "desktop" | "tablet" | "phone";
 type WebCookieBlockerMode = "off" | "third-party" | "all";
 
-const WEB_DEVICE_PROFILES: Record<
-  WebDeviceMode,
-  {
-    label: string;
-    userAgent: string;
-    defaultSize: { width: number; height: number };
-  }
-> = {
-  desktop: {
-    label: "Desktop",
-    defaultSize: { width: 560, height: 360 },
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  },
-  tablet: {
-    label: "Tablet",
-    defaultSize: { width: 520, height: 700 },
-    userAgent:
-      "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-  },
-  phone: {
-    label: "Phone",
-    defaultSize: { width: 390, height: 700 },
-    userAgent:
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-  },
-};
-
 const WEB_COOKIE_BLOCKER_LABELS: Record<WebCookieBlockerMode, string> = {
-  off: "Cookies",
-  "third-party": "3rd Cookies",
-  all: "No Cookies",
+  off: "Off",
+  "third-party": "Third-party",
+  all: "All",
 };
 
 const getWebSettings = (element: Partial<BoardElement>) => ({
   rememberSession: element.webRememberSession !== false,
-  deviceMode: (element.webDeviceMode || "desktop") as WebDeviceMode,
+  deviceMode: normalizeWebDeviceMode(element.webDeviceMode) as WebDeviceMode,
   adBlock: element.webAdBlock !== false,
   cookieBlocker: (element.webCookieBlocker || "off") as WebCookieBlockerMode,
-  popupBlocker: element.webPopupBlocker !== false,
+  popupBlocker: element.webPopupBlocker === true,
 });
 
 const getWebSessionId = (element: Partial<BoardElement>) =>
@@ -366,7 +350,7 @@ const getWebElementDefaults = (
   const settings = getWebSettings(source);
   return {
     mediaKind: "web",
-    webSessionId: source.webSessionId || generateId(),
+    webSessionId: generateId(),
     webRememberSession: settings.rememberSession,
     webDeviceMode: settings.deviceMode,
     webAdBlock: settings.adBlock,
@@ -380,7 +364,7 @@ const configureElectronWebSession = (
   topLevelUrl?: string,
 ) => {
   const settings = getWebSettings(element);
-  configureDesktopWebSession({
+  return configureDesktopWebSession({
     partition: getWebPartition(element),
     settings: {
       topLevelUrl: normalizeWebUrl(topLevelUrl || element.content),
@@ -388,7 +372,7 @@ const configureElectronWebSession = (
       cookieBlocker: settings.cookieBlocker,
       popupBlocker: settings.popupBlocker,
     },
-  }).catch(() => undefined);
+  }).catch(() => false);
 };
 
 const clearElectronWebSession = (element: Partial<BoardElement>) =>
@@ -697,7 +681,7 @@ function ColorPicker({
   const [activeSlot, setActiveSlot] = useState<number | null>(null);
 
   return (
-    <div className="flex items-center gap-1">
+    <div className="color-palette flex shrink-0 items-center gap-1.5">
       {baseColors.map((c) => (
         <button
           key={`base-${c}`}
@@ -714,7 +698,6 @@ function ColorPicker({
           style={{ backgroundColor: c }}
         />
       ))}
-      <div className="w-1 h-3 mx-0.5" />
       {Array.from({ length: customSlots }).map((_, i) => {
         const c = (customColors || ["", "", "", ""])[i];
         if (c) {
@@ -729,10 +712,7 @@ function ColorPicker({
               }}
               className={cn(
                 "w-4 h-4 rounded-full border-2 border-blue-500 flex items-center justify-center transition-transform hover:scale-110",
-                value === c && "ring-2 ring-blue-600 border-blue-600 z-10",
-                activeSlot === i &&
-                  value !== c &&
-                  "ring-2 ring-blue-500/50 border-transparent z-10",
+                value === c && !baseColors.includes(c) && customColors.indexOf(c) === i && "ring-2 ring-blue-600 border-blue-600 z-10",
               )}
               style={{ backgroundColor: c }}
             />
@@ -748,8 +728,7 @@ function ColorPicker({
             }}
             className={cn(
               "w-4 h-4 rounded-full border-[1.5px] border-blue-500 cursor-pointer transition-transform hover:scale-110",
-              activeSlot === i &&
-                "ring-2 ring-blue-600 border-blue-600 z-10",
+              activeSlot === i && "outline outline-1 outline-gray-400",
             )}
             style={{
               backgroundColor: "#f9fafb",
@@ -779,12 +758,12 @@ function ColorPicker({
           </div>
         </button>
       )}
-      <label className="w-4 h-4 rounded-full border-[1.5px] border-blue-500 flex items-center justify-center cursor-pointer hover:scale-110 overflow-hidden relative ml-0.5 group bg-white">
+      <label className="w-4 h-4 rounded-full border-[1.5px] border-blue-500 flex items-center justify-center cursor-pointer hover:scale-110 overflow-hidden relative group bg-white">
         <Plus className="w-3 h-3 text-black absolute pointer-events-none group-hover:text-gray-700" />
         <input
           type="color"
           className="opacity-0 w-[200%] h-[200%] absolute cursor-pointer"
-          value={value || "#000000"}
+          value={value && /^#[0-9a-f]{6}$/i.test(value) ? value : "#000000"}
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => {
             const col = e.target.value;
@@ -826,29 +805,6 @@ const getClippedRect = (
     maxX: pageDimensions.width,
     maxY: pageDimensions.height,
   };
-
-  // Handle section limits
-  const containerSections = elements.filter(
-    (el) =>
-      el.type === "section" &&
-      sx >= el.position.x &&
-      sx <= el.position.x + (el.size?.width || 0) &&
-      sy >= el.position.y &&
-      sy <= el.position.y + (el.size?.height || 0),
-  );
-  for (const sec of containerSections) {
-    if (sec.sectionCollision === "block" || sec.sectionCollision === "clip") {
-      const secMinX = sec.position.x;
-      const secMinY = sec.position.y;
-      const secMaxX = secMinX + (sec.size?.width || 0);
-      const secMaxY = secMinY + (sec.size?.height || 0);
-
-      if (cx < secMinX) cx = secMinX;
-      if (cy < secMinY) cy = secMinY;
-      if (cx > secMaxX) cx = secMaxX;
-      if (cy > secMaxY) cy = secMaxY;
-    }
-  }
 
   // Cage mode removed to allow placing elements on secondary boards or workspace, but restored conditionally
   if (
@@ -1304,6 +1260,7 @@ export default function BoardEditor({
   const [scrollZoomShortcut, setScrollZoomShortcut] = useState(
     initialEditorSettings.scrollZoomShortcut ?? "Ctrl",
   );
+  const [zoomToCursor, setZoomToCursor] = useState(initialEditorSettings.zoomToCursor ?? true);
   const [cutShortcut, setCutShortcut] = useState(
     initialEditorSettings.cutShortcut ?? "Ctrl+X",
   );
@@ -1431,6 +1388,8 @@ export default function BoardEditor({
     string | null
   >(null);
   const [objectDefaultsSaved, setObjectDefaultsSaved] = useState(false);
+  const [objectDuplicated, setObjectDuplicated] = useState(false);
+  const objectDuplicatedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const objectDefaultsSavedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -1453,8 +1412,13 @@ export default function BoardEditor({
     });
   }, [activeTool, objectDefaults]);
   const [toolbarCustomizeMode, setToolbarCustomizeMode] = useState(false);
-  const [moveToolsToMoreMode, setMoveToolsToMoreMode] = useState(false);
-  const toolbarEditingMode = toolbarCustomizeMode || moveToolsToMoreMode;
+  const [heldMoreTool, setHeldMoreTool] = useState<ToolbarItemId | null>(null);
+  const [returnDraggingId, setReturnDraggingId] = useState<ToolbarItemId | null>(null);
+  const returnDraggingIdRef = useRef<ToolbarItemId | null>(null);
+  const returnDragCleanupRef = useRef<(() => void) | null>(null);
+  const [moreDropActive, setMoreDropActive] = useState(false);
+  const toolbarEditingMode = toolbarCustomizeMode || returnDraggingId !== null;
+  useEffect(() => () => returnDragCleanupRef.current?.(), []);
   const [detachedMoreMenuId, setDetachedMoreMenuId] =
     useState<ToolbarItemId | null>(null);
   const [toolbarDragId, setToolbarDragId] = useState<ToolbarItemId | null>(
@@ -1518,7 +1482,7 @@ export default function BoardEditor({
   ) => {
     const startedAt = Date.now();
     const waitsForSelectionLock =
-      tool === "select" && isSelectionLockEnabled && selectionLockTime > 0;
+      ["select", "media", "embed", "board"].includes(tool) && isSelectionLockEnabled && selectionLockTime > 0;
     if (holdingTimerRef.current) {
       clearTimeout(holdingTimerRef.current);
       holdingTimerRef.current = null;
@@ -1542,7 +1506,7 @@ export default function BoardEditor({
         if (
           !gesture ||
           gesture.pointerId !== pointerId ||
-          gesture.tool !== "select"
+          gesture.tool !== tool
         ) {
           return;
         }
@@ -1577,8 +1541,7 @@ export default function BoardEditor({
       initialEditorSettings.toolbarLayout,
     ),
   );
-  // Toolbar arrangement is committed only by the explicit Save action.
-  const savedToolbarLayoutRef = useRef<ToolbarLayout>(toolbarLayout);
+
   const [showDrawDropdown, setShowDrawDropdown] = useState(false);
   const [showFillDropdown, setShowFillDropdown] = useState(false);
   const toggleExpandedMoreTool = (toolId: string) => {
@@ -1597,11 +1560,18 @@ export default function BoardEditor({
   const [zoom, setZoom] = useState(page.zoom ?? 1);
   const zoomRef = useRef(zoom);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  const pendingZoomScrollRef = useRef<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (pendingZoomScrollRef.current && containerRef.current) {
+      containerRef.current.scrollTo(pendingZoomScrollRef.current);
+      pendingZoomScrollRef.current = null;
+    }
+  }, [zoom]);
   const [showLayersPanel, setShowLayersPanel] = useState(false);
   const [respectLayerVisibility, setRespectLayerVisibility] = useState(true);
   const [mainBoardHidden] = useState(false);
   const [currentLayerView, setCurrentLayerView] = useState<string | null>(null);
-  const [movingElementId, setMovingElementId] = useState<string | null>(null);
+
   const [dragOverLayerId, setDragOverLayerId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
   const [, setLayerDropTarget] = useState<string | null>(null);
@@ -1621,8 +1591,10 @@ export default function BoardEditor({
     null,
   );
   const [isMainBoardSelected, setIsMainBoardSelected] = useState(false);
-  const [isBoardResizeEnabled, setIsBoardResizeEnabled] = useState(false);
-  const [isBoardMoveEnabled, setIsBoardMoveEnabled] = useState(false);
+  const [boardResizeEnabled, setIsBoardResizeEnabled] = useState(false);
+  const [boardMoveEnabled, setIsBoardMoveEnabled] = useState(false);
+  const isBoardResizeEnabled = boardResizeEnabled || (activeTool === 'board' && toolSettingsOverrides.grid?.allowEditing === true);
+  const isBoardMoveEnabled = boardMoveEnabled || (activeTool === 'board' && toolSettingsOverrides.grid?.allowMoving === true);
   const [highlightAll, setHighlightAll] = useState(false);
   const [, setContextMenuPos] = useState<{
     x: number;
@@ -1670,14 +1642,22 @@ export default function BoardEditor({
             node.nodeType === 3 ? node.parentElement : (node as HTMLElement);
           if (el && el.closest(".content-editable-text")) {
             setSavedRange(sel.getRangeAt(0).cloneRange());
-          }
+          } else if (!(document.activeElement instanceof HTMLInputElement && document.activeElement.type === "color")) { setSavedRange(null); }
         }
+      } else if (!(document.activeElement instanceof HTMLInputElement && document.activeElement.type === "color")) {
+        setSavedRange(null);
       }
     };
     document.addEventListener("selectionchange", handleSelChange);
     return () =>
       document.removeEventListener("selectionchange", handleSelChange);
   }, []);
+
+  useEffect(() => {
+    if (!TEXT_TYPES.includes(activeTool) && activeTool !== "sticky" && activeTool !== "link") {
+      setSavedRange(null); window.getSelection()?.removeAllRanges();
+    }
+  }, [activeTool, selectedId]);
 
   useEffect(() => {
     try {
@@ -1731,15 +1711,7 @@ export default function BoardEditor({
   const [workspaceGridThickness, setWorkspaceGridThickness] = useState(page.workspaceGridThickness ?? 1);
   const [workspaceGridSize, setWorkspaceGridSize] = useState(page.workspaceGridSize ?? 50);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
-  const [saveAsName, setSaveAsName] = useState(
-    `${page.title || "Untitled board"} copy`,
-  );
-  const [saveAsTemplate, setSaveAsTemplate] = useState(false);
-  const [saveTemplateName, setSaveTemplateName] = useState(
-    `${page.title || "Custom"} Template`,
-  );
   const [showSaveModal, setShowSaveModal] = useState(false);
-  const [saveState, setSaveState] = useState<"idle" | "saved">("idle");
   const [presetName, setPresetName] = useState(
     `${page.title || "Custom"} Preset`,
   );
@@ -1800,12 +1772,7 @@ export default function BoardEditor({
     return localX >= 0 && localX <= width && localY >= 0 && localY <= height;
   };
 
-  const getMainBoardBounds = () => ({
-    minX: 0,
-    minY: 0,
-    maxX: pageDimensions.width,
-    maxY: pageDimensions.height,
-  });
+  const mainSurface = createBoardSurface('main-board', { x: 0, y: 0 }, pageDimensions, boardColor, -9999);
 
   const isPointInsideBounds = (
     point: { x: number; y: number },
@@ -1816,25 +1783,12 @@ export default function BoardEditor({
     point.y >= bounds.minY &&
     point.y <= bounds.maxY;
 
-  const getBoardElementAtPoint = (point: { x: number; y: number }) =>
-    elementsRef.current
-      .filter((el) => el.type === "board" && !el.isHidden)
-      .sort((a, b) => compareElementStack(b, a, elementsRef.current))
-      .find((el) => elementContainsPoint(el, point));
+  const getBoardElementAtPoint = (point: { x: number; y: number }) => findBoardSurface(point, elementsRef.current.filter(element => elementHierarchy.isVisible(element.id, respectLayerVisibility)));
 
   const getInteractionBoundsAtPoint = (point: { x: number; y: number }) => {
-    const board = getBoardElementAtPoint(point);
-    if (board) {
-      return {
-        minX: board.position.x,
-        minY: board.position.y,
-        maxX: board.position.x + (board.size?.width || 0),
-        maxY: board.position.y + (board.size?.height || 0),
-      };
-    }
-
-    const mainBounds = getMainBoardBounds();
-    return isPointInsideBounds(point, mainBounds) ? mainBounds : null;
+    const board = getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]);
+    if (!board || (board.id !== 'main-board' && elementHierarchy.isLocked(board.id))) return null;
+    return boardSurfaceBounds(board);
   };
 
   const clampPointToBounds = (
@@ -1890,11 +1844,7 @@ export default function BoardEditor({
           src?: string;
         };
         const elementId = webview.dataset.webElementId;
-        const currentUrl =
-          webview.getURL?.() ||
-          webview.src ||
-          webview.getAttribute("src") ||
-          "";
+        const currentUrl = readLiveWebviewUrl(webview);
         const normalizedUrl = normalizeWebUrl(currentUrl);
 
         if (
@@ -1964,6 +1914,7 @@ export default function BoardEditor({
     overlapShortcut,
     cropShortcut,
     scrollZoomShortcut,
+    zoomToCursor,
     cutShortcut,
     proportionalScale,
     altResizeCrops,
@@ -2063,7 +2014,25 @@ export default function BoardEditor({
     e: KeyboardEvent | React.KeyboardEvent,
   ) => shortcut.trim() !== "" && getShortcutFromEvent(e) === shortcut;
 
-  // Zoom logic
+  const zoomAtPoint = (delta: number, clientX: number, clientY: number) => {
+    const container = containerRef.current;
+    if (!container) return;
+    const previousZoom = zoomRef.current;
+    const nextZoom = clampZoom(previousZoom + delta);
+    if (nextZoom === previousZoom) return;
+    const bounds = container.getBoundingClientRect();
+    const anchorX = zoomToCursor ? clientX - bounds.left - container.clientLeft : container.clientWidth / 2;
+    const anchorY = zoomToCursor ? clientY - bounds.top - container.clientTop : container.clientHeight / 2;
+    const scroll = pendingZoomScrollRef.current ?? { left: container.scrollLeft, top: container.scrollTop };
+    pendingZoomScrollRef.current = {
+      left: anchoredZoomScroll({ scroll: scroll.left, anchor: anchorX, boardOrigin: boardPosition.x, previousZoom, nextZoom }),
+      top: anchoredZoomScroll({ scroll: scroll.top, anchor: anchorY, boardOrigin: boardPosition.y, previousZoom, nextZoom }),
+    };
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
+  };
+
+  // Wheel gestures and the Zoom tool share the same anchor calculation.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -2075,18 +2044,14 @@ export default function BoardEditor({
 
       if (shouldZoom) {
         e.preventDefault();
-        setZoom((z) =>
-          Math.max(
-            0.1,
-            Math.min(5, z - e.deltaY * 0.0015 * scrollZoomSensitivity),
-          ),
-        );
+        const pixels = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? container.clientHeight : 1);
+        zoomAtPoint(-pixels * 0.0015 * scrollZoomSensitivity, e.clientX, e.clientY);
       }
     };
 
     container.addEventListener("wheel", handleWheel, { passive: false });
     return () => container.removeEventListener("wheel", handleWheel);
-  }, [scrollZoomSensitivity, scrollZoomShortcut]);
+  }, [scrollZoomSensitivity, scrollZoomShortcut, zoomToCursor, boardPosition]);
 
   const cycleOverlapMode = () => {
     setOverlapMode((current) =>
@@ -2427,7 +2392,7 @@ export default function BoardEditor({
     ) {
       return "text";
     }
-    if (SHAPE_TYPES.includes(tool)) return "shapes";
+    if (SHAPE_TYPES.includes(tool) || tool === "section") return "shapes";
     if (tool === "image" || tool === "media") return "media";
     if (tool === "board") return "grid";
     if (["embed", "link", "object-presets"].includes(tool)) return tool;
@@ -2550,6 +2515,10 @@ export default function BoardEditor({
           onKeepToolActiveChange={(value) =>
             updateToolMenuSetting(menuId, "keepToolActive", value)
           }
+          allowEditing={settings.allowEditing ?? false}
+          onAllowEditingChange={["text", "shapes", "media", "embed", "draw", "grid", "section", "fill"].includes(menuId) ? value => updateToolMenuSetting(menuId, "allowEditing", value) : undefined}
+          allowMoving={settings.allowMoving ?? false}
+          onAllowMovingChange={["text", "shapes", "media", "embed", "draw", "grid", "section", "fill"].includes(menuId) ? value => updateToolMenuSetting(menuId, "allowMoving", value) : undefined}
           previewMode={settings.previewMode}
           onPreviewModeChange={(mode: PreviewMode) =>
             updateToolMenuSetting(menuId, "previewMode", mode)
@@ -2566,7 +2535,7 @@ export default function BoardEditor({
   ) => (
     <div
       className={cn(
-        "flex shrink-0 items-center border-b-[3px] border-gray-400 bg-gray-100 px-3",
+        "tool-menu-title flex shrink-0 items-center border-b-[3px] border-gray-400 bg-gray-100 px-3",
         compact ? "py-1" : "py-2",
         inset,
       )}
@@ -2858,61 +2827,11 @@ export default function BoardEditor({
         </button>
         <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
           <span>Tool mode</span>
-          <div className="flex rounded-lg border border-gray-200 bg-gray-100 p-1 shadow-inner">
-            <button
-              type="button"
-              onClick={() => setKeepToolActive(false)}
-              className={cn(
-                "rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                !keepToolActive
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              Unfixed
-            </button>
-            <button
-              type="button"
-              onClick={() => setKeepToolActive(true)}
-              className={cn(
-                "rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                keepToolActive
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              Fixed
-            </button>
-          </div>
+          <SegmentedControl label="Tool mode" value={keepToolActive ? 'fixed' : 'unfixed'} onChange={value => setKeepToolActive(value === 'fixed')} options={[{ value: 'unfixed', label: 'Unfixed' }, { value: 'fixed', label: 'Fixed' }]} />
         </div>
         <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
           <span>Preview</span>
-          <div className="flex rounded-lg border border-gray-200 bg-gray-100 p-1 shadow-inner">
-            <button
-              type="button"
-              onClick={() => setPreviewMode("box")}
-              className={cn(
-                "rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                previewMode === "box"
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              Translucent
-            </button>
-            <button
-              type="button"
-              onClick={() => setPreviewMode("realistic")}
-              className={cn(
-                "rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                previewMode === "realistic"
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              True
-            </button>
-          </div>
+          <SegmentedControl label="Preview" value={previewMode} onChange={setPreviewMode} options={[{ value: 'box', label: 'Translucent' }, { value: 'realistic', label: 'True' }]} />
         </div>
         <div className="flex flex-col gap-1">
           <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
@@ -3090,70 +3009,6 @@ export default function BoardEditor({
           {renderShortcutRecorder("overlap", overlapShortcut, setOverlapShortcut)}
         </div>
       </div>
-      <button
-        type="button"
-        aria-pressed={isSelectionLockEnabled}
-        onClick={() => setIsSelectionLockEnabled((value) => !value)}
-        className="flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
-      >
-        <span>Selection lock</span>
-        {renderSwitch(isSelectionLockEnabled)}
-      </button>
-      <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-        <span>Lock time (ms)</span>
-        <input
-          type="number"
-          value={isSelectionLockEnabled ? selectionLockTimeInput : ""}
-          placeholder={isSelectionLockEnabled ? "250" : "Off"}
-          onChange={(event) => {
-            const rawValue = event.target.value;
-            setSelectionLockTimeInput(rawValue);
-            setSelectionLockTime(rawValue.trim() === "" ? 0 : parseInt(rawValue, 10) || 0);
-          }}
-          disabled={!isSelectionLockEnabled}
-          min="0"
-          step="100"
-          className="w-full rounded-md border-2 border-gray-300 bg-white px-2 py-1 text-xs font-semibold text-gray-800 outline-none transition-colors focus:border-blue-500 disabled:opacity-50"
-        />
-      </label>
-      {[
-        {
-          label: "Ratio scaling",
-          value: proportionalScale,
-          toggle: () => setProportionalScale((current) => !current),
-        },
-        {
-          label: "Auto-select after draw",
-          value: autoSelectOnPlace,
-          toggle: () => setAutoSelectOnPlace((current) => !current),
-        },
-        {
-          label: "Select switches to object tool",
-          value: autoToolOnSelect,
-          toggle: () => setAutoToolOnSelect((current) => !current),
-        },
-        {
-          label: "Allow editing elements",
-          value: allowEditing,
-          toggle: () => setAllowEditing((current) => !current),
-        },
-        {
-          label: "Allow moving elements in hand mode",
-          value: allowMovingElementsInPan,
-          toggle: () => setAllowMovingElementsInPan((current) => !current),
-        },
-      ].map((option) => (
-        <button
-          key={option.label}
-          type="button"
-          aria-pressed={option.value}
-          onClick={option.toggle}
-          className="flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
-        >
-          <span>{option.label}</span>
-          {renderSwitch(option.value)}
-        </button>
-      ))}
     </section>
   );
 
@@ -3200,6 +3055,12 @@ export default function BoardEditor({
           className="w-full accent-blue-500"
         />
       </label>
+      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
+        <span>Zoom towards</span>
+        <SegmentedControl label="Zoom towards" value={zoomToCursor ? 'cursor' : 'center'}
+          onChange={value => setZoomToCursor(value === 'cursor')}
+          options={[{ value: 'cursor', label: 'Cursor' }, { value: 'center', label: 'Center' }]} />
+      </div>
       <label className="flex flex-col gap-1 text-xs font-bold text-gray-700">
         <span>Click zoom strength</span>
         <input
@@ -3260,7 +3121,6 @@ export default function BoardEditor({
     const contentId = `general-settings-${id}`;
     const toggleSection = () => {
       if (isToolbarEditor) {
-        setMoveToolsToMoreMode(false);
         setToolbarCustomizeMode((value) => !value);
         return;
       }
@@ -3355,18 +3215,22 @@ export default function BoardEditor({
     </div>
   );
 
-  const renderTextToolSettings = () => (
+  const renderTextToolSettings = () => {
+    const selectedText = elements.find(element => element.id === selectedId && isScalableText(element.type));
+    const target = selectedText ?? pendingProps;
+    const update = (changes: Partial<BoardElement>) => selectedText
+      ? updateElement(selectedText.id, changes)
+      : setPendingProps(current => ({ ...current, ...changes }));
+    return (
     <div className="mt-0 pt-0">
       <div className="flex items-center justify-between text-xs font-semibold text-gray-500">
-        <span>Stroke Color</span>
+        <span>Text Color</span>
         <ColorPicker
-          value={pendingProps.borderColor || "#000000"}
-          onChange={(color) =>
-            setPendingProps((current) => ({ ...current, borderColor: color }))
-          }
-          customColors={customColors.border}
+          value={elements.find(element => element.id === selectedId)?.textColor || pendingProps.textColor || "#000000"}
+          onChange={changeTextColor}
+          customColors={customColors.text}
           onAddCustomColor={(color, index) =>
-            handleAddCustomColor(color, index, "border")
+            handleAddCustomColor(color, index, "text")
           }
         />
       </div>
@@ -3374,27 +3238,26 @@ export default function BoardEditor({
         <span className="text-xs font-semibold text-gray-500">Font Size</span>
         <input
           type="number"
-          value={pendingProps.fontSize ?? 16}
+          value={displayedTextFontSize(target, selectedText?.type ?? (isScalableText(activeTool) ? activeTool as ElementType : "text"))}
           min={6}
           max={200}
-          onChange={(event) =>
-            setPendingProps((current) => ({
-              ...current,
-              fontSize: Math.max(
-                6,
-                Math.min(200, parseInt(event.target.value, 10) || 16),
-              ),
-            }))
-          }
+          onChange={event => update({ fontSize: Math.max(6, Math.min(200, Number(event.target.value) || 16)) / getTextScale(target) })}
           className="mt-1 w-full bg-gray-50 border-[2px] border-gray-300 rounded-md px-2 py-1 text-xs font-semibold text-gray-800 outline-none focus:border-blue-500 transition-colors"
         />
       </div>
+      <button type="button" aria-pressed={target.textScaling === true}
+        onPointerDown={event => event.preventDefault()}
+        onClick={() => update({ textScaling: target.textScaling !== true })}
+        className="mt-2 flex w-full items-center justify-between text-xs font-semibold text-gray-500">
+        <span>Text scaling</span>{renderSwitch(target.textScaling === true)}
+      </button>
     </div>
   );
+  };
 
   const renderSelectToolSettings = () => (
     <>
-      <div className="flex flex-col gap-1.5 pt-1.5">
+      <div className="flex flex-col gap-1.5">
         <button
           type="button"
           data-select-setting-toggle="lock-time"
@@ -3572,6 +3435,7 @@ export default function BoardEditor({
   };
 
   const renderDrawToolSettings = () => {
+    const selectedDraw = elementsRef.current.find(element => element.id === selectedId && element.type === 'draw');
     const drawingAssistance = pendingProps.isSmooth === true;
     const lineSmoothing = pendingProps.drawingAssistSmooth !== false;
     const shapeGuesser = pendingProps.drawingAssistGuess === true;
@@ -3580,9 +3444,9 @@ export default function BoardEditor({
         <div className="flex items-center justify-between text-xs font-semibold text-gray-500 mb-1">
           <span>Color</span>
           <ColorPicker
-            value={pendingProps.borderColor || "#000000"}
+            value={selectedDraw?.borderColor || pendingProps.borderColor || "#000000"}
             onChange={(color) =>
-              updatePendingToolProps({ borderColor: color })
+              selectedDraw ? updateElement(selectedDraw.id, { borderColor: color }) : updatePendingToolProps({ borderColor: color })
             }
             customColors={customColors.border}
             onAddCustomColor={(color, index) =>
@@ -3641,9 +3505,9 @@ export default function BoardEditor({
                 {renderSwitch(lineSmoothing)}
               </button>
               {lineSmoothing && (
-                <label className="flex flex-col gap-1 pl-2 border-l-2 border-gray-100 ml-1 mb-1 mt-1">
-                  <span className="flex items-center justify-between text-[10px] font-semibold text-gray-400">
-                    <span>Smoothing Strength</span>
+                <label className="flex flex-col gap-2 my-2">
+                  <span className="flex items-center justify-between text-xs font-semibold text-gray-500">
+                    <span>Strength</span>
                     <span className="text-gray-500">
                       {pendingProps.drawingAssistSmoothStrength ?? 5}/10
                     </span>
@@ -3676,14 +3540,14 @@ export default function BoardEditor({
                 }
               >
                 <span className="text-xs font-medium text-gray-600 select-none">
-                  Shape Guesser
+                  Shape Guessing
                 </span>
                 {renderSwitch(shapeGuesser)}
               </button>
               {shapeGuesser && (
                 <label className="flex flex-col gap-1 pl-2 border-l-2 border-gray-100 ml-1 mt-1">
-                  <span className="flex items-center justify-between text-[10px] font-semibold text-gray-400">
-                    <span>Guesser Accuracy</span>
+                  <span className="flex items-center justify-between text-xs font-semibold text-gray-500">
+                    <span>Strength</span>
                     <span className="text-gray-500">
                       {pendingProps.drawingAssistStrength ?? 5}/10
                     </span>
@@ -3747,13 +3611,8 @@ export default function BoardEditor({
       >
         <Plus className="h-3.5 w-3.5" /> Add preset
       </button>
-      <div className="mt-2 flex flex-col gap-1">
-        {objectPresets.length === 0 ? (
-          <span className="px-1 text-[10px] font-semibold text-gray-400">
-            No presets yet
-          </span>
-        ) : (
-          objectPresets.map((preset) => (
+      {objectPresets.length > 0 && <div className="flex flex-col gap-1">
+        {objectPresets.map((preset) => (
             <div
               key={`inline-preset-${preset.id}`}
               className="flex items-center gap-1 rounded-md bg-white px-1.5 py-1"
@@ -3808,43 +3667,41 @@ export default function BoardEditor({
                 <Trash2 className="h-3 w-3" />
               </button>
             </div>
-          ))
-        )}
-      </div>
+          ))}
+      </div>}
       {renderAlwaysOnTopControl("object-presets")}
     </>
   );
 
-  const renderOverflowToolSettings = (id: ToolbarItemId) => {
+  const renderOverflowToolSettings = (id: ToolbarItemId, inMore = false) => {
+    const footer = (menuId: string) => renderMenuSettingsBlock(menuId, inMore);
     switch (id) {
       case "select":
         return (
           <div className="flex flex-col gap-3">
             {renderSelectToolSettings()}
-            {renderMenuSettingsBlock("select")}
+            {footer("select")}
           </div>
         );
       case "pan":
         return (
           <div className="flex flex-col gap-3">
             {renderPanToolSettings()}
-            {renderMenuSettingsBlock("pan")}
+            {footer("pan")}
           </div>
         );
       case "text":
         return (
           <div className="flex flex-col gap-3">
             {renderTextToolSettings()}
-            {renderMenuSettingsBlock("text")}
+            {footer("text")}
           </div>
         );
       case "shapes":
         return (
           <div className="flex flex-col gap-1">
             {renderShapeToolSettings(true)}
-            <div className="px-2 pb-1">
-              {renderMenuSettingsBlock("shapes")}
-            </div>
+            {footer("shapes")}
           </div>
         );
       case "media":
@@ -3853,48 +3710,35 @@ export default function BoardEditor({
         return (
           <div className="flex flex-col gap-3">
             {renderDrawToolSettings()}
-            {renderMenuSettingsBlock("draw")}
+            {footer("draw")}
           </div>
         );
       case "fill":
         return (
           <div className="flex flex-col gap-3">
             {renderFillToolSettings()}
-            {renderMenuSettingsBlock("fill")}
+            {footer("fill")}
           </div>
         );
       case "eraser":
         return (
           <div className="flex flex-col gap-3">
             {renderEraserToolSettings()}
-            {renderMenuSettingsBlock("eraser")}
+            {footer("eraser")}
           </div>
         );
       case "embed":
         return (
           <div className="flex flex-col gap-3">
-            <div className="px-1 text-[10px] font-semibold text-gray-500">
-              Drag on the board to place a Web area.
-            </div>
             {renderWebToolSettings()}
-            {renderMenuSettingsBlock("embed")}
+            {footer("embed")}
           </div>
         );
       case "board":
-        return (
-          <div className="flex flex-col gap-3">
-            <div className="px-1 text-[10px] font-semibold text-gray-500">
-              Drag on the background to place a board.
-            </div>
-            {renderMenuSettingsBlock("grid")}
-          </div>
-        );
+        return renderMenuSettingsBlock("grid", true);
       case "link":
         return (
           <div className="flex flex-col gap-3">
-            <div className="px-1 text-[10px] font-semibold text-gray-500">
-              Select an object, then configure its links.
-            </div>
             {renderAlwaysOnTopControl("link")}
           </div>
         );
@@ -3910,65 +3754,23 @@ export default function BoardEditor({
   };
 
   const renderEraserToolSettings = () => (
-    <div className="flex flex-col gap-3 border-t-[3px] border-gray-400 pt-3 mt-1">
-      <div>
-        <span className="text-xs font-semibold text-gray-500">Mode</span>
-        <div className="mt-1 flex gap-1 bg-gray-100 p-1 rounded-lg border border-gray-200 shadow-inner">
-          {(["element", "partial"] as const).map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              onClick={() => setEraserMode(mode)}
-              className={cn(
-                "flex-1 px-2 py-1.5 text-[10px] font-bold uppercase rounded-md tracking-wider transition-colors",
-                eraserMode === mode
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:text-black hover:bg-gray-200/50",
-              )}
-            >
-              {mode === "element" ? "Whole" : "Partial"}
-            </button>
-          ))}
-        </div>
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
+        <span>Mode</span>
+        <SegmentedControl label="Eraser mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
       </div>
-      <div className="flex items-center justify-between text-xs font-semibold text-gray-500">
-        <span>Size</span>
-        <span className="text-black bg-gray-100 rounded px-1">{eraserSize}px</span>
-      </div>
-      <input
-        type="range"
-        min={1}
-        max={80}
-        value={eraserSize}
-        onChange={(event) =>
-          setEraserSize(parseInt(event.target.value, 10) || 20)
-        }
-        className="w-full accent-blue-500"
-      />
-      <div>
-        <span className="text-xs font-semibold text-gray-500">Shape</span>
-        <div className="mt-1 flex gap-1 bg-gray-100 p-1 rounded-lg border border-gray-200 shadow-inner">
-          {(["round", "square"] as const).map((shape) => (
-            <button
-              key={shape}
-              type="button"
-              onClick={() => setEraserShape(shape)}
-              className={cn(
-                "flex-1 px-2 py-1.5 text-[10px] font-bold uppercase rounded-md tracking-wider capitalize transition-colors",
-                eraserShape === shape
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:text-black hover:bg-gray-200/50",
-              )}
-            >
-              {shape}
-            </button>
-          ))}
-        </div>
+      <div className="flex items-center justify-between text-xs font-semibold text-gray-500"><span>Size</span><span className="text-black bg-gray-100 rounded px-1">{eraserSize}px</span></div>
+      <input type="range" min={1} max={80} value={eraserSize} onChange={event => setEraserSize(parseInt(event.target.value, 10) || 20)} className="w-full accent-blue-500" />
+      <div className="flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
+        <span>Shape</span>
+        <SegmentedControl label="Eraser shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} />
       </div>
     </div>
   );
 
   const updatePendingWebSettings = (updates: Partial<BoardElement>) => {
+    const selectedWeb = elementsRef.current.find(element => element.id === selectedId && element.type === 'embed');
+    if (selectedWeb) { updateElement(selectedWeb.id, updates); return; }
     setPendingProps((current) => ({
       ...current,
       webSessionId: current.webSessionId || generateId(),
@@ -3977,9 +3779,10 @@ export default function BoardEditor({
   };
 
   const renderWebToolSettings = () => {
-    const settings = getWebSettings(pendingProps);
+    const selectedWeb = elementsRef.current.find(element => element.id === selectedId && element.type === 'embed');
+    const settings = getWebSettings(selectedWeb ?? pendingProps);
     return (
-      <div className="flex flex-col gap-2 border-t border-gray-200 pt-2">
+      <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider text-gray-500">
           <span>Device mode</span>
           <div className="flex gap-1">
@@ -3988,7 +3791,7 @@ export default function BoardEditor({
                 key={mode}
                 type="button"
                 aria-pressed={settings.deviceMode === mode}
-                onClick={() => updatePendingWebSettings({ webDeviceMode: mode })}
+                onClick={() => updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } })}
                 className={cn(
                   "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors",
                   settings.deviceMode === mode
@@ -4001,6 +3804,11 @@ export default function BoardEditor({
             ))}
           </div>
         </div>
+        <button type="button" aria-pressed={settings.popupBlocker} onClick={() => updatePendingWebSettings({ webPopupBlocker: !settings.popupBlocker })}
+          className="flex items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-600 hover:bg-white">
+          <span>Block popups</span>{renderSwitch(settings.popupBlocker)}
+        </button>
+        <>
         {desktopWebRuntime && (
           <>
             <button
@@ -4025,13 +3833,17 @@ export default function BoardEditor({
                 {settings.rememberSession ? "On" : "Off"}
               </span>
             </button>
+            </>
+        )}
             <button
               type="button"
               aria-pressed={settings.adBlock}
+              disabled={!desktopWebRuntime}
+              title={!desktopWebRuntime ? 'Available in the desktop app' : 'Block known ad and tracking requests'}
               onClick={() =>
                 updatePendingWebSettings({ webAdBlock: !settings.adBlock })
               }
-              className="flex items-center justify-between rounded-md px-1 py-1 text-left text-[11px] font-bold text-gray-600 hover:bg-white"
+              className="flex items-center justify-between rounded-md px-1 py-1 text-left text-[11px] font-bold text-gray-600 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <span>Ad blocker</span>
               <span
@@ -4042,10 +3854,10 @@ export default function BoardEditor({
                     : "bg-gray-100 text-gray-500",
                 )}
               >
-                {settings.adBlock ? "On" : "Off"}
+                {settings.adBlock && desktopWebRuntime && selectedWeb ? <WebBlockingBadge partition={getWebPartition(selectedWeb)} /> : settings.adBlock ? "On" : "Off"}
               </span>
             </button>
-            <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-gray-600">
+            <div role="group" aria-label="Cookie blocker" title={!desktopWebRuntime ? 'Available in the desktop app' : 'Block cookie transmission and storage'} className="flex items-center justify-between gap-2 text-[11px] font-bold text-gray-600">
               <span>Cookie blocker</span>
               <div className="flex gap-1">
                 {(["off", "third-party", "all"] as WebCookieBlockerMode[]).map(
@@ -4053,12 +3865,13 @@ export default function BoardEditor({
                     <button
                       key={mode}
                       type="button"
+                      disabled={!desktopWebRuntime}
                       aria-pressed={settings.cookieBlocker === mode}
                       onClick={() =>
                         updatePendingWebSettings({ webCookieBlocker: mode })
                       }
                       className={cn(
-                        "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors",
+                        "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                         settings.cookieBlocker === mode
                           ? "border-blue-300 bg-blue-50 text-blue-700"
                           : "border-gray-200 bg-white text-gray-500 hover:bg-gray-100",
@@ -4070,28 +3883,7 @@ export default function BoardEditor({
                 )}
               </div>
             </div>
-          </>
-        )}
-        <button
-          type="button"
-          aria-pressed={settings.popupBlocker}
-          onClick={() =>
-            updatePendingWebSettings({ webPopupBlocker: !settings.popupBlocker })
-          }
-          className="flex items-center justify-between rounded-md px-1 py-1 text-left text-[11px] font-bold text-gray-600 hover:bg-white"
-        >
-          <span>Popup blocker</span>
-          <span
-            className={cn(
-              "rounded-md px-1.5 py-0.5 text-[9px] uppercase tracking-wider",
-              settings.popupBlocker
-                ? "bg-blue-50 text-blue-700"
-                : "bg-gray-100 text-gray-500",
-            )}
-          >
-            {settings.popupBlocker ? "On" : "Off"}
-          </span>
-        </button>
+        </>
       </div>
     );
   };
@@ -4106,6 +3898,7 @@ export default function BoardEditor({
       if (objectDefaultsSavedTimerRef.current) {
         clearTimeout(objectDefaultsSavedTimerRef.current);
       }
+      if (objectDuplicatedTimerRef.current) clearTimeout(objectDuplicatedTimerRef.current);
     };
   }, []);
 
@@ -4154,7 +3947,7 @@ export default function BoardEditor({
     isGeneralSettingsSection(id) && toolbarLayout.general.includes(id);
 
   const isToolbarItemHidden = (id: ToolbarItemId) =>
-    isToolbarItemInMore(id) || isToolbarItemInGeneral(id);
+    (isToolbarItemInMore(id) && returnDraggingIdRef.current !== id) || isToolbarItemInGeneral(id);
 
   const toolbarVisibleOrder = toolbarDisplayOrder.filter(
     (id) => !isToolbarItemHidden(id),
@@ -4281,6 +4074,7 @@ export default function BoardEditor({
       safeTargetSlot,
       dragId,
     );
+    if (targetId === "more" && dragId !== "more") return;
     const dragStart = baseSlots[dragId] ?? 0;
     const desiredSlots = {
       ...baseSlots,
@@ -4413,63 +4207,78 @@ export default function BoardEditor({
     return true;
   };
 
-  const returnToolbarItemFromMore = (itemId: ToolbarItemId) => {
-    if (!canMoveToolbarItemToMore(itemId) || isGeneralSettingsSection(itemId)) {
-      return;
-    }
-    setToolbarLayout((current) => {
-      const normalized = normalizeToolbarLayout(current);
-      if (!normalized.more.includes(itemId)) return normalized;
-      const nextMore = normalized.more.filter((id) => id !== itemId);
-      const generalSections = new Set(normalized.general);
-      const visibleWithoutReturnedItem = normalized.order.filter(
-        (id) =>
-          id !== itemId &&
-          !nextMore.includes(id) &&
-          !generalSections.has(id as GeneralSettingsSectionId),
-      );
-      const packed = packToolbarSlots(
-        toolbarSlotCount,
-        visibleWithoutReturnedItem,
-        normalized.slots ||
-          getDefaultToolbarSlots(toolbarSlotCount, visibleWithoutReturnedItem),
-      );
-      const target = chooseToolbarReturnSlot({
-        slotCount: toolbarSlotCount,
-        itemSlots: toolbarItemSlots(itemId),
-        occupiedSlots: visibleWithoutReturnedItem.map((id) => ({
-          start: packed[id] ?? 0,
-          span: toolbarItemSlots(id),
-        })),
-      });
-      const orderWithoutReturnedItem = normalized.order.filter(
-        (id) => id !== itemId,
-      );
-      return {
-        ...normalized,
-        more: nextMore,
-        order:
-          target.side === "left"
-            ? [itemId, ...orderWithoutReturnedItem]
-            : [...orderWithoutReturnedItem, itemId],
-        slots: {
-          ...normalized.slots,
-          ...packed,
-          [itemId]: target.slot,
-        },
-      };
-    });
-    setExpandedMoreTools((current) => {
-      if (!current.has(itemId)) return current;
-      const next = new Set(current);
-      next.delete(itemId);
-      expandedMoreToolsRef.current = next;
-      return next;
-    });
+  const startMoreToolDrag = (event: React.PointerEvent<HTMLElement>, itemId: ToolbarItemId) => {
+    if (event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    returnDragCleanupRef.current?.();
+    setHeldMoreTool(itemId);
+    const captureOwner = event.currentTarget.closest("header") as HTMLElement ?? event.currentTarget;
+    captureOwner.setPointerCapture(event.pointerId);
+    const source = document.querySelector<HTMLElement>(`[data-toolbar-item="${itemId}"]`);
+    let ghost: HTMLElement | null = null;
+    const menu = event.currentTarget.closest('.toolbar-dropdown')!.getBoundingClientRect();
+    const pointerId = event.pointerId;
+    let detached = false;
+    const isInside = (x: number, y: number, rect: DOMRect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      returnDragCleanupRef.current = null;
+      returnDraggingIdRef.current = null;
+      setReturnDraggingId(null); setHeldMoreTool(null); setToolbarDragId(null);
+      toolbarDragIdRef.current = null;
+      document.body.style.userSelect = '';
+      ghost?.remove();
+      if (captureOwner.hasPointerCapture(pointerId)) captureOwner.releasePointerCapture(pointerId);
+      window.removeEventListener('blur', blur);
+    };
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return;
+      if (!detached && !isInside(next.clientX, next.clientY, menu)) {
+        detached = true;
+        returnDraggingIdRef.current = itemId;
+        setReturnDraggingId(itemId); setToolbarCustomizeMode(false); setShowMoreToolsDropdown(false);
+        toolbarDragIdRef.current = itemId; setToolbarDragId(itemId);
+        document.body.style.userSelect = 'none';
+        if (source) {
+          ghost = createToolbarDragPreview(source, toolbarItemScale);
+          ghost.setAttribute('data-more-drag-ghost', 'true');
+          ghost.style.opacity = '.65';
+        }
+      }
+      if (!detached) return;
+      if (ghost) {
+        const bounds = ghost.getBoundingClientRect();
+        ghost.style.left = (next.clientX - bounds.width / 2) + 'px';
+        ghost.style.top = (next.clientY - bounds.height / 2) + 'px';
+      }
+      const zone = document.querySelector<HTMLElement>('[data-toolbar-surface="true"]');
+      if (zone && isInside(next.clientX, next.clientY, zone.getBoundingClientRect())) previewToolbarItemAtSlot(itemId, getToolbarDropIndexFromPointer(next.clientX, zone, itemId));
+    };
+    const up = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return;
+      const zone = document.querySelector<HTMLElement>('[data-toolbar-surface="true"]');
+      if (detached && zone && isInside(next.clientX, next.clientY, zone.getBoundingClientRect())) {
+        previewToolbarItemAtSlot(itemId, getToolbarDropIndexFromPointer(next.clientX, zone, itemId));
+        const order = toolbarPreviewOrderRef.current;
+        const slots = toolbarPreviewSlotsRef.current;
+        setToolbarLayout(current => ({ ...current, more: current.more.filter(id => id !== itemId), order: order ?? current.order, slots: slots ?? current.slots }));
+      }
+      cancelToolbarPreview(); cleanup();
+    };
+    const cancel = (next: PointerEvent) => { if (next.pointerId === pointerId) { cancelToolbarPreview(); cleanup(); } };
+    const blur = () => { cancelToolbarPreview(); cleanup(); };
+    window.addEventListener('blur', blur);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    returnDragCleanupRef.current = cleanup;
   };
 
   const toolbarItemProps = (id: ToolbarItemId) => ({
     "data-toolbar-item": id,
+    "data-toolbar-drag-suppressed": moreDropActive && toolbarDragId === id ? "true" : undefined,
     "data-toolbar-slot-start": toolbarItemSlotStart(id),
     "data-toolbar-slot-span": toolbarItemSlots(id),
     style: {
@@ -4486,14 +4295,6 @@ export default function BoardEditor({
     } as React.CSSProperties,
     draggable: toolbarCustomizeMode && !isToolbarItemHidden(id),
     onClickCapture: (event: React.MouseEvent<HTMLElement>) => {
-      if (moveToolsToMoreMode) {
-        event.preventDefault();
-        event.stopPropagation();
-        if (id !== "more" && canMoveToolbarItemToMore(id)) {
-          moveToolbarItemToMore(id);
-        }
-        return;
-      }
       if (!toolbarCustomizeMode) return;
       event.preventDefault();
       event.stopPropagation();
@@ -4518,18 +4319,8 @@ export default function BoardEditor({
       setToolbarDragId(id);
       e.dataTransfer.setData("toolbar-item", id);
       e.dataTransfer.effectAllowed = "move";
-      const rect = e.currentTarget.getBoundingClientRect();
-      const dragPreview = e.currentTarget.cloneNode(true) as HTMLElement;
-      dragPreview.style.position = "fixed";
-      dragPreview.style.left = "-10000px";
-      dragPreview.style.top = "0";
-      dragPreview.style.width = `${rect.width}px`;
-      dragPreview.style.height = `${rect.height}px`;
-      dragPreview.style.opacity = "1";
-      dragPreview.style.pointerEvents = "none";
-      dragPreview.style.boxShadow = "0 14px 28px rgba(15, 23, 42, 0.2)";
-      dragPreview.style.transform = "scale(1.03)";
-      document.body.appendChild(dragPreview);
+      const dragPreview = createToolbarDragPreview(e.currentTarget, toolbarItemScale);
+      const rect = dragPreview.getBoundingClientRect();
       e.dataTransfer.setDragImage(
         dragPreview,
         rect.width / 2,
@@ -4557,6 +4348,7 @@ export default function BoardEditor({
       }
     },
     onDragEnd: () => {
+      setMoreDropActive(false);
       if (!toolbarDropCommittedRef.current) {
         cancelToolbarPreview();
       }
@@ -4590,16 +4382,11 @@ export default function BoardEditor({
   const toolbarItemClass = (id: ToolbarItemId, className: string) =>
     cn(
       "flex h-[34px] min-h-[34px] min-w-0 items-center justify-center gap-0 [&>button]:h-8 [&>button]:min-w-8 [&>button]:py-0",
-      toolbarEditingMode &&
-        "rounded-md border border-gray-400/60 bg-gray-200/25 [&>button]:justify-center",
+      toolbarEditingMode && TOOLBAR_EDITING_CLASSES,
       className,
       toolbarCustomizeMode &&
         !isToolbarItemHidden(id) &&
         "cursor-grab active:cursor-grabbing",
-      moveToolsToMoreMode &&
-        !isToolbarItemHidden(id) &&
-        canMoveToolbarItemToMore(id) &&
-        "cursor-pointer hover:border-blue-500 hover:bg-blue-50/70 hover:ring-2 hover:ring-blue-300/70",
       toolbarDragId === id &&
         "opacity-100 border-gray-500/80 bg-gray-300/50 ring-2 ring-gray-400/60 shadow-sm",
     );
@@ -4716,7 +4503,7 @@ export default function BoardEditor({
               : `${horizontalCorrection * inverseScale}px`;
           const availableHeight = Math.max(120, window.innerHeight - rect.top - 8);
           menu.style.maxHeight = `${availableHeight}px`;
-          menu.style.overflowY = "auto";
+          menu.style.overflowY = menu.querySelector(":scope > .menu-scroll-viewport") ? "hidden" : "auto";
         });
       });
     };
@@ -4749,6 +4536,16 @@ export default function BoardEditor({
   const cancelAreaPlacementDrag = () => {
     clearAreaGesture();
   };
+
+  const creationParentId = (point: { x: number; y: number }) =>
+    getPlacementSection(point, elementsRef.current)?.id ?? targetLayerId ?? undefined;
+
+  const creationClip = (rect: { x: number; y: number; w: number; h: number }, rotation = 0) => getSectionClipPath({
+    id: 'creation-preview', type: activeTool as ElementType, content: '',
+    position: { x: rect.x, y: rect.y }, size: { width: rect.w, height: rect.h }, rotation,
+    parentId: creationParentId(areaGestureRef.current?.start ?? { x: rect.x, y: rect.y }),
+    zIndex: Math.max(0, ...elementsRef.current.map(e => e.zIndex)) + 1,
+  }, elementsRef.current);
 
   const handleAddRegionElement = (
     type: ElementType,
@@ -4815,7 +4612,7 @@ export default function BoardEditor({
     const newElement: BoardElement = {
       id: generateId(),
       type,
-      parentId: targetLayerId ?? undefined,
+      parentId: type === "board" ? undefined : creationParentId(areaGestureRef.current?.start ?? { x: finalRect.x, y: finalRect.y }),
       position: { x: finalRect.x, y: finalRect.y },
       content: defaultContent,
       color:
@@ -4826,7 +4623,7 @@ export default function BoardEditor({
             : TEXT_TYPES.includes(type)
               ? "transparent"
               : "#ffffff",
-      sectionCollision: type === "section" ? "none" : undefined,
+      sectionCollision: type === "section" ? "clip" : undefined,
       borderWidth:
         type === "triangle"
           ? pendingProps.borderWidth !== undefined
@@ -4846,7 +4643,10 @@ export default function BoardEditor({
       ...extraProps,
     };
 
-    pushElements([...latestElements, newElement]);
+    const placedElement = type === 'board'
+      ? createBoardSurface(newElement.id, newElement.position, newElement.size!, newElement.color, newElement.zIndex)
+      : newElement;
+    pushElements([...latestElements, placedElement]);
 
     finishToolUse(type);
 
@@ -4871,6 +4671,45 @@ export default function BoardEditor({
       next[type][index] = color;
       return next;
     });
+  };
+
+  const changeTextColor = (color: string) => {
+    const selected = elementsRef.current.find(element => element.id === selectedId);
+    const editor = selected ? document.querySelector<HTMLElement>(`[data-board-element-editor-id="${selected.id}"]`) : null;
+    const live = window.getSelection();
+    const range = live?.rangeCount ? live.getRangeAt(0) : null;
+    if (selected && editor?.isContentEditable && elementColors(selected.type).text) {
+      const colorPickerFocused = document.activeElement instanceof HTMLInputElement && document.activeElement.type === "color";
+      const candidate = range && editor.contains(range.commonAncestorContainer) ? range : colorPickerFocused ? savedRange : null;
+      const restoreEditingFocus = (selectionRange: Range | null) => {
+        if (!selectionRange || !editor.contains(selectionRange.commonAncestorContainer)) return;
+        editor.focus({ preventScroll: true });
+        live?.removeAllRanges(); live?.addRange(selectionRange);
+        setSavedRange(selectionRange.cloneRange());
+      };
+      const usableRange = candidate && !candidate.collapsed && editor.contains(candidate.commonAncestorContainer) ? candidate : null;
+      if (usableRange) {
+        const colored = colorTextRange(editor, usableRange, color);
+        if (colored) {
+          restoreEditingFocus(colored);
+          const content = sanitizeRichText(editor.innerHTML);
+          replaceTextEditorHtml(editor, content);
+          updateElement(selected.id, { content });
+          return;
+        }
+      }
+      editor.querySelectorAll<HTMLElement>('[style]').forEach(node => node.style.removeProperty('color'));
+      restoreEditingFocus(candidate);
+      const content = sanitizeRichText(editor.innerHTML);
+      replaceTextEditorHtml(editor, content);
+      updateElement(selected.id, { textColor: color, content });
+    } else if (selected && elementColors(selected.type).text) {
+      const holder = document.createElement('div'); holder.innerHTML = selected.content;
+      holder.querySelectorAll<HTMLElement>('[style]').forEach(node => node.style.removeProperty('color'));
+      updateElement(selected.id, { textColor: color, content: sanitizeRichText(holder.innerHTML) });
+    } else {
+      setPendingProps(current => ({ ...current, textColor: color }));
+    }
   };
 
   const updateElement = (
@@ -5046,6 +4885,7 @@ export default function BoardEditor({
       const newEl = {
         ...el,
         id: generateId(),
+        ...(el.type === 'embed' ? { webSessionId: generateId() } : {}),
         sheetCell: undefined,
         position: { x: el.position.x + 20, y: el.position.y + 20 },
         zIndex: elements.length + 1,
@@ -5121,6 +4961,8 @@ export default function BoardEditor({
       "sectionCollision",
       "textColor",
       "fontSize",
+      "textScaling",
+      "textScale",
       "fontWeight",
       "textAlign",
       "lineHeight",
@@ -5165,7 +5007,7 @@ export default function BoardEditor({
     // Persist the explicit next snapshot now; waiting for the state update
     // would let the auto-save capture the previous defaults object.
     onSave(
-      buildCurrentPage(false, {
+      buildCurrentPage({
         objectDefaults: nextObjectDefaults,
         pendingProps: nextPendingProps,
       }),
@@ -5431,6 +5273,7 @@ export default function BoardEditor({
     overlapShortcut,
     cropShortcut,
     scrollZoomShortcut,
+    zoomToCursor,
     cutShortcut,
     proportionalScale,
     altResizeCrops,
@@ -5458,7 +5301,6 @@ export default function BoardEditor({
   });
 
   const buildCurrentPage = (
-    commitToolbar = false,
     settingsOverrides: {
       objectDefaults?: ObjectDefaults;
       pendingProps?: Partial<BoardElement>;
@@ -5477,11 +5319,6 @@ export default function BoardEditor({
       : undefined;
     
     const editorSettings = collectEditorSettings(settingsOverrides);
-    if (commitToolbar) {
-      savedToolbarLayoutRef.current = toolbarLayout;
-    } else {
-      editorSettings.toolbarLayout = savedToolbarLayoutRef.current;
-    }
     return {
       ...page,
       title,
@@ -5515,98 +5352,23 @@ export default function BoardEditor({
 
   const doSave = (
     options: { keepalive?: boolean } = {},
-    commitToolbar = false,
   ) => {
-    onSave(buildCurrentPage(commitToolbar), options);
+    onSave(buildCurrentPage(), options);
   };
 
-  const createTemplateFromPage = (sourcePage: Page, name: string): Preset => ({
-    id: `preset-${generateId()}`,
-    name: name.trim() || "Untitled Template",
-    description: `Template from ${sourcePage.title || "Untitled board"}.`,
-    icon: "LayoutGrid",
-    elements: structuredClone(sourcePage.elements),
-    sectionSheets: structuredClone(sourcePage.sectionSheets ?? []),
-    width: sourcePage.width,
-    height: sourcePage.height,
-    workspaceWidth: sourcePage.workspaceWidth,
-    workspaceHeight: sourcePage.workspaceHeight,
-    showGrid: sourcePage.showGrid,
-    snapToGrid: sourcePage.snapToGrid,
-    showWorkspaceGrid: sourcePage.showWorkspaceGrid,
-    gridColor: sourcePage.gridColor,
-    boardColor: sourcePage.boardColor,
-    gridThickness: sourcePage.gridThickness,
-    gridSize: sourcePage.gridSize,
-    workspaceGridColor: sourcePage.workspaceGridColor,
-    workspaceGridThickness: sourcePage.workspaceGridThickness,
-    workspaceGridSize: sourcePage.workspaceGridSize,
-    editorSettings: sourcePage.editorSettings
-      ? structuredClone(sourcePage.editorSettings)
-      : undefined,
-    brightness: sourcePage.brightness,
-    isBuiltIn: false,
-  });
-
-  const downloadBoardCopy = (sourcePage: Page) => {
-    if (typeof document === "undefined" || typeof URL === "undefined") return;
-    const blob = new Blob([JSON.stringify(sourcePage, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${(sourcePage.title || "Untitled board")
-      .trim()
-      .replace(/[^a-z0-9_-]+/gi, "_") || "noteboard"}.json`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-  };
-
-  const handleBoardSave = () => {
-    const currentPage = buildCurrentPage(true);
-    onSave(currentPage);
-    if (saveAsTemplate) {
-      onSavePreset(createTemplateFromPage(currentPage, saveTemplateName));
+  const handleSaveAs = async (kind: SaveAsKind, name: string): Promise<string> => {
+    const snapshot = buildCurrentPage();
+    if (kind === 'template') {
+      if (await onSavePreset(createSavedTemplate(snapshot, name)) === false) throw new Error('Could not save the template. Please try again.');
+      return 'Template saved.';
     }
-    setShowBoardSaveModal(false);
-    setSaveState("saved");
-    window.setTimeout(() => setSaveState("idle"), 1400);
-  };
-
-  const handleBoardSaveAs = () => {
-    const currentPage = buildCurrentPage(true);
-    const clonedDocument = cloneBoardDocument(
-      currentPage.elements,
-      currentPage.sectionSheets ?? [],
-      generateId,
-    );
-    const duplicatePage: Page = {
-      ...currentPage,
-      id: `page-${generateId()}`,
-      title:
-        saveAsName.trim() || `${currentPage.title || "Untitled board"} copy`,
-      elements: clonedDocument.elements,
-      sectionSheets: clonedDocument.sheets,
-      editorSettings: currentPage.editorSettings
-        ? structuredClone(currentPage.editorSettings)
-        : undefined,
-      updatedAt: Date.now(),
-      isPinned: false,
-    };
-
-    // The app shell persists the duplicate as another board. The browser
-    // fallback keeps Save As useful in a standalone editor/test harness.
-    if (onSaveAs) onSaveAs(duplicatePage);
-    else downloadBoardCopy(duplicatePage);
-    if (saveAsTemplate) {
-      onSavePreset(createTemplateFromPage(currentPage, saveTemplateName));
+    if (kind === 'board') {
+      if (!onSaveAs) throw new Error('Saving a new board is unavailable.');
+      if (await onSaveAs(createSavedBoard(snapshot, name)) === false) throw new Error('Could not save the new board. Please try again.');
+      return 'New board saved in My Noteboards.';
     }
-    setShowBoardSaveModal(false);
-    setSaveState("saved");
-    window.setTimeout(() => setSaveState("idle"), 1400);
+    await downloadBoardArchive({ ...snapshot, title: name }, name);
+    return 'File download started.';
   };
 
   const handleConfirmPresetSave = () => {
@@ -5692,6 +5454,7 @@ export default function BoardEditor({
       (window as any).justLinkedElement = false;
       return;
     }
+    if (e.button === 0) { e.preventDefault(); setSavedRange(null); window.getSelection()?.removeAllRanges(); }
     pointerDownTime.current = Date.now();
     setContextMenuPos(null);
     setQuickAddRegion(null);
@@ -5742,9 +5505,9 @@ export default function BoardEditor({
       activeSurfaceBoundsRef.current = null;
       const zoomStep = 0.5 * clickZoomSensitivity;
       if (e.button === 0) { // left click
-         setZoom(z => Math.max(0.1, Math.min(5, z + zoomStep)));
+         zoomAtPoint(zoomStep, e.clientX, e.clientY);
       } else if (e.button === 2) { // right click
-         setZoom(z => Math.max(0.1, Math.min(5, z - zoomStep)));
+         zoomAtPoint(-zoomStep, e.clientX, e.clientY);
       }
       return;
     }
@@ -5800,6 +5563,7 @@ export default function BoardEditor({
            .slice()
            .reverse()
            .find((el) => {
+             if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
              const ew = el.size?.width || 100;
              const eh = el.size?.height || 40;
              return (
@@ -5881,6 +5645,7 @@ export default function BoardEditor({
            .slice()
            .reverse()
            .find((el) => {
+             if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
              const ew = el.size?.width || 100;
              const eh = el.size?.height || 40;
              return (
@@ -6243,7 +6008,7 @@ export default function BoardEditor({
           const newElement: BoardElement = {
             id: generateId(),
             type: drawnType,
-            parentId: targetLayerId ?? undefined,
+            parentId: creationParentId(currentDrawPoints[0]),
             position: { x: minX, y: minY },
             size: {
               width: Math.max(10, maxX - minX),
@@ -6282,7 +6047,7 @@ export default function BoardEditor({
         const newElement: BoardElement = {
           id: generateId(),
           type: drawnType,
-          parentId: targetLayerId ?? undefined,
+          parentId: creationParentId(currentDrawPoints[0]),
           position: { x: finalMinX, y: finalMinY },
           size: {
             width: Math.max(1, maxX - finalMinX),
@@ -6321,7 +6086,7 @@ export default function BoardEditor({
 
     if (activeDragStart && activeDragCurrent) {
       if (
-        (activeTool === "media" || activeTool === "embed") &&
+        ["media", "embed", "board"].includes(activeTool) &&
         !hasMeaningfulAreaDrag(activeDragStart, activeDragCurrent)
       ) {
         cancelAreaPlacementDrag();
@@ -6330,12 +6095,11 @@ export default function BoardEditor({
 
       if (
         activeTool !== "pan" &&
-        activeTool !== "board" &&
         activeTool !== "eraser" &&
         activeTool !== "draw"
       ) {
         const isWaitingForSelectionLock =
-          activeTool === "select" &&
+          ["select", "media", "embed", "board"].includes(activeTool) &&
           isSelectionLockEnabled &&
           activeAreaGesture?.activated === false;
         if (isWaitingForSelectionLock) {
@@ -6535,10 +6299,24 @@ export default function BoardEditor({
   };
 
   const moreToolbarItemProps = toolbarItemProps("more");
+  const maskBoards = [mainSurface, ...elements.filter(element => element.type === 'board')];
+  const maskMinX = Math.min(...maskBoards.map(board => board.position.x));
+  const maskMinY = Math.min(...maskBoards.map(board => board.position.y));
+  const maskWidth = Math.max(...maskBoards.map(board => board.position.x + (board.size?.width ?? 0))) - maskMinX;
+  const maskHeight = Math.max(...maskBoards.map(board => board.position.y + (board.size?.height ?? 0))) - maskMinY;
+  const hasEraserMask = elements.some(element => element.isEraser && elementHierarchy.isVisible(element.id, respectLayerVisibility)) || Boolean(currentDrawPoints && activeTool === 'eraser' && eraserMode === 'partial');
+  const eraserMaskStyle = { mask: hasEraserMask ? 'url(#global-eraser-mask)' : 'none', WebkitMask: hasEraserMask ? 'url(#global-eraser-mask)' : 'none' };
+  const strokePreviewClip = currentDrawPoints?.length ? getSectionClipPath({
+    id: 'stroke-preview', type: 'draw', content: '', position: { x: 0, y: 0 }, size: pageDimensions,
+    parentId: creationParentId(currentDrawPoints[0]), zIndex: Math.max(0, ...elements.map(element => element.zIndex)) + 1,
+  }, elements, elementPolygon({ position: { x: maskMinX, y: maskMinY }, size: { width: maskWidth, height: maskHeight } })) : undefined;
+
+
 
   return (
     <div
       className="h-screen flex flex-col bg-[#2e2e2e] overflow-hidden"
+      data-board-interacting={isInteracting || !!toolbarDragId || !!returnDraggingId || undefined}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerCancel}
@@ -6549,120 +6327,7 @@ export default function BoardEditor({
         if (activePointerIdRef.current === null) handlePointerUp();
       }}
     >
-      {showBoardSaveModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="board-save-dialog-title"
-          className="fixed inset-0 z-[250] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          <div className="w-full max-w-2xl overflow-hidden rounded-2xl border-2 border-gray-800 bg-white shadow-2xl">
-            <div className="flex items-center justify-between border-b-2 border-gray-100 px-5 py-4">
-              <div>
-                <h2
-                  id="board-save-dialog-title"
-                  className="text-lg font-bold tracking-tight text-gray-900"
-                >
-                  Save board
-                </h2>
-                <p className="mt-1 text-xs font-medium text-gray-500">
-                  Save changes or create a separate copy of this board.
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="Close save dialog"
-                onClick={() => setShowBoardSaveModal(false)}
-                className="rounded-lg border-2 border-transparent p-1.5 text-gray-500 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:text-gray-900"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="grid gap-5 p-5 md:grid-cols-[1fr_auto_1fr]">
-              <section aria-labelledby="save-template-heading" className="space-y-3">
-                <h3
-                  id="save-template-heading"
-                  className="text-xs font-extrabold uppercase tracking-wider text-gray-700"
-                >
-                  Template
-                </h3>
-                <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-gray-800">
-                  <input
-                    type="checkbox"
-                    checked={saveAsTemplate}
-                    onChange={(event) => setSaveAsTemplate(event.target.checked)}
-                    className="h-4 w-4 accent-blue-600"
-                  />
-                  Save as Template
-                </label>
-                <label
-                  htmlFor="save-template-name"
-                  className="block text-xs font-bold text-gray-600"
-                >
-                  Template name
-                </label>
-                <input
-                  id="save-template-name"
-                  type="text"
-                  value={saveTemplateName}
-                  onChange={(event) => setSaveTemplateName(event.target.value)}
-                  disabled={!saveAsTemplate}
-                  className="w-full rounded-lg border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-800 outline-none transition-colors focus:border-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-400"
-                />
-                <p className="text-xs leading-5 text-gray-500">
-                  The template will be available in Templates the next time you create a board.
-                </p>
-              </section>
-
-              <div className="hidden w-px bg-gray-200 md:block" aria-hidden="true" />
-
-              <section aria-labelledby="save-actions-heading" className="space-y-3">
-                <h3
-                  id="save-actions-heading"
-                  className="text-xs font-extrabold uppercase tracking-wider text-gray-700"
-                >
-                  Board file
-                </h3>
-                <label
-                  htmlFor="save-as-name"
-                  className="block text-xs font-bold text-gray-600"
-                >
-                  Save As name
-                </label>
-                <input
-                  id="save-as-name"
-                  type="text"
-                  value={saveAsName}
-                  onChange={(event) => setSaveAsName(event.target.value)}
-                  className="w-full rounded-lg border-2 border-gray-300 px-3 py-2 text-sm font-semibold text-gray-800 outline-none transition-colors focus:border-blue-500"
-                />
-                <div className="flex flex-col gap-2 pt-2">
-                  <button
-                    type="button"
-                    data-save-dialog-action="save"
-                    onClick={handleBoardSave}
-                    className="flex items-center justify-center gap-2 rounded-xl bg-black px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-gray-800"
-                  >
-                    <Save className="h-4 w-4" />
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    data-save-dialog-action="save-as"
-                    onClick={handleBoardSaveAs}
-                    className="flex items-center justify-center gap-2 rounded-xl border-2 border-gray-300 bg-white px-4 py-2.5 text-sm font-bold text-gray-800 transition-colors hover:border-gray-500 hover:bg-gray-50"
-                  >
-                    <Download className="h-4 w-4" />
-                    Save As
-                  </button>
-                </div>
-              </section>
-            </div>
-          </div>
-        </div>
-      )}
+      {showBoardSaveModal && <SaveAsDialog name={title} onClose={() => setShowBoardSaveModal(false)} onSave={handleSaveAs} />}
 
       {showSaveModal && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
@@ -6809,7 +6474,8 @@ export default function BoardEditor({
         <div
           ref={toolbarContainerRef}
           data-toolbar-container="true"
-          data-toolbar-drop-zone={toolbarCustomizeMode ? "true" : undefined}
+          data-toolbar-surface="true"
+          data-toolbar-drop-zone={toolbarEditingMode ? "true" : undefined}
           onDragOver={(e) => {
             const dragId = toolbarDragIdRef.current || toolbarDragId;
             if (!toolbarCustomizeMode || !dragId) return;
@@ -6891,7 +6557,7 @@ export default function BoardEditor({
                     <div className="border-b-[3px] border-gray-400 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-500">
                       General Settings
                     </div>
-                    {renderGeneralSettingsContent()}
+                    <div className="menu-scroll-viewport min-h-0 overflow-y-auto">{renderGeneralSettingsContent()}</div>
 
                   </div>
               )}
@@ -6958,7 +6624,7 @@ export default function BoardEditor({
               {showSelectDropdown && (
                 <div className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 w-72 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl z-[100] flex flex-col overflow-hidden text-left">
                   {renderToolMenuTitle("Select Settings", "")}
-                  <div className="p-3 flex flex-col gap-3">
+                  <div className="flex flex-col gap-2">
                     {renderSelectToolSettings()}
                     {renderMenuSettingsBlock("select")}
                   </div>
@@ -7118,9 +6784,7 @@ export default function BoardEditor({
                 <div className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-1 z-[100] flex flex-col gap-1 w-64">
                   {renderToolMenuTitle("Shape Settings", "-mx-1 -mt-1 mb-1")}
                   {renderShapeToolSettings()}
-                  <div className="px-2 pb-1">
-                    {renderMenuSettingsBlock("shapes")}
-                  </div>
+                  {renderMenuSettingsBlock("shapes")}
                 </div>
               )}
             </div>
@@ -7211,206 +6875,7 @@ export default function BoardEditor({
               {showDrawDropdown && (
                 <div className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl w-64 p-3 z-[100]">
                   {renderToolMenuTitle("Draw Settings")}
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between text-xs font-semibold text-gray-500 mb-1">
-                      <span>Color</span>
-                      <div className="flex items-center gap-2">
-                        <ColorPicker
-                          value={pendingProps.borderColor || "#000000"}
-                          onChange={(c) =>
-                            setPendingProps({ ...pendingProps, borderColor: c })
-                          }
-                          customColors={customColors.border}
-                          onAddCustomColor={(c, i) =>
-                            handleAddCustomColor(c, i, "border")
-                          }
-                          customSlots={2}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center justify-between text-xs font-semibold text-gray-500">
-                        <span>Stroke Width</span>
-                        <span className="text-black bg-gray-100 rounded px-1">
-                          {pendingProps.borderWidth || 4}px
-                        </span>
-                      </div>
-                      <input
-                        type="range"
-                        min="1"
-                        max="30"
-                        value={pendingProps.borderWidth || 4}
-                        onChange={(e) =>
-                          setPendingProps({
-                            ...pendingProps,
-                            borderWidth: parseInt(e.target.value),
-                          })
-                        }
-                        className="w-full accent-blue-500"
-                      />
-                    </div>
-
-                    <div className="border-t border-gray-200 pt-2 mt-1">
-                      <div
-                        className="flex items-center justify-between cursor-pointer group mb-2"
-                        onClick={() =>
-                          setPendingProps({
-                            ...pendingProps,
-                            isSmooth: !(pendingProps.isSmooth || false),
-                          })
-                        }
-                      >
-                        <span className="text-xs font-bold text-gray-800 select-none">
-                          Drawing Assistance
-                        </span>
-                        <div
-                          className={cn(
-                            "w-7 h-4 rounded-full flex items-center p-0.5 transition-colors duration-200 ease-in-out shrink-0 border border-black/10",
-                            pendingProps.isSmooth || false
-                              ? "bg-blue-500"
-                              : "bg-gray-200",
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              "w-3 h-3 bg-white rounded-full shadow-sm transform transition-transform duration-200 ease-in-out",
-                              pendingProps.isSmooth || false
-                                ? "translate-x-3"
-                                : "translate-x-0",
-                            )}
-                          />
-                        </div>
-                      </div>
-
-                      {(pendingProps.isSmooth || false) && (
-                        <div className="pl-2 flex flex-col gap-2">
-                          <div
-                            className="flex items-center justify-between cursor-pointer group"
-                            onClick={() =>
-                              setPendingProps({
-                                ...pendingProps,
-                                drawingAssistSmooth:
-                                  pendingProps.drawingAssistSmooth === false
-                                    ? true
-                                    : false,
-                              })
-                            }
-                          >
-                            <span className="text-xs font-medium text-gray-600 select-none">
-                              Line Smoothing
-                            </span>
-                            <div
-                              className={cn(
-                                "w-6 h-3 rounded-full flex items-center p-0.5 transition-colors border border-black/10",
-                                pendingProps.drawingAssistSmooth !== false
-                                  ? "bg-blue-400"
-                                  : "bg-gray-200",
-                              )}
-                            >
-                              <div
-                                className={cn(
-                                  "w-2 h-2 bg-white rounded-full transition-transform",
-                                  pendingProps.drawingAssistSmooth !== false
-                                    ? "translate-x-3"
-                                    : "translate-x-0",
-                                )}
-                              />
-                            </div>
-                          </div>
-                          {pendingProps.drawingAssistSmooth !== false && (
-                            <div className="flex flex-col gap-1 pl-2 border-l-2 border-gray-100 ml-1 mb-1 mt-1">
-                              <div className="flex items-center justify-between text-[10px] font-semibold text-gray-400">
-                                <span>Smoothing Strength</span>
-                                <span className="text-gray-500">
-                                  {pendingProps.drawingAssistSmoothStrength ??
-                                    5}
-                                  /10
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min="1"
-                                max="10"
-                                step="1"
-                                value={
-                                  pendingProps.drawingAssistSmoothStrength ?? 5
-                                }
-                                onChange={(e) =>
-                                  setPendingProps({
-                                    ...pendingProps,
-                                    drawingAssistSmoothStrength: parseInt(
-                                      e.target.value,
-                                    ),
-                                  })
-                                }
-                                className="w-full accent-blue-400 h-1"
-                              />
-                            </div>
-                          )}
-                          <div
-                            className="flex items-center justify-between cursor-pointer group"
-                            onClick={() =>
-                              setPendingProps({
-                                ...pendingProps,
-                                drawingAssistGuess:
-                                  pendingProps.drawingAssistGuess === true
-                                    ? false
-                                    : true,
-                              })
-                            }
-                          >
-                            <span className="text-xs font-medium text-gray-600 select-none">
-                              Shape Guesser
-                            </span>
-                            <div
-                              className={cn(
-                                "w-6 h-3 rounded-full flex items-center p-0.5 transition-colors border border-black/10",
-                                pendingProps.drawingAssistGuess === true
-                                  ? "bg-blue-400"
-                                  : "bg-gray-200",
-                              )}
-                            >
-                              <div
-                                className={cn(
-                                  "w-2 h-2 bg-white rounded-full transition-transform",
-                                  pendingProps.drawingAssistGuess === true
-                                    ? "translate-x-3"
-                                    : "translate-x-0",
-                                )}
-                              />
-                            </div>
-                          </div>
-                          {pendingProps.drawingAssistGuess === true && (
-                            <div className="flex flex-col gap-1 pl-2 border-l-2 border-gray-100 ml-1 mt-1">
-                              <div className="flex items-center justify-between text-[10px] font-semibold text-gray-400">
-                                <span>Guesser Accuracy</span>
-                                <span className="text-gray-500">
-                                  {pendingProps.drawingAssistStrength ?? 5}/10
-                                </span>
-                              </div>
-                              <input
-                                type="range"
-                                min="1"
-                                max="10"
-                                step="1"
-                                value={pendingProps.drawingAssistStrength ?? 5}
-                                onChange={(e) =>
-                                  setPendingProps({
-                                    ...pendingProps,
-                                    drawingAssistStrength: parseInt(
-                                      e.target.value,
-                                    ),
-                                  })
-                                }
-                                className="w-full accent-blue-400 h-1"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  {renderDrawToolSettings()}
                   {renderMenuSettingsBlock("draw")}
                 </div>
               )}
@@ -7576,6 +7041,26 @@ export default function BoardEditor({
             })}
             <div
               {...moreToolbarItemProps}
+              data-more-drop-active={moreDropActive || undefined}
+              onDragEnter={event => {
+                const id = toolbarDragIdRef.current;
+                if (!toolbarCustomizeMode || !id || id === 'more') return;
+                event.preventDefault(); event.stopPropagation(); setMoreDropActive(true);
+              }}
+              onDragOver={event => {
+                const id = toolbarDragIdRef.current;
+                if (!toolbarCustomizeMode || !id || id === 'more') return;
+                event.preventDefault(); event.stopPropagation();
+                event.dataTransfer.dropEffect = 'move'; setMoreDropActive(true);
+              }}
+              onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setMoreDropActive(false); }}
+              onDrop={event => {
+                const id = toolbarDragIdRef.current;
+                if (!toolbarCustomizeMode || !id || id === 'more') return;
+                event.preventDefault(); event.stopPropagation();
+                moveToolbarItemToMore(id); setMoreDropActive(false);
+                toolbarDropCommittedRef.current = true; toolbarDragIdRef.current = null; setToolbarDragId(null);
+              }}
               className={toolbarItemClass(
                 "more",
                 "relative flex",
@@ -7611,20 +7096,6 @@ export default function BoardEditor({
                   {renderToolMenuTitle("More", "-mx-1 -mt-1 mb-1")}
                   <div className="mx-1 mb-1 rounded-lg border border-gray-200 bg-gray-50 p-1">
                     {renderAlwaysOnTopControl("more")}
-                    <button
-                      type="button"
-                      data-move-from-toolbar="true"
-                      onClick={() => {
-                        setToolbarCustomizeMode(false);
-                        setMoveToolsToMoreMode(true);
-                        setShowMoreToolsDropdown(false);
-                      }}
-                      className="mt-0.5 flex h-6 w-full items-center gap-1.5 rounded px-1.5 text-left text-[10px] font-bold text-gray-500 transition-colors hover:bg-white hover:text-gray-900"
-                    >
-                      <ArrowDownToLine className="h-3.5 w-3.5 shrink-0" />
-                      <span className="min-w-0 flex-1">Move from Toolbar</span>
-                      <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />
-                    </button>
                   </div>
                   {toolbarLayout.more.map((id) => {
                     const item = TOOLBAR_ITEMS.find(
@@ -7636,6 +7107,7 @@ export default function BoardEditor({
                       <div
                         key={`more-${id}`}
                         data-more-toolbar-item={id}
+                        data-more-dragging={heldMoreTool === id || undefined}
                         data-more-tool={
                           BUILT_IN_MORE_TOOL_IDS.includes(
                             id as (typeof BUILT_IN_MORE_TOOL_IDS)[number],
@@ -7643,9 +7115,9 @@ export default function BoardEditor({
                             ? id
                             : undefined
                         }
-                        className="rounded-lg"
+                        className="overflow-hidden rounded-lg border-2 border-gray-200 bg-white transition-colors"
                       >
-                        <div className="flex items-stretch rounded-lg text-xs font-bold text-gray-600 hover:bg-gray-100 hover:text-[#1A1A1A]">
+                        <div className="flex items-stretch text-xs font-bold text-gray-700 hover:bg-gray-50 hover:text-[#1A1A1A]">
                           <button
                             type="button"
                             onClick={() => activateToolbarOverflowItem(id)}
@@ -7658,19 +7130,21 @@ export default function BoardEditor({
                             type="button"
                             data-more-tool-return={id}
                             aria-label={`Move ${item.label} to toolbar`}
-                            title={`Move ${item.label} to toolbar`}
+                            title="Hold and drag to toolbar"
+                            onPointerDown={event => startMoreToolDrag(event, id)}
                             onClick={(event) => {
                               event.stopPropagation();
-                              returnToolbarItemFromMore(id);
+                              event.preventDefault();
                             }}
-                            className="flex items-center justify-center px-1.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-800"
+                            className="mx-1 flex h-6 w-6 shrink-0 self-center touch-none items-center justify-center rounded-md bg-transparent text-gray-400 transition-colors hover:text-blue-600"
                           >
-                            <CornerUpLeft className="h-3.5 w-3.5" />
+                            <Move className="h-3.5 w-3.5" />
                           </button>
                           <button
                             type="button"
                             aria-label={`${item.label} settings`}
                             aria-expanded={expandedMoreTools.has(id)}
+                            aria-controls={`more-settings-${id}`}
                             onClick={(event) => {
                               event.stopPropagation();
                               toggleExpandedMoreTool(id);
@@ -7686,8 +7160,8 @@ export default function BoardEditor({
                           </button>
                         </div>
                         {expandedMoreTools.has(id) && (
-                          <div className="mx-1 mb-1 rounded-lg border border-gray-200 bg-gray-50 p-2">
-                            {renderOverflowToolSettings(id)}
+                          <div id={`more-settings-${id}`} className="p-2 pt-1">
+                            {renderOverflowToolSettings(id, true)}
                           </div>
                         )}
                       </div>
@@ -7760,9 +7234,9 @@ export default function BoardEditor({
                       <div className="flex items-center gap-2 min-w-0">
                         <Layers className="w-4 h-4 text-gray-500 shrink-0" />
                         <span className="uppercase tracking-wider text-[11px] font-bold text-gray-700">
-                          {movingElementId ? "Choose layer" : "Layers"}
+                          Layers
                         </span>
-                        {currentLayerView && !movingElementId && (
+                        {currentLayerView && (
                           <>
                             <ChevronRight className="w-3 h-3 text-gray-400 shrink-0" />
                             <span className="uppercase tracking-wider text-[11px] font-bold text-gray-700 truncate max-w-[70px]">
@@ -7824,7 +7298,7 @@ export default function BoardEditor({
                       </div>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto bg-gray-50/50 p-3 grid grid-cols-2 gap-3 content-start">
+                    <div className="layers-scroll flex-1 overflow-y-auto bg-gray-50/50 p-3 grid grid-cols-2 gap-3 content-start">
                       {getLayerPanelElements().map((el) => {
                           const isLayerLike =
                             el.type === "layer" ||
@@ -7838,9 +7312,6 @@ export default function BoardEditor({
                                 ? `Layer ${typeIndex}`
                                 : `${toTitleCase(el.type)} ${typeIndex}`;
                           const isDraggingThisLayer = draggingLayerId === el.id;
-                          const isMoveDisabledInLayerView = Boolean(
-                            currentLayerView,
-                          );
                           return (
                              <motion.div
                                layout="position"
@@ -7919,10 +7390,6 @@ export default function BoardEditor({
                                   "ring-2 ring-gray-300/80",
                                  isDraggingThisLayer
                                    ? "border-[3px] border-blue-500 bg-blue-50 shadow-none ring-2 ring-blue-200 [&>*]:invisible"
-                                  : movingElementId === el.id
-                                    ? "border-[3px] border-blue-400 bg-blue-50"
-                                    : movingElementId && isLayerLike
-                                        ? "bg-white text-gray-500 border-[3px] border-gray-200 hover:border-blue-400 hover:bg-blue-50 shadow-sm"
                                         : selectedId === el.id
                                           ? "bg-white text-[#1A1A1A] border-[3px] border-gray-400 shadow-sm z-10"
                                           : "bg-white text-gray-500 border-[3px] border-gray-200 hover:text-[#1A1A1A] hover:border-gray-300 shadow-sm",
@@ -7944,8 +7411,9 @@ export default function BoardEditor({
                             >
                                 {/* Layer actions */}
                                 <div
-                                  className="absolute top-2 left-2 right-2 grid grid-cols-5 place-items-center gap-2 z-20"
+                                  className="absolute top-2 left-2 right-2 grid grid-cols-4 place-items-center gap-2 z-20"
                                   onPointerDown={(e) => e.stopPropagation()}
+                                  onDoubleClick={e => e.stopPropagation()}
                                 >
                                   <button
                                     onClick={(e) => {
@@ -7956,54 +7424,6 @@ export default function BoardEditor({
                                     title="Copy layer"
                                   >
                                     <Copy className="w-4 h-4" />
-                                  </button>
-                                  <button
-                                    disabled={isMoveDisabledInLayerView}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (isMoveDisabledInLayerView) return;
-                                      if (movingElementId === el.id) {
-                                        setMovingElementId(null);
-                                      } else if (!movingElementId) {
-                                        setMovingElementId(el.id);
-                                      } else if (isLayerLike) {
-                                        updateElement(movingElementId, {
-                                          parentId: el.id,
-                                          zIndex: elements.length + 1,
-                                        });
-                                        setMovingElementId(null);
-                                      }
-                                    }}
-                                    className={cn(
-                                      "w-7 h-7 flex items-center justify-center rounded-md transition-colors relative",
-                                      isMoveDisabledInLayerView &&
-                                        "opacity-40 cursor-not-allowed hover:bg-transparent",
-                                      movingElementId === el.id
-                                        ? "bg-blue-100 text-blue-600"
-                                        : movingElementId && isLayerLike
-                                          ? "bg-blue-50 text-blue-600 hover:bg-blue-100"
-                                          : "hover:bg-gray-100 text-gray-500 hover:text-[#1A1A1A]",
-                                    )}
-                                    title={
-                                      movingElementId === el.id
-                                        ? "Cancel move"
-                                        : movingElementId
-                                          ? "Move here"
-                                          : "Move element"
-                                    }
-                                  >
-                                    <ArrowUpRight
-                                      className={cn(
-                                        "w-4 h-4 transition-transform",
-                                        movingElementId &&
-                                          movingElementId !== el.id &&
-                                          isLayerLike &&
-                                          "rotate-90",
-                                      )}
-                                    />
-                                    {isMoveDisabledInLayerView && (
-                                      <span className="absolute w-5 h-[1.5px] bg-current rotate-[-35deg] rounded-full" />
-                                    )}
                                   </button>
                                   <button
                                     onClick={(e) => {
@@ -8088,7 +7508,7 @@ export default function BoardEditor({
                                       selectedId === el.id
                                         ? "text-[#1A1A1A]"
                                         : "text-gray-700",
-                                      movingElementId ? "pointer-events-none" : "pointer-events-auto"
+                                      "pointer-events-auto"
                                     )}
                                   />
                                 </div>
@@ -8102,54 +7522,16 @@ export default function BoardEditor({
                             "col-span-2 p-2 aspect-[2/1] uppercase tracking-wider rounded-xl cursor-pointer transition-all relative flex flex-col justify-center items-center group",
                             dragOverLayerId === 'main-board'
                               ? "bg-blue-50 border-[3px] border-blue-400 shadow-md transform scale-[1.02] z-20"
-                              : movingElementId
-                                ? "bg-white text-gray-500 border-[3px] border-gray-200 hover:border-blue-400 hover:bg-blue-50 shadow-sm"
                                 : (!selectedId || (selectedId.startsWith("main-board") && !isMainBoardSelected))
                                   ? "bg-white text-[#1A1A1A] border-[3px] border-gray-400 shadow-sm z-10"
                                   : "bg-white text-gray-500 border-[3px] border-gray-200 hover:text-[#1A1A1A] hover:border-gray-300 shadow-sm",
                           )}
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (movingElementId) {
-                              updateElement(movingElementId, {
-                                parentId: undefined,
-                                zIndex: elements.length + 1,
-                              });
-                              setMovingElementId(null);
-                            } else {
-                              setSelectedId(null);
-                              setIsMainBoardSelected(true);
-                            }
+                            setSelectedId(null);
+                            setIsMainBoardSelected(true);
                           }}
-                          onDragEnter={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setDragOverLayerId('main-board');
-                          }}
-                          onDragLeave={() => {
-                            setDragOverLayerId(null);
-                          }}
-                          onDragOver={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            e.dataTransfer.dropEffect = 'move';
-                            if (dragOverLayerId !== 'main-board') {
-                              setDragOverLayerId('main-board');
-                            }
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            const draggedId =
-                              e.dataTransfer.getData("text/plain");
-                            clearLayerPreview();
-                            if (draggedId) {
-                              updateElement(draggedId, {
-                                parentId: undefined,
-                                zIndex: elements.length + 1,
-                              });
-                            }
-                          }}
+
                         >
                           <span
                             className={cn(
@@ -8164,7 +7546,7 @@ export default function BoardEditor({
                         </div>
                       )}
                     </div>
-                    <div className="shrink-0 border-t border-gray-200 bg-white px-3 pb-2">
+                    <div className="shrink-0 bg-white px-2 pb-2">
                       {renderMenuSettingsBlock("layers", false, true)}
                     </div>
                   </motion.div>
@@ -8177,8 +7559,6 @@ export default function BoardEditor({
               {...toolbarItemProps("save")}
               onClick={() => {
                 closeAllDropdowns();
-                setSaveAsName(`${title || "Untitled board"} copy`);
-                setSaveTemplateName(`${title || "Custom"} Template`);
                 setShowBoardSaveModal(true);
               }}
               className={toolbarItemClass(
@@ -8187,12 +7567,8 @@ export default function BoardEditor({
               )}
               title="Save board"
             >
-              {saveState === "saved" ? (
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-              ) : (
-                <Download className="w-3.5 h-3.5" />
-              )}
-              <span className="hidden sm:inline">{saveState === "saved" ? "Saved" : "Save"}</span>
+              <Download className="w-4 h-4" />
+              <span className="hidden sm:inline">Save</span>
             </button>
           </div>
         </div>
@@ -8217,19 +7593,9 @@ export default function BoardEditor({
               commitToolbarPreview();
               setToolbarCustomizeMode(false);
             }}
-            className="absolute left-1/2 top-full z-[200] -translate-x-1/2 rounded-b-lg border-2 border-t-0 border-gray-400 bg-white px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-700 shadow-sm hover:bg-gray-50"
+            className="absolute left-1/2 top-full mt-2 z-[200] -translate-x-1/2 rounded-lg border-2 border-gray-400 bg-white px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-700 shadow-sm hover:bg-gray-50"
           >
-            Finish toolbar editing
-          </button>
-        )}
-        {moveToolsToMoreMode && (
-          <button
-            type="button"
-            data-finish-moving-tools="true"
-            onClick={() => setMoveToolsToMoreMode(false)}
-            className="absolute left-1/2 top-full z-[200] -translate-x-1/2 rounded-b-lg border-2 border-t-0 border-gray-400 bg-white px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-700 shadow-sm hover:bg-gray-50"
-          >
-            Done moving tools
+            Finish
           </button>
         )}
       </header>
@@ -8237,7 +7603,7 @@ export default function BoardEditor({
       {/* Main Workspace Area with Paint-like resizable board */}
       <div className="flex-1 flex overflow-hidden relative">
         <div
-          className="flex-1 relative overflow-auto"
+          className="workspace-scroll flex-1 relative overflow-auto select-none"
           ref={containerRef}
           style={{
             cursor:
@@ -8245,7 +7611,9 @@ export default function BoardEditor({
                 ? isInteracting
                   ? "grabbing"
                   : "grab"
-                : "default",
+                : activeTool === "board"
+                  ? "crosshair"
+                  : "default",
           }}
           onClick={(e) => {
             if (
@@ -8299,6 +7667,7 @@ export default function BoardEditor({
               }
             }
             if (activeTool === "pan") {
+              e.preventDefault();
               captureSurfacePointer(e);
               setIsInteracting(true);
               setPanStart({ x: e.clientX, y: e.clientY });
@@ -8336,8 +7705,8 @@ export default function BoardEditor({
               ) || (currentDrawPoints && activeTool === 'eraser' && eraserMode === 'partial') ? (
                 <svg width="0" height="0" style={{ position: 'absolute' }}>
                   <defs>
-                    <mask id="global-eraser-mask" maskUnits="userSpaceOnUse" x="0" y="0" width={pageDimensions.width} height={pageDimensions.height}>
-                      <rect x="0" y="0" width={pageDimensions.width} height={pageDimensions.height} fill="white" />
+                    <mask id="global-eraser-mask" maskUnits="userSpaceOnUse" x={maskMinX} y={maskMinY} width={maskWidth} height={maskHeight}>
+                      <rect x={maskMinX} y={maskMinY} width={maskWidth} height={maskHeight} fill="white" />
                       {elements.filter(
                         (element) =>
                           element.isEraser &&
@@ -8358,24 +7727,8 @@ export default function BoardEditor({
               <div
                 ref={boardSurfaceRef}
                 data-board-root="true"
-                className="absolute top-0 left-0 touch-none"
+                className="absolute top-0 left-0 touch-none select-none"
                 style={{
-                  mask: elements.some(
-                    (element) =>
-                      element.isEraser &&
-                      elementHierarchy.isVisible(
-                        element.id,
-                        respectLayerVisibility,
-                      ),
-                  ) || (currentDrawPoints && activeTool === 'eraser' && eraserMode === 'partial') ? 'url(#global-eraser-mask)' : 'none',
-                  WebkitMask: elements.some(
-                    (element) =>
-                      element.isEraser &&
-                      elementHierarchy.isVisible(
-                        element.id,
-                        respectLayerVisibility,
-                      ),
-                  ) || (currentDrawPoints && activeTool === 'eraser' && eraserMode === 'partial') ? 'url(#global-eraser-mask)' : 'none',
                   width: pageDimensions.width,
                   height: pageDimensions.height,
                   transform: `scale(${zoom})`,
@@ -8429,14 +7782,10 @@ export default function BoardEditor({
                     style={{
                       zIndex: -9999,
                       boxShadow: "0 0 0 1px rgba(0,0,0,0.5)",
-                      backgroundColor: boardColor,
-                      backgroundImage: showGrid
-                      ? `linear-gradient(to right, ${gridColor} ${gridThickness}px, transparent ${gridThickness}px), linear-gradient(to bottom, ${gridColor} ${gridThickness}px, transparent ${gridThickness}px)`
-                      : "none",
-                    backgroundSize: `${gridSize}px ${gridSize}px`,
-                    backgroundPosition: "0 0",
+                      ...boardSurfaceStyle(mainSurface, { showGrid, gridColor, gridSize, gridThickness }),
                   }}
                 />
+                <div className="absolute inset-0 overflow-visible" style={eraserMaskStyle} data-board-surface="true">
                 {/* Active drag region */}
                 {activeTool !== "draw" &&
                   activeTool !== "pan" &&
@@ -8539,6 +7888,7 @@ export default function BoardEditor({
                             <div
                               style={{
                                 position: "absolute",
+                                clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }, angle),
                                 left: previewElement.position.x,
                                 top: previewElement.position.y,
                                 width: Math.max(1, previewElement.size.width),
@@ -8578,6 +7928,7 @@ export default function BoardEditor({
                                   top: clipped.y,
                                   width: clipped.w,
                                   height: clipped.h,
+                                  clipPath: creationClip(clipped),
                                 }}
                               />
                             );
@@ -8614,6 +7965,7 @@ export default function BoardEditor({
                                 className="pointer-events-none"
                                 style={{
                                   position: "absolute",
+                                  clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }),
                                   left: previewElement.position.x,
                                   top: previewElement.position.y,
                                   width: Math.max(1, previewElement.size.width),
@@ -8687,6 +8039,8 @@ export default function BoardEditor({
                       key={el.id}
                       element={el}
                       renderZIndex={renderIndex + 1}
+                      matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
+                      matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
                       allowEditing={
                         allowEditing && !elementHierarchy.isLocked(el.id)
                       }
@@ -8777,6 +8131,7 @@ export default function BoardEditor({
                       proportionalScale={proportionalScale}
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
+                      sceneHierarchy={elementHierarchy}
                       highlightAll={highlightAll}
                       overlapMode={overlapMode}
                       elements={elements}
@@ -8813,7 +8168,7 @@ export default function BoardEditor({
                         zIndex: 10000,
                       }}
                     >
-                      <path
+                      <path style={{ clipPath: strokePreviewClip }}
                         d={getSvgPathFromPoints(
                           currentDrawPoints,
                           pendingProps.isSmooth &&
@@ -8830,6 +8185,7 @@ export default function BoardEditor({
                   )}
 
                 </div>
+                </div>
 
                 {elements
                   .filter((el) => {
@@ -8845,6 +8201,8 @@ export default function BoardEditor({
                       key={el.id}
                       element={el}
                       renderZIndex={-5000 + renderIndex}
+                      matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
+                      matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
                       allowEditing={
                         allowEditing && !elementHierarchy.isLocked(el.id)
                       }
@@ -8896,6 +8254,7 @@ export default function BoardEditor({
                       proportionalScale={proportionalScale}
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
+                      sceneHierarchy={elementHierarchy}
                       highlightAll={highlightAll}
                       overlapMode={overlapMode}
                       elements={elements}
@@ -8917,7 +8276,7 @@ export default function BoardEditor({
                     />
                   ))}
 
-                {activeTool === "board" && dragStart && dragCurrent && (
+                {activeTool === "board" && dragStart && dragCurrent && isHoldingToCreate && (
                   <div
                     data-new-board-preview="true"
                     className="absolute pointer-events-none border-[1.5px] border-blue-500 bg-blue-500/10 z-[120]"
@@ -9802,68 +9161,20 @@ export default function BoardEditor({
 
             const isTextLike =
               TEXT_TYPES.includes(activeType) || activeType === "sticky";
+            const colors = elementColors(activeType);
             const bottomToolbarGroupClass =
               "flex h-12 min-h-12 shrink-0 items-center gap-3 border-r-2 border-gray-300 pr-3";
             return (
               <AnimatePresence>
-                <motion.div
-                  key="bottom-toolbar"
-                  data-bottom-toolbar="true"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: 10 }}
-                  className="fixed bottom-8 left-1/2 -translate-x-1/2 box-border h-16 min-h-16 w-max max-w-[95vw] bg-white border-[3px] border-gray-800 shadow-2xl rounded-2xl p-2 flex items-center gap-3 z-[200] overflow-x-auto overflow-y-hidden"
-                  onPointerDown={(e) => {
-                    const target = e.target as HTMLElement;
-                    if (
-                      target.tagName !== "BUTTON" &&
-                      target.tagName !== "INPUT" &&
-                      target.tagName !== "SELECT" &&
-                      !target.closest("button") &&
-                      !target.closest("input") &&
-                      !target.closest("select")
-                    ) {
-                      e.preventDefault();
-                    }
-                    e.stopPropagation();
-                  }}
-                >
+                <ToolPropertiesBar key="bottom-toolbar">
                   {activeTool === 'eraser' && !selectedElement && (
                     <div className={bottomToolbarGroupClass}>
-                      <div className="flex gap-1 bg-gray-100 p-1 rounded-lg">
-                        <button
-                          onClick={() => setEraserMode('element')}
-                          className={cn("px-3 py-1.5 text-xs font-bold rounded-md transition-colors", eraserMode === 'element' ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-900")}
-                        >
-                          Whole Element
-                        </button>
-                        <button
-                          onClick={() => setEraserMode('partial')}
-                          className={cn("px-3 py-1.5 text-xs font-bold rounded-md transition-colors", eraserMode === 'partial' ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-900")}
-                        >
-                          Partial
-                        </button>
-                      </div>
+                      <SegmentedControl label="Eraser mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
                       {eraserMode === 'partial' && (
                         <>
                           <div className="flex items-center gap-1.5 px-2 border-l-2 border-gray-200">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Shape</span>
-                            <div className="flex bg-gray-100 p-0.5 rounded border border-gray-200">
-                              <button
-                                onClick={() => setEraserShape('round')}
-                                className={cn("p-1 rounded transition-colors", eraserShape === 'round' ? "bg-white shadow-sm" : "hover:bg-gray-200")}
-                                title="Round"
-                              >
-                                <div className="w-3 h-3 rounded-full bg-gray-700"></div>
-                              </button>
-                              <button
-                                onClick={() => setEraserShape('square')}
-                                className={cn("p-1 rounded transition-colors", eraserShape === 'square' ? "bg-white shadow-sm" : "hover:bg-gray-200")}
-                                title="Square"
-                              >
-                                <div className="w-3 h-3 bg-gray-700"></div>
-                              </button>
-                            </div>
+                            <SegmentedControl label="Eraser shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} />
                           </div>
                           <div className="flex items-center gap-2 px-2 border-l-2 border-gray-200">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Size</span>
@@ -9881,8 +9192,8 @@ export default function BoardEditor({
                         <ColorPicker
                           value={fillToolColor}
                           onChange={(c) => setFillToolColor(c)}
-                          customColors={customColors.bg}
-                          onAddCustomColor={(c, i) => handleAddCustomColor(c, i, 'bg')}
+                          customColors={customColors.fill}
+                          onAddCustomColor={(c, i) => handleAddCustomColor(c, i, 'fill')}
                           />
                         </div>
                     </div>
@@ -10054,6 +9365,13 @@ export default function BoardEditor({
                           >
                             <Equal className="w-4 h-4" />
                           </button>
+                          {isScalableText(activeType) && <button
+                            type="button" title="Text scaling" aria-label="Text scaling" aria-pressed={targetProps.textScaling === true}
+                            onPointerDown={event => event.preventDefault()}
+                            onClick={() => onUpdateTarget({ textScaling: targetProps.textScaling !== true })}
+                            className={cn("flex items-center gap-1.5 rounded-lg border-[3px] border-transparent px-2 py-1.5 text-gray-500 transition-colors hover:bg-white hover:text-[#1A1A1A]", targetProps.textScaling && "bg-white border-gray-300 text-gray-800 shadow-sm")}>
+                            <Maximize className="h-4 w-4" /><span className="text-[11px] font-bold">Text scaling</span>
+                          </button>}
                           {targetProps.textSnapToGrid && (
                             <>
                               <div className="w-[2px] h-4 bg-gray-300 mx-0.5" />
@@ -10088,19 +9406,19 @@ export default function BoardEditor({
                         >
                           <input
                             type="number"
-                            value={targetProps.fontSize?.toString() ?? ""}
+                            value={targetProps.fontSize !== undefined || getTextScale(targetProps) !== 1 ? displayedTextFontSize(targetProps, activeType).toString() : ""}
                             onKeyDown={(e) => e.stopPropagation()}
                             onPointerDown={(e) => e.stopPropagation()}
                             onChange={(e) => {
-                              const v = parseInt(e.target.value);
-                              if (isNaN(v)) {
+                              const v = parseFloat(e.target.value);
+                              if (!Number.isFinite(v)) {
                                 onUpdateTarget({ fontSize: undefined });
                                 return;
                               }
 
-                              onUpdateTarget({ fontSize: v });
+                              onUpdateTarget({ fontSize: Math.max(1, Math.min(500, v)) / (isScalableText(activeType) ? getTextScale(targetProps) : 1) });
                             }}
-                            placeholder={activeType === "h1" ? "36" : "16"}
+                            placeholder={displayedTextFontSize(targetProps, activeType).toString()}
                             className="bg-transparent text-sm font-bold text-gray-800 outline-none w-10 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none placeholder:text-gray-400"
                             min="1"
                             max="500"
@@ -10114,25 +9432,16 @@ export default function BoardEditor({
                   )}
 
                   {/* Colors */}
-                  {activeType !== "image" && activeType !== "media" && activeType !== "embed" && activeType !== "eraser" && (
+                  {(colors.fill || colors.stroke || colors.text) && (
                     <div className={bottomToolbarGroupClass}>
-                      <div
+                      {colors.fill && <div
                         className="flex items-center gap-1.5"
                         title="Background / Fill Color"
                       >
                         <Palette className="w-5 h-5 text-gray-500" />
                         <ColorPicker
                           value={
-                            targetProps.color ||
-                            ([
-                              "triangle",
-                              "diamond",
-                              "hexagon",
-                              "ellipse",
-                              "section",
-                            ].includes(activeType)
-                              ? "#ffffff"
-                              : undefined)
+                            targetProps.color || defaultFillColor(activeType)
                           }
                           onChange={(c) => onUpdateTarget({ color: c })}
                           customColors={customColors.bg}
@@ -10142,8 +9451,8 @@ export default function BoardEditor({
                           allowTransparent
                           transparentTitle="Transparent Background"
                         />
-                      </div>
-                      {isTextLike && (
+                      </div>}
+                      {colors.text && (
                         <div
                           className="flex items-center gap-1.5 ml-2"
                           title="Text Color"
@@ -10151,7 +9460,7 @@ export default function BoardEditor({
                           <Type className="w-5 h-5 text-gray-500" />
                           <ColorPicker
                             value={targetProps.textColor || "#000000"}
-                            onChange={(c) => onUpdateTarget({ textColor: c })}
+                            onChange={changeTextColor}
                             customColors={customColors.text}
                             onAddCustomColor={(c, i) =>
                               handleAddCustomColor(c, i, "text")
@@ -10160,7 +9469,7 @@ export default function BoardEditor({
                         </div>
                       )}
                       {/* Border Color / Line Color */}
-                      {(!isTextLike ||
+                      {colors.stroke && (!isTextLike ||
                         targetProps.textSnapToGrid ||
                         (targetProps.borderWidth !== undefined &&
                           targetProps.borderWidth > 0)) && (
@@ -10171,7 +9480,7 @@ export default function BoardEditor({
                               ? "Frame Color"
                               : isTextLike
                                 ? "Line Color"
-                                : "Border Color"
+                              : colors.strokeOnly ? "Stroke Color" : "Border Color"
                           }
                         >
                           {isTextLike && !targetProps.textSnapToGrid ? (
@@ -10192,7 +9501,7 @@ export default function BoardEditor({
                               handleAddCustomColor(c, i, "border")
                             }
                             allowTransparent
-                            transparentTitle="Transparent Border"
+                            transparentTitle={colors.strokeOnly ? "Transparent Stroke" : "Transparent Border"}
                           />
                         </div>
                       )}
@@ -10200,7 +9509,7 @@ export default function BoardEditor({
                   )}
 
                   {/* Borders & Details */}
-                  {activeType !== "embed" && activeType !== "eraser" && !isTextLike && (
+                  {!["embed", "eraser", "media", "image", "fill"].includes(activeType) && !isTextLike && (
                     <div className={bottomToolbarGroupClass}>
                       <div
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
@@ -10275,34 +9584,12 @@ export default function BoardEditor({
                         </div>
                       )}
 
-                      {activeType === "section" && (
-                        <div
-                          className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors z-[100]"
-                          title="Section Collision (Internal)"
-                        >
-                          <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">
-                            Collision
-                          </span>
-                          <select
-                            value={targetProps.sectionCollision || "none"}
-                            onChange={(e) =>
-                              onUpdateTarget({
-                                sectionCollision: e.target.value as any,
-                              })
-                            }
-                            className="bg-transparent text-sm font-bold text-gray-800 outline-none w-16 text-center cursor-pointer"
-                          >
-                            <option value="none">None</option>
-                            <option value="block">Block</option>
-                            <option value="clip">Clip</option>
-                          </select>
-                        </div>
-                      )}
+
                     </div>
                   )}
 
-                  {/* Opacity - Always visible for everything except embed */}
-                  {activeType !== "embed" && activeType !== "eraser" && (
+                  {/* Element opacity */}
+                  {!["embed", "eraser", "media", "image"].includes(activeType) && (
                     <div className={bottomToolbarGroupClass}>
                       <div
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
@@ -10327,62 +9614,13 @@ export default function BoardEditor({
                           }
                           className="w-16 accent-black"
                         />
-                        <span className="text-[11px] font-bold tracking-wider text-gray-600 select-none w-6 text-right leading-none">
+                        <span className="text-[11px] font-bold tracking-wider text-gray-600 select-none min-w-[4ch] text-right leading-none tabular-nums">
                           {targetProps.opacity !== undefined
                             ? targetProps.opacity
                             : 100}
                           %
                         </span>
                       </div>
-                    </div>
-                  )}
-
-                  {selectedElement && selectedElement.type !== "layer" && (
-                    <div
-                      className={bottomToolbarGroupClass}
-                      data-element-preview-setting="true"
-                    >
-                      <span className="mr-1 text-[10px] font-bold uppercase tracking-wider text-gray-500">
-                        Preview
-                      </span>
-                      {(
-                        [
-                          ["inherit", "Global"],
-                          ["box", "Translucent"],
-                          ["realistic", "True"],
-                        ] as const
-                      ).map(([mode, label]) => {
-                        const isActive =
-                          mode === "inherit"
-                            ? targetProps.previewMode === undefined
-                            : targetProps.previewMode === mode;
-                        return (
-                          <button
-                            key={mode}
-                            type="button"
-                            title={
-                              mode === "inherit"
-                                ? `Follow global Preview (${previewMode === "box" ? "Translucent" : "True"})`
-                                : `Use ${label} preview for this element`
-                            }
-                            data-preview-mode={mode}
-                            onClick={() =>
-                              onUpdateTarget({
-                                previewMode:
-                                  mode === "inherit" ? undefined : mode,
-                              })
-                            }
-                            className={cn(
-                              "rounded-md border px-2 py-1.5 text-[10px] font-bold uppercase tracking-wide transition-colors",
-                              isActive
-                                ? "border-blue-300 bg-blue-50 text-blue-700"
-                                : "border-transparent text-gray-500 hover:border-gray-300 hover:bg-gray-100 hover:text-gray-900",
-                            )}
-                          >
-                            {label}
-                          </button>
-                        );
-                      })}
                     </div>
                   )}
 
@@ -10437,9 +9675,6 @@ export default function BoardEditor({
                                         onClick={() =>
                                           onUpdateTarget({
                                             webDeviceMode: mode,
-                                            webSessionId:
-                                              targetProps.webSessionId ||
-                                              generateId(),
                                             size:
                                               WEB_DEVICE_PROFILES[mode]
                                                 .defaultSize,
@@ -10454,6 +9689,11 @@ export default function BoardEditor({
                               </div>
                             </div>
 
+                            <button type="button" title="Block popups" aria-label="Block popups" aria-pressed={webSettings.popupBlocker}
+                              onClick={() => onUpdateTarget({ webPopupBlocker: !webSettings.popupBlocker })}
+                              className={cn('flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold transition-colors', webSettings.popupBlocker ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400')}>
+                              <SquareDashed className="h-4 w-4" />Popups
+                            </button>
                             {desktopWebRuntime && (
                               <>
                                 <button
@@ -10463,7 +9703,7 @@ export default function BoardEditor({
                                       webRememberSession:
                                         !webSettings.rememberSession,
                                       webSessionId:
-                                        targetProps.webSessionId || generateId(),
+                                        targetProps.webSessionId || targetProps.id || generateId(),
                                     })
                                   }
                                   className={cn(
@@ -10479,6 +9719,8 @@ export default function BoardEditor({
 
                                 <button
                                   title="Ad and tracker blocker"
+                                  aria-label="Ad blocker"
+                                  aria-pressed={webSettings.adBlock}
                                   onClick={() =>
                                     onUpdateTarget({
                                       webAdBlock: !webSettings.adBlock,
@@ -10497,6 +9739,7 @@ export default function BoardEditor({
                                     <ShieldOff className="w-4 h-4" />
                                   )}
                                   Ads
+                                  {webSettings.adBlock && selectedElement && <WebBlockingBadge partition={getWebPartition(selectedElement)} />}
                                 </button>
 
                                 <button
@@ -10520,25 +9763,6 @@ export default function BoardEditor({
                                 </button>
                               </>
                             )}
-
-                            <button
-                              title="Popup blocker"
-                              onClick={() =>
-                                onUpdateTarget({
-                                  webPopupBlocker:
-                                    !webSettings.popupBlocker,
-                                })
-                              }
-                              className={cn(
-                                "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold uppercase tracking-wider transition-colors",
-                                webSettings.popupBlocker
-                                  ? "border-blue-200 bg-blue-50 text-blue-700"
-                                  : "border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400",
-                              )}
-                            >
-                              <Ban className="w-4 h-4" />
-                              Popups
-                            </button>
 
                             {desktopWebRuntime && (
                               <button
@@ -10738,12 +9962,20 @@ export default function BoardEditor({
                       type="button"
                       title="Duplicate"
                       disabled={!selectedElement}
-                      onClick={() =>
-                        selectedElement && duplicateElement(selectedElement.id)
-                      }
-                      className="p-2 text-gray-600 bg-gray-100 hover:text-[#1A1A1A] hover:bg-gray-200 rounded-xl transition-colors border-[3px] border-gray-300 hover:border-gray-400 flex items-center justify-center shadow-sm disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-gray-100 disabled:hover:text-gray-600 disabled:hover:border-gray-300"
+                      data-duplicate-feedback={objectDuplicated || undefined}
+                      onClick={() => {
+                        if (!selectedElement) return;
+                        duplicateElement(selectedElement.id);
+                        setObjectDuplicated(true);
+                        if (objectDuplicatedTimerRef.current) clearTimeout(objectDuplicatedTimerRef.current);
+                        objectDuplicatedTimerRef.current = setTimeout(() => {
+                          setObjectDuplicated(false); objectDuplicatedTimerRef.current = null;
+                        }, 900);
+                      }}
+                      className={cn("p-2 rounded-xl transition-all border-[3px] flex items-center justify-center shadow-sm disabled:cursor-not-allowed disabled:opacity-40",
+                        objectDuplicated ? "text-green-700 bg-green-50 border-green-300 scale-110" : "text-gray-600 bg-gray-100 hover:text-[#1A1A1A] hover:bg-gray-200 border-gray-300 hover:border-gray-400")}
                     >
-                      <Copy className="w-5 h-5" />
+                      {objectDuplicated ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
                     </button>
                     <button
                       type="button"
@@ -10779,7 +10011,7 @@ export default function BoardEditor({
                       <Check className="w-5 h-5" />
                     </button>
                   </div>
-                </motion.div>
+                </ToolPropertiesBar>
               </AnimatePresence>
             );
           })()}
@@ -10808,9 +10040,12 @@ function BoardElementNode({
   onContextMenu,
   overlapMode: _overlapMode,
   elements,
+  sceneHierarchy,
   spinSnapEnabled = false,
   spinSnapDegrees = 15,
   allowEditing = true,
+  matchingToolEditing = false,
+  matchingToolMoving = false,
   isInteractionLocked = false,
   allowMovingElementsInPan = false,
   isBoardResizeEnabled = false,
@@ -10827,6 +10062,8 @@ function BoardElementNode({
   element: BoardElement;
   renderZIndex?: number;
   allowEditing?: boolean;
+  matchingToolEditing?: boolean;
+  matchingToolMoving?: boolean;
   allowMovingElementsInPan?: boolean;
   isBoardResizeEnabled?: boolean;
   isBoardMoveEnabled?: boolean;
@@ -10846,6 +10083,7 @@ function BoardElementNode({
   onContextMenu?: (e: React.MouseEvent) => void;
   overlapMode?: "none" | "partial" | "full";
   elements?: BoardElement[];
+  sceneHierarchy?: ElementHierarchy;
   spinSnapEnabled?: boolean;
   spinSnapDegrees?: number;
   showGrid?: boolean;
@@ -10872,6 +10110,8 @@ function BoardElementNode({
   const captureElementPointer = (event: React.PointerEvent) => {
     const pointerId = event.pointerId;
     const target = event.currentTarget as HTMLElement;
+    const captureToken = `${element.id}:${pointerId}`;
+    document.documentElement.dataset.boardPointerCapture = captureToken;
     try {
       target.setPointerCapture(pointerId);
     } catch {
@@ -10880,6 +10120,7 @@ function BoardElementNode({
     return {
       matches: (nextEvent: PointerEvent) => nextEvent.pointerId === pointerId,
       release: () => {
+        if (document.documentElement.dataset.boardPointerCapture === captureToken) delete document.documentElement.dataset.boardPointerCapture;
         try {
           if (target.hasPointerCapture(pointerId)) {
             target.releasePointerCapture(pointerId);
@@ -10917,7 +10158,7 @@ function BoardElementNode({
   ) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!nodeRef.current) return;
+    if (!nodeRef.current || !canResize) return;
 
     activePointerGestureCleanupRef.current?.();
     const pointerGesture = captureElementPointer(e);
@@ -11074,11 +10315,11 @@ function BoardElementNode({
       }
 
       const isProportional =
+        isTextScaling(element) ||
         proportionalScale ||
         element.keepRatio === true ||
         ((element.type === "image" || element.type === "media") &&
-          element.keepRatio !== false) ||
-        (TEXT_TYPES.includes(element.type) && dir.length === 2);
+          element.keepRatio !== false);
       if (
         isProportional &&
         (dir === "nw" || dir === "ne" || dir === "sw" || dir === "se")
@@ -11238,7 +10479,9 @@ function BoardElementNode({
         },
       };
 
-      if (TEXT_TYPES.includes(element.type) && dir.length === 2) {
+      if (isTextScaling(element)) {
+        updatePayload.textScale = resizedTextScale(element, startWidth, finalW);
+      } else if (isProportional && TEXT_TYPES.includes(element.type) && dir.length === 2) {
         const scaleRatio = finalW / startWidth;
         updatePayload.fontSize = Math.max(
           8,
@@ -11315,7 +10558,7 @@ function BoardElementNode({
       }
     }
 
-    if (!allowEditing) return;
+    if (!canInteract) return;
 
     const pointerTarget = e.target as HTMLElement;
     const isEditableTarget =
@@ -11344,8 +10587,9 @@ function BoardElementNode({
       return;
     }
 
-    if (activeTool === "pan" && !allowMovingElementsInPan) return;
+    if (!canMove) { if (activeTool === "pan") return; e.stopPropagation(); onSelect(); return; }
 
+    e.preventDefault();
     e.stopPropagation();
     onSelect();
 
@@ -11561,37 +10805,13 @@ function BoardElementNode({
     window.addEventListener("pointercancel", onPointerCancel);
   };
 
-  const isTextTool =
-    activeTool === "text" ||
-    activeTool === "h1" ||
-    activeTool === "h2" ||
-    activeTool === "h3" ||
-    activeTool === "bullet-list" ||
-    activeTool === "numbered-list" ||
-    activeTool === "sticky";
-  const isTextElement =
-    element.type === "text" ||
-    element.type === "h1" ||
-    element.type === "h2" ||
-    element.type === "h3" ||
-    element.type === "bullet-list" ||
-    element.type === "numbered-list" ||
-    element.type === "sticky";
-
-  let canInteract =
-    allowEditing &&
-    ((activeTool === "select" && element.type !== "board") ||
-      (activeTool === "pan" &&
-        allowMovingElementsInPan &&
-        element.type !== "board") ||
-      (activeTool === "board" && element.type !== "board") ||
-      activeTool === "link" ||
-      (activeTool === "section" && element.type === "section") ||
-      (isTextTool && isTextElement));
-  const isBoardInteraction =
-    element.type === "board" && (isBoardResizeEnabled || isBoardMoveEnabled);
-  if (isBoardInteraction && !isInteractionLocked) canInteract = true;
+  const permissions = getElementPermissions({ tool: activeTool ?? "select", element, locked: isInteractionLocked, handEditing: allowEditing, handMoving: allowMovingElementsInPan, matchingEditing: matchingToolEditing, matchingMoving: matchingToolMoving });
+  const canResize = permissions.canResize || (element.type === "board" && isBoardResizeEnabled && !isInteractionLocked);
+  const canMove = permissions.canMove || (element.type === "board" && isBoardMoveEnabled && !isInteractionLocked);
+  const canInteract = permissions.canSelect || canResize || canMove;
+  const isBoardInteraction = element.type === "board" && (canResize || canMove);
   const isRatioLocked =
+    isTextScaling(element) ||
     element.keepRatio === true ||
     ((element.type === "image" || element.type === "media") &&
       element.keepRatio !== false);
@@ -11624,76 +10844,11 @@ function BoardElementNode({
     : element;
   const boardClipStyle = (() => {
     if (!pageDimensions || element.type === "board") return undefined;
-    const width = element.size?.width || 100;
-    const height = element.size?.height || 40;
-    const rotation = element.rotation || 0;
-    const elementCenterPoint = {
-      x: element.position.x + width / 2,
-      y: element.position.y + height / 2,
-    };
-    const pointInsideElement = (
-      target: BoardElement,
-      point: { x: number; y: number },
-    ) => {
-      const targetWidth = target.size?.width || 0;
-      const targetHeight = target.size?.height || 0;
-      const targetCenterX = target.position.x + targetWidth / 2;
-      const targetCenterY = target.position.y + targetHeight / 2;
-      const targetRad = (-(target.rotation || 0) * Math.PI) / 180;
-      const dx = point.x - targetCenterX;
-      const dy = point.y - targetCenterY;
-      const localX =
-        targetWidth / 2 + dx * Math.cos(targetRad) - dy * Math.sin(targetRad);
-      const localY =
-        targetHeight / 2 + dx * Math.sin(targetRad) + dy * Math.cos(targetRad);
-      return (
-        localX >= 0 &&
-        localX <= targetWidth &&
-        localY >= 0 &&
-        localY <= targetHeight
-      );
-    };
-    const secondaryBoard = (elements || [])
-      .filter((candidate) => candidate.type === "board" && candidate.id !== element.id)
-      .sort((a, b) => compareElementStack(b, a, elements || []))
-      .find((candidate) => pointInsideElement(candidate, elementCenterPoint));
-    const clipBounds = secondaryBoard
-      ? {
-          x: secondaryBoard.position.x,
-          y: secondaryBoard.position.y,
-          width: secondaryBoard.size?.width || 0,
-          height: secondaryBoard.size?.height || 0,
-        }
-      : { x: 0, y: 0, width: pageDimensions.width, height: pageDimensions.height };
-    const centerX = width / 2;
-    const centerY = height / 2;
-    const originX = element.position.x + centerX;
-    const originY = element.position.y + centerY;
-    const rad = (-rotation * Math.PI) / 180;
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    const localBoardPoints = [
-      { x: clipBounds.x, y: clipBounds.y },
-      { x: clipBounds.x + clipBounds.width, y: clipBounds.y },
-      {
-        x: clipBounds.x + clipBounds.width,
-        y: clipBounds.y + clipBounds.height,
-      },
-      { x: clipBounds.x, y: clipBounds.y + clipBounds.height },
-    ].map((point) => {
-      const dx = point.x - originX;
-      const dy = point.y - originY;
-      return {
-        x: centerX + dx * cos - dy * sin,
-        y: centerY + dx * sin + dy * cos,
-      };
-    });
-
-    return {
-      clipPath: `polygon(${localBoardPoints
-        .map((point) => `${point.x}px ${point.y}px`)
-        .join(", ")})`,
-    };
+    const center = { x: element.position.x + (element.size?.width ?? 100) / 2, y: element.position.y + (element.size?.height ?? 40) / 2 };
+    const board = (elements ?? []).filter(e => e.type === 'board').sort((a,b) => b.zIndex-a.zIndex).find(e =>
+      center.x >= e.position.x && center.x <= e.position.x + (e.size?.width ?? 0) && center.y >= e.position.y && center.y <= e.position.y + (e.size?.height ?? 0));
+    const boundary = board ? elementPolygon(board) : elementPolygon({ position: { x:0, y:0 }, size: pageDimensions });
+    return { clipPath: getSectionClipPath(element, elements ?? [], boundary, sceneHierarchy) };
   })();
 
   // We should also override the drag ability if they only enabled resize, but
@@ -11759,6 +10914,7 @@ function BoardElementNode({
                 interactionPreview.size?.width ?? element.size?.width ?? 100,
               height:
                 interactionPreview.size?.height ?? element.size?.height ?? 40,
+              clipPath: getSectionClipPath({ ...element, ...interactionPreview }, elements ?? []),
               zIndex: 100001,
               transformOrigin: "center center",
               transform: `rotate(${element.rotation || 0}deg)`,
@@ -11804,6 +10960,8 @@ function BoardElementNode({
       )}
       data-board-surface={element.type === "board" ? "true" : undefined}
       data-board-element="true"
+      data-board-element-id={element.id}
+      data-board-element-type={element.type}
       style={{
         left: element.position.x,
         top: element.position.y,
@@ -11846,7 +11004,7 @@ function BoardElementNode({
           onJumpToTarget(element.linkToId);
           return;
         }
-        if (allowEditing) onSelect();
+        if (canInteract) onSelect();
       }}
       onContextMenu={(e) => {
         if (onContextMenu && canInteract && !isInteractionLocked) {
@@ -11861,7 +11019,7 @@ function BoardElementNode({
         ref={nodeRef}
         className={cn(
           "relative group",
-          isInteractionLocked &&
+          (isInteractionLocked || (["draw", "fill", "eraser"].includes(activeTool ?? "") && !canInteract)) &&
             "pointer-events-none [&_*]:!pointer-events-none",
           element.type === "line" && "pointer-events-none",
           isSelected
@@ -11892,7 +11050,8 @@ function BoardElementNode({
                   element={croppedElement}
                   onUpdate={onUpdate}
                   isSelected={isSelected}
-                  allowEditing={canInteract}
+                  allowEditing={permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent)}
+                  allowContentEditing={permissions.canEditContent}
                   activeTool={activeTool}
                   showGrid={showGrid}
                   gridColor={gridColor}
@@ -11910,7 +11069,8 @@ function BoardElementNode({
               element={croppedElement}
               onUpdate={onUpdate}
               isSelected={isSelected}
-              allowEditing={canInteract}
+              allowEditing={permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent)}
+                  allowContentEditing={permissions.canEditContent}
               activeTool={activeTool}
               showGrid={showGrid}
               gridColor={gridColor}
@@ -11941,12 +11101,10 @@ function BoardElementNode({
           </button>
         )}
 
-        {isSelected && canInteract && (
+        {isSelected && canResize && (
           <>
             {/* Rotation Handle */}
-            {(!isBoardInteraction ||
-              activeTool === "select" ||
-              isBoardResizeEnabled) && (
+            {element.type !== "board" && (
               <>
                 <button
                   type="button"
@@ -12126,34 +11284,9 @@ function BoardElementNode({
   );
 }
 
-const MemoizedBoardElementNode = React.memo(
-  BoardElementNode,
-  (prev, next) => {
-    return (
-      prev.element === next.element &&
-      prev.renderZIndex === next.renderZIndex &&
-      prev.isSelected === next.isSelected &&
-      prev.isSelectMode === next.isSelectMode &&
-      prev.allowEditing === next.allowEditing &&
-      prev.allowMovingElementsInPan === next.allowMovingElementsInPan &&
-      prev.isBoardResizeEnabled === next.isBoardResizeEnabled &&
-      prev.isBoardMoveEnabled === next.isBoardMoveEnabled &&
-      prev.isInteractionLocked === next.isInteractionLocked &&
-      prev.activeTool === next.activeTool &&
-      prev.proportionalScale === next.proportionalScale &&
-      prev.globalPreviewMode === next.globalPreviewMode &&
-      prev.highlightAll === next.highlightAll &&
-      prev.showGrid === next.showGrid &&
-      prev.gridColor === next.gridColor &&
-      prev.gridSize === next.gridSize &&
-      prev.gridThickness === next.gridThickness &&
-      prev.altResizeCrops === next.altResizeCrops &&
-      prev.isAltKeyDown === next.isAltKeyDown &&
-      prev.overlapMode === next.overlapMode &&
-      prev.manualLinkSourceId === next.manualLinkSourceId
-    );
-  },
-);
+// Scene geometry and pointer callbacks both affect rendering/interaction.
+// Default comparison keeps those dependencies instead of silently ignoring them.
+const MemoizedBoardElementNode = React.memo(BoardElementNode);
 
 const ContentEditableText = ({
   content,
@@ -12221,9 +11354,7 @@ const ContentEditableText = ({
 
   useEffect(() => {
     const sanitizedContent = sanitizeRichText(content || "");
-    if (ref.current && ref.current.innerHTML !== sanitizedContent) {
-      ref.current.innerHTML = sanitizedContent;
-    }
+    if (ref.current) replaceTextEditorHtml(ref.current, sanitizedContent);
     if (sanitizedContent !== (content || "")) {
       onUpdateRef.current(sanitizedContent);
     }
@@ -12254,9 +11385,7 @@ const ContentEditableText = ({
     const observer = new MutationObserver(() => {
       if (isComposing.current) return;
       const sanitizedContent = sanitizeRichText(el.innerHTML);
-      if (sanitizedContent !== el.innerHTML) {
-        el.innerHTML = sanitizedContent;
-      }
+      replaceTextEditorHtml(el, sanitizedContent);
       if (sanitizedContent !== content) {
         queueContentUpdate(sanitizedContent);
       }
@@ -12307,9 +11436,7 @@ const ContentEditableText = ({
         if (ref.current) ref.current.scrollTop = 0;
         if (isComposing.current) return;
         const sanitizedContent = sanitizeRichText(e.currentTarget.innerHTML);
-        if (sanitizedContent !== e.currentTarget.innerHTML) {
-          e.currentTarget.innerHTML = sanitizedContent;
-        }
+        replaceTextEditorHtml(e.currentTarget, sanitizedContent);
         queueContentUpdate(sanitizedContent);
       }}
       onPaste={(event) => {
@@ -12333,9 +11460,7 @@ const ContentEditableText = ({
         isComposing.current = false;
         if (ref.current) ref.current.scrollTop = 0;
         const sanitizedContent = sanitizeRichText(e.currentTarget.innerHTML);
-        if (sanitizedContent !== e.currentTarget.innerHTML) {
-          e.currentTarget.innerHTML = sanitizedContent;
-        }
+        replaceTextEditorHtml(e.currentTarget, sanitizedContent);
         queueContentUpdate(sanitizedContent, true);
       }}
       onBlur={() => commitPendingContent(false)}
@@ -12391,30 +11516,61 @@ function WebBrowserElement({
   element,
   onUpdate,
   allowEditing,
+  allowContentEditing = false,
   isSelected,
   containerStyle,
 }: {
   element: BoardElement;
   onUpdate: (u: Partial<BoardElement>) => void;
   allowEditing?: boolean;
+  allowContentEditing?: boolean;
   isSelected?: boolean;
   containerStyle: React.CSSProperties;
 }) {
   const [linkInputVal, setLinkInputVal] = useState("");
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [loadError, setLoadError] = useState("");
+  const [retryVersion, setRetryVersion] = useState(0);
+  const [editingUrl, setEditingUrl] = useState(false);
   const [sessionCleared, setSessionCleared] = useState(false);
+  const [configuredPartition, setConfiguredPartition] = useState('');
+  const appliedPrivacyRef = useRef('');
   const webviewRef = useRef<any>(null);
-  const latestElementRef = useRef(element);
-  const latestOnUpdateRef = useRef(onUpdate);
-  latestElementRef.current = element;
-  latestOnUpdateRef.current = onUpdate;
   const settings = getWebSettings(element);
-  const profile = WEB_DEVICE_PROFILES[settings.deviceMode];
   const normalizedContent = normalizeWebUrl(element.content);
   const isElectron = hasDesktopWebRuntime();
+  const browserSource = getBrowserWebSource(normalizedContent);
+
+  const partition = getWebPartition(element);
+  const privacyIdentity = `${partition}:${settings.adBlock}:${settings.cookieBlocker}:${settings.popupBlocker}`;
+  const frameIdentity = isElectron ? `${partition}-${settings.deviceMode}` : `${normalizedContent}:${settings.popupBlocker}`;
+  useEffect(() => { setLoadState("loading"); setLoadError(""); }, [frameIdentity, retryVersion, editingUrl]);
+
+  useEffect(() => {
+    if (isElectron || !normalizedContent || editingUrl || browserSource.requiresDesktop || loadState !== "loading") return;
+    const timeout = window.setTimeout(() => {
+      setLoadState("error");
+      setLoadError("This page did not load in the embedded browser. Retry or open it in your browser.");
+    }, 15000);
+    return () => window.clearTimeout(timeout);
+  }, [isElectron, frameIdentity, retryVersion, editingUrl, browserSource.requiresDesktop, loadState]);
 
   useEffect(() => {
     if (!normalizedContent || !isElectron) return;
-    configureElectronWebSession(element, normalizedContent);
+    let current = true;
+    configureElectronWebSession(element, normalizedContent).then(configured => {
+      if (!current) return;
+      if (!configured) {
+        setLoadState('error'); setLoadError('Could not apply the Web settings. Please retry.');
+        return;
+      }
+      setConfiguredPartition(partition);
+      if (appliedPrivacyRef.current && appliedPrivacyRef.current !== privacyIdentity) {
+        try { webviewRef.current?.reload?.(); } catch { /* The new guest may still be attaching. */ }
+      }
+      appliedPrivacyRef.current = privacyIdentity;
+    });
+    return () => { current = false; };
   }, [
     normalizedContent,
     isElectron,
@@ -12424,75 +11580,16 @@ function WebBrowserElement({
     element.webAdBlock,
     element.webCookieBlocker,
     element.webPopupBlocker,
-  ]);
-
-  useEffect(() => {
-    if (!normalizedContent || !isElectron) return;
-    const webview = webviewRef.current;
-    if (!webview) return;
-
-    const applyDeviceProfile = () => {
-      try {
-        webview.setUserAgent(profile.userAgent);
-      } catch {}
-      try {
-        webview.setZoomFactor(1);
-      } catch {}
-      configureElectronWebSession(
-        latestElementRef.current,
-        webview.getURL?.() || normalizedContent,
-      );
-    };
-
-    const handleNavigate = (event: any) => {
-      const nextUrl = event?.url || webview.getURL?.();
-      if (!nextUrl) return;
-      const currentElement = latestElementRef.current;
-      configureElectronWebSession(currentElement, nextUrl);
-      // Electron may emit both navigation events for equivalent URLs. Only
-      // persist a genuinely different normalized URL to avoid a reload loop.
-      if (normalizeWebUrl(nextUrl) !== normalizeWebUrl(currentElement.content)) {
-        latestOnUpdateRef.current({ content: nextUrl });
-      }
-    };
-
-    const handleNewWindow = (event: any) => {
-      if (!settings.popupBlocker) return;
-      event.preventDefault?.();
-    };
-
-    webview.addEventListener("dom-ready", applyDeviceProfile);
-    webview.addEventListener("did-navigate", handleNavigate);
-    webview.addEventListener("did-navigate-in-page", handleNavigate);
-    webview.addEventListener("new-window", handleNewWindow);
-    applyDeviceProfile();
-
-    return () => {
-      webview.removeEventListener("dom-ready", applyDeviceProfile);
-      webview.removeEventListener("did-navigate", handleNavigate);
-      webview.removeEventListener("did-navigate-in-page", handleNavigate);
-      webview.removeEventListener("new-window", handleNewWindow);
-    };
-  }, [
-    normalizedContent,
-    isElectron,
-    profile.userAgent,
-    settings.popupBlocker,
-    settings.adBlock,
-    settings.cookieBlocker,
-    element.id,
-    element.webSessionId,
-    element.webRememberSession,
-    element.content,
+    retryVersion,
   ]);
 
   const applyUrl = (rawUrl: string) => {
     const url = normalizeWebUrl(rawUrl);
-    if (!url) return;
+    if (!url) { setLoadError("Enter a valid http or https address."); return; }
     onUpdate({
       content: url,
       mediaKind: "web",
-      webSessionId: element.webSessionId || generateId(),
+      webSessionId: element.webSessionId || element.id,
       webRememberSession: element.webRememberSession !== false,
       webDeviceMode: settings.deviceMode,
       webAdBlock: settings.adBlock,
@@ -12500,6 +11597,7 @@ function WebBrowserElement({
       webPopupBlocker: settings.popupBlocker,
     });
     setLinkInputVal("");
+    setEditingUrl(false);
   };
 
   return (
@@ -12529,26 +11627,33 @@ function WebBrowserElement({
         if (url) applyUrl(url);
       }}
     >
-      {normalizedContent ? (
-        isElectron ? (
-          React.createElement("webview", {
-            ref: webviewRef,
-            key: `${getWebPartition(element)}-${settings.deviceMode}`,
-            src: normalizedContent,
-            "data-web-element-id": element.id,
-            className: cn(
-              "w-full h-full bg-white",
-              allowEditing ? "pointer-events-none" : "pointer-events-auto",
-            ),
-            partition: getWebPartition(element),
-            useragent: profile.userAgent,
-            allowpopups: settings.popupBlocker ? undefined : "true",
-            webpreferences: "nativeWindowOpen=no",
-          })
+      {normalizedContent && !editingUrl ? (
+        isElectron ? configuredPartition !== partition ? null : (
+          <NativeWebView
+            key={`${partition}-${settings.deviceMode}-${retryVersion}`}
+            elementId={element.id} src={normalizedContent} partition={partition}
+            deviceMode={settings.deviceMode} interactive={!allowEditing} guestRef={webviewRef}
+            onReady={() => { setLoadState('ready'); setLoadError(''); }}
+            onLoading={() => setLoadState(current => current === 'ready' ? current : 'loading')}
+            onError={message => { setLoadState('error'); setLoadError(message); }}
+            onNavigate={url => {
+              configureElectronWebSession(element, url);
+              if (normalizeWebUrl(url) !== normalizedContent) onUpdate({ content: url });
+            }}
+          />
+        ) : browserSource.requiresDesktop ? (
+          <div onPointerDown={event => event.stopPropagation()} className="px-5 text-center text-xs text-slate-600"><Globe2 className="mx-auto mb-2 h-7 w-7" /><p>This YouTube page is available in the desktop app or your browser.</p><a href={normalizedContent} target="_blank" rel="noopener noreferrer" className="mt-3 inline-block rounded-lg bg-white px-3 py-2 font-bold text-blue-600 pointer-events-auto">Open YouTube</a></div>
         ) : (
           <iframe
             ref={webviewRef}
-            src={normalizedContent}
+            key={`${retryVersion}-${settings.popupBlocker}`}
+            src={browserSource.url}
+            title={browserSource.youtube ? "YouTube player" : "Web page"}
+            referrerPolicy="strict-origin-when-cross-origin"
+            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+            allowFullScreen
+            onLoad={() => { setLoadState("ready"); setLoadError(""); }}
+            onError={() => { setLoadState("error"); setLoadError("The page could not be loaded here."); }}
             className={cn(
               "w-full h-full bg-white",
               allowEditing ? "pointer-events-none" : "pointer-events-auto",
@@ -12567,6 +11672,7 @@ function WebBrowserElement({
           <div className="flex flex-col items-center gap-2 w-full">
             <input
               type="text"
+              disabled={!allowEditing && !allowContentEditing}
               placeholder="Paste web link..."
               value={linkInputVal}
               onChange={(e) => setLinkInputVal(e.target.value)}
@@ -12576,15 +11682,21 @@ function WebBrowserElement({
               onPointerDown={(e) => e.stopPropagation()}
               className={cn(
                 "bg-white border border-slate-300 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-white focus:bg-white focus:outline-none transition-colors w-full max-w-[230px] text-center shadow-sm placeholder:text-slate-400 placeholder:font-semibold",
-                allowEditing ? "pointer-events-auto" : "pointer-events-none",
+                allowEditing || allowContentEditing ? "pointer-events-auto" : "pointer-events-none",
               )}
             />
+            {loadError && <p role="alert" className="text-xs text-red-600">{loadError}</p>}
           </div>
         </div>
       )}
 
+      {normalizedContent && !editingUrl && !browserSource.requiresDesktop && loadState === "loading" && !loadError && <div role="status" className="pointer-events-none absolute bottom-2 left-2 rounded bg-white/90 px-2 py-1 text-[10px] text-slate-500">Loading page…</div>}
+      {normalizedContent && !editingUrl && !!loadError && <div onPointerDown={event => event.stopPropagation()} className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-50 p-4 text-center"><p role="alert" className="text-xs text-slate-600">{loadError}</p><button type="button" onClick={() => setRetryVersion(v => v + 1)} className="rounded-lg border bg-white px-3 py-1 text-xs font-bold pointer-events-auto">Retry</button><a href={normalizedContent} target="_blank" rel="noopener noreferrer" className="text-xs font-semibold text-blue-600 pointer-events-auto">Open in browser</a></div>}
+
       {normalizedContent && isSelected && (
         <div className="absolute top-2 right-2 z-30 flex max-w-[calc(100%-1rem)] items-center justify-end gap-1 overflow-hidden opacity-0 transition-opacity group-hover:opacity-100">
+          {!isElectron && <a href={normalizedContent} target="_blank" rel="noopener noreferrer" onPointerDown={event => event.stopPropagation()} title="Open in browser" aria-label="Open in browser" className="flex h-7 w-7 items-center justify-center rounded-md bg-white text-slate-900 shadow-sm ring-1 ring-black/10 pointer-events-auto"><ArrowUpRight className="h-3.5 w-3.5" /></a>}
+          <button type="button" title="Edit web address" aria-label="Edit web address" onPointerDown={event => { event.preventDefault(); event.stopPropagation(); setLinkInputVal(normalizedContent); setEditingUrl(true); }} className="h-7 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 pointer-events-auto">URL</button>
           {isElectron && (
             <button
               className="h-7 shrink-0 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-blue-50 pointer-events-auto"
@@ -12614,7 +11726,7 @@ function WebBrowserElement({
                 if (isElectron) {
                   webviewRef.current?.reload?.();
                 } else if (webviewRef.current) {
-                  webviewRef.current.src = normalizedContent;
+                  setRetryVersion(version => version + 1);
                 }
               } catch {}
             }}
@@ -12633,12 +11745,12 @@ function ElementVisuals({
   onUpdate,
   isSelected,
   allowEditing = true,
+  allowContentEditing = false,
   activeTool,
   showGrid,
   gridColor,
   gridSize,
   gridThickness,
-  elements,
   onJumpToTarget,
   onLinkEdit,
   onTextSelect,
@@ -12647,6 +11759,7 @@ function ElementVisuals({
   onUpdate: (u: Partial<BoardElement>, skipHistory?: boolean) => void;
   isSelected?: boolean;
   allowEditing?: boolean;
+  allowContentEditing?: boolean;
   activeTool?: string;
   showGrid?: boolean;
   gridColor?: string;
@@ -12893,6 +12006,8 @@ function ElementVisuals({
     case "text": {
       const defaultFSize =
         type === "h1" ? 36 : type === "h2" ? 24 : type === "h3" ? 18 : 16;
+      const textScale = getTextScale(element);
+      const layoutSize = size ? { width: size.width / textScale, height: size.height / textScale } : undefined;
       const fSize = element.fontSize || defaultFSize;
       const lh = Math.round(fSize * 1.5);
 
@@ -12908,40 +12023,11 @@ function ElementVisuals({
         taClass += " font-bold text-lg";
       }
 
-      let textMaxHeight: number | undefined = size?.height;
-
-      // If we are text, constrain height based on any parent sections
-      if (elements && size?.width) {
-        const w = size.width;
-        const h = size.height || 40;
-        const startPosX = element.position.x;
-        const startPosY = element.position.y;
-        const containerSections = elements.filter(
-          (el) =>
-            el.type === "section" &&
-            startPosX + w / 2 >= el.position.x &&
-            startPosX + w / 2 <= el.position.x + (el.size?.width || 0) &&
-            startPosY + h / 2 >= el.position.y &&
-            startPosY + h / 2 <= el.position.y + (el.size?.height || 0),
-        );
-
-        let maxHConstraint = Infinity;
-        for (const sec of containerSections) {
-          const secMaxY = sec.position.y + (sec.size?.height || 0);
-          const distToBottom = secMaxY - startPosY;
-          if (distToBottom < maxHConstraint) maxHConstraint = distToBottom;
-        }
-
-        if (maxHConstraint !== Infinity) {
-          const secConstraint = maxHConstraint - 8;
-          textMaxHeight = textMaxHeight
-            ? Math.min(textMaxHeight, secConstraint)
-            : secConstraint;
-        }
-      }
+      let textMaxHeight: number | undefined = layoutSize?.height;
 
       const hasBorder = borderWidth !== undefined && borderWidth > 0;
       return (
+        <div data-text-scale-shell={textScale} style={{ width: size?.width, height: size?.height }}>
         <div
           className={cn(
             wrapperClass,
@@ -12952,8 +12038,10 @@ function ElementVisuals({
           style={{
             minWidth: 20,
             minHeight: 20,
-            width: size?.width,
-            height: size?.height,
+            width: layoutSize?.width,
+            height: layoutSize?.height,
+            transform: `scale(${textScale})`,
+            transformOrigin: "0 0",
             backgroundColor:
               color === "transparent" ? "transparent" : color || "transparent",
             borderWidth: hasBorder
@@ -13008,6 +12096,7 @@ function ElementVisuals({
               (!content || content === "")
             }
           />
+        </div>
         </div>
       );
     }
@@ -13092,27 +12181,8 @@ function ElementVisuals({
       );
     case "board":
       return (
-        <div
-          data-board-surface="true"
-          style={{ backgroundColor: color || "#f9fafb", ...containerStyle }}
-          className={cn(
-            "flex flex-col overflow-hidden bg-white shadow-sm min-w-[5px] min-h-[5px] relative",
-            !borderWidth && "border border-gray-200",
-          )}
-        >
-          {/* Individual board grid (always visible to look like a workspace) */}
-          <div
-            className="absolute inset-0 pointer-events-none opacity-50"
-            style={{
-              backgroundImage: showGrid
-                ? `linear-gradient(to right, ${gridColor} ${gridThickness}px, transparent ${gridThickness}px), linear-gradient(to bottom, ${gridColor} ${gridThickness}px, transparent ${gridThickness}px)`
-                : "none",
-              backgroundSize: `${gridSize}px ${gridSize}px`,
-              backgroundPosition: "0 0",
-              zIndex: 0,
-            }}
-          />
-        </div>
+        <div data-board-surface="true" className="relative"
+          style={{ width: size?.width ?? 100, height: size?.height ?? 40, ...boardSurfaceStyle(element, { showGrid, gridColor, gridSize, gridThickness }) }} />
       );
     case "layer":
       return null;
@@ -13470,7 +12540,7 @@ function ElementVisuals({
                   controls={false}
                   loop={!!element.mediaLoop}
                   playsInline
-                  preload="metadata"
+                  preload="auto"
                   className="w-full h-full object-fill bg-transparent pointer-events-none"
                   style={{ borderRadius: containerStyle.borderRadius }}
                   onPlay={() => setIsVideoPlaying(true)}
@@ -13732,6 +12802,7 @@ function ElementVisuals({
     case "embed": {
       return (
         <WebBrowserElement
+          allowContentEditing={allowContentEditing}
           element={element}
           onUpdate={onUpdate}
           allowEditing={allowEditing}
@@ -13833,5 +12904,3 @@ function ElementVisuals({
       );
   }
 }
-
-

@@ -6,10 +6,8 @@ import {
   filterRequestHeaders,
   filterResponseHeaders,
   normalizeWebSessionSettings,
-  shouldBlockByAdList,
   shouldBlockCookies,
   shouldBlockPopup,
-  shouldBlockWebRequest,
 } from "../shared/electron-web-policy.js";
 
 test("web session settings are normalized to safe, stable defaults", () => {
@@ -17,7 +15,7 @@ test("web session settings are normalized to safe, stable defaults", () => {
     topLevelUrl: "",
     adBlock: true,
     cookieBlocker: "off",
-    popupBlocker: true,
+    popupBlocker: false,
   });
 
   assert.deepEqual(
@@ -48,23 +46,6 @@ test("web session settings are normalized to safe, stable defaults", () => {
       cookieBlocker: "invalid",
     }).cookieBlocker,
     "off",
-  );
-});
-
-test("ad filtering matches known ad hosts and URL patterns without substring host false positives", () => {
-  assert.equal(shouldBlockByAdList("https://ads.doubleclick.net/script.js"), true);
-  assert.equal(shouldBlockByAdList("https://doubleclick.net/script.js"), true);
-  assert.equal(shouldBlockByAdList("https://example.com/assets/banner.png"), true);
-  assert.equal(shouldBlockByAdList("https://notadsystem.com/script.js"), false);
-  assert.equal(shouldBlockByAdList("https://example.com/content/article"), false);
-
-  assert.equal(
-    shouldBlockWebRequest("https://ads.example.net/adserver.js", { adBlock: true }),
-    true,
-  );
-  assert.equal(
-    shouldBlockWebRequest("https://ads.example.net/adserver.js", { adBlock: false }),
-    false,
   );
 });
 
@@ -140,8 +121,9 @@ test("cookie header filters are immutable and case-insensitive", () => {
   assert.deepEqual(filteredResponse, { "Content-Type": ["text/html"] });
 });
 
-test("popup policy blocks by default, permits safe URLs when disabled, and keeps URL validation active", () => {
-  assert.equal(shouldBlockPopup("https://example.com/popup"), true);
+test("popup policy honors the switch while keeping URL validation active", () => {
+  assert.equal(shouldBlockPopup("https://example.com/popup"), false);
+  assert.equal(shouldBlockPopup("https://example.com/popup", { popupBlocker: true }), true);
   assert.equal(
     shouldBlockPopup("https://example.com/popup", { popupBlocker: false }),
     false,
@@ -168,6 +150,7 @@ test("allowed popups retain the isolated source partition and hardened preferenc
   assert.equal(options.autoHideMenuBar, true);
   assert.deepEqual(options.webPreferences, {
     nodeIntegration: false,
+    nodeIntegrationInSubFrames: true,
     contextIsolation: true,
     sandbox: true,
     webSecurity: true,

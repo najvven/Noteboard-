@@ -1,8 +1,11 @@
-import { app, BrowserWindow, Menu, ipcMain, shell, session } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents } from 'electron';
 import fs from 'fs/promises';
 import { watch as watchDirectory } from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
+import { createWebFilterService, adBlockingResponse, addFilterCsp } from './shared/web-filter-engine.js';
+import { installAdCosmeticHandlers } from './shared/electron-ad-cosmetics.js';
+import { configureWebViewport } from './shared/electron-web-viewport.js';
 import {
   assertValidBoard,
   MAX_BOARD_FILE_BYTES,
@@ -21,8 +24,8 @@ import {
   filterRequestHeaders,
   filterResponseHeaders,
   normalizeWebSessionSettings,
-  shouldBlockPopup,
-  shouldBlockWebRequest
+  shouldBlockCookies,
+  shouldBlockPopup
 } from './shared/electron-web-policy.js';
 import { repairLegacyBoard } from './shared/board-migration.js';
 import { installPermissionDenyHandlers } from './shared/electron-permissions.js';
@@ -45,6 +48,24 @@ const presetsFile = () => path.join(dataDir(), 'presets.json');
 const settingsFile = () => path.join(dataDir(), 'settings.json');
 const webSessionSettings = new Map();
 const configuredWebSessions = new Map();
+const webNavigationUrls = new WeakMap();
+const guestPreload = path.join(__dirname, 'dist', 'web-privacy-preload.cjs');
+const blockingCounts = new Map();
+let filterServicePromise;
+const getFilterService = () => filterServicePromise ??= createWebFilterService({
+  cacheFile: path.join(app.getPath('userData'), 'web-filters-cache.json'),
+}).then(service => {
+  const refresh = () => service.refresh().catch(error => console.warn('Filter update unavailable; keeping verified local lists.', error.message));
+  void refresh();
+  const timer = setInterval(refresh, 24 * 60 * 60 * 1000);
+  timer.unref();
+  return service;
+});
+const countBlocked = (partition, kind) => {
+  const counts = blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 };
+  counts[kind]++;
+  blockingCounts.set(partition, counts);
+};
 let boardsWatcher = null;
 let boardsWatchTimer = null;
 
@@ -69,6 +90,18 @@ const getPartitionForWebContents = (contents) => {
   return null;
 };
 
+installAdCosmeticHandlers(ipcMain, contents => webSessionSettings.get(getPartitionForWebContents(contents)), async () => (await getFilterService()).engine);
+ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
+  const settings = webSessionSettings.get(getPartitionForWebContents(event.sender));
+  if (!settings) { event.returnValue = null; return; }
+  let frame = event.senderFrame;
+  while (frame?.parent && /^about:(blank|srcdoc)/i.test(frame.url)) frame = frame.parent;
+  // The trusted preload has the new document URL even before frame.url commits.
+  const frameUrl = /^https?:\/\//i.test(documentUrl || '') ? documentUrl : frame?.url || '';
+  const topLevelUrl = webNavigationUrls.get(event.sender) || event.sender.mainFrame.url || settings.topLevelUrl;
+  event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }) };
+});
+
 const updateWebSessionTopLevelUrl = (contents, url) => {
   const partition = getPartitionForWebContents(contents);
   if (!partition || !isAllowedEmbeddedWebUrl(url)) return;
@@ -76,50 +109,96 @@ const updateWebSessionTopLevelUrl = (contents, url) => {
   webSessionSettings.set(partition, { ...current, topLevelUrl: url });
 };
 
-const configureWebSession = (partition, settings = {}) => {
+const cookieUrl = cookie => `${cookie.secure ? 'https' : 'http'}://${cookie.domain.replace(/^\./, '')}${cookie.path || '/'}`;
+
+const requestPolicy = (details, settings) => {
+  const source = typeof details.webContentsId === 'number'
+    ? webContents.fromId(details.webContentsId)
+    : undefined;
+  if (source && details.resourceType === 'mainFrame') webNavigationUrls.set(source, details.url);
+  const currentUrl = source ? webNavigationUrls.get(source) || source.getURL() : undefined;
+  const topLevelUrl = details.resourceType === 'mainFrame' ? details.url : currentUrl;
+  return /^https?:\/\//i.test(topLevelUrl || '') ? { ...settings, topLevelUrl } : settings;
+};
+
+const configureWebSession = async (partition, settings = {}) => {
   if (!isAllowedWebPartition(partition)) {
     return false;
   }
 
   const normalized = normalizeWebSessionSettings(settings);
+  if (normalized.adBlock) await getFilterService();
+  const previous = webSessionSettings.get(partition);
   webSessionSettings.set(partition, normalized);
-
-  if (configuredWebSessions.has(partition)) return true;
-
   const webSession = session.fromPartition(partition);
+  // Blocking all cookies also removes existing cookies from this isolated field.
+  if (normalized.cookieBlocker === 'all' && previous?.cookieBlocker !== 'all') {
+    await webSession.clearStorageData({ storages: ['cookies'] });
+  }
+  if (configuredWebSessions.has(partition)) {
+    return true;
+  }
+
   installPermissionDenyHandlers(webSession);
   configuredWebSessions.set(partition, webSession);
-
-  const requestFilter = { urls: ['http://*/*', 'https://*/*'] };
-
-  webSession.webRequest.onBeforeRequest(requestFilter, (details, callback) => {
+  webSession.registerPreloadScript({ type: 'frame', filePath: guestPreload });
+  webSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    if (removed) return;
     const current = webSessionSettings.get(partition) || normalizeWebSessionSettings();
-    if (shouldBlockWebRequest(details.url, current)) {
-      callback({ cancel: true });
-      return;
+    const url = cookieUrl(cookie);
+    // An allowed popup is a first-party page in its own right, even though it
+    // shares the originating field's session and blocking preferences.
+    const isOpenFirstParty = current.cookieBlocker === 'third-party' && webContents.getAllWebContents().some(contents => {
+      if (contents.session !== webSession) return false;
+      const topLevelUrl = webNavigationUrls.get(contents) || contents.getURL();
+      return /^https?:\/\//i.test(topLevelUrl) && !shouldBlockCookies(url, { ...current, topLevelUrl });
+    });
+    if (!isOpenFirstParty && shouldBlockCookies(url, current)) {
+      countBlocked(partition, 'cookies');
+      webSession.cookies.remove(url, cookie.name).catch(error => console.warn('Could not discard a blocked cookie.', error));
     }
-    callback({ cancel: false });
+  });
+
+  const requestFilter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] };
+
+  webSession.webRequest.onBeforeRequest(requestFilter, async (details, callback) => {
+    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
+    try {
+      const result = current.adBlock
+        ? adBlockingResponse((await getFilterService()).engine, details, current.topLevelUrl)
+        : { cancel: false };
+      if (result.cancel || result.redirectURL) countBlocked(partition, 'ads');
+      callback(result);
+    } catch (error) {
+      console.error('Could not enforce Web blocking settings.', error);
+      callback({ cancel: true });
+    }
   });
 
   webSession.webRequest.onBeforeSendHeaders(requestFilter, (details, callback) => {
-    const current = webSessionSettings.get(partition) || normalizeWebSessionSettings();
+    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
     const requestHeaders = filterRequestHeaders(
       details.requestHeaders,
       details.url,
       current
     );
+    if (Object.keys(requestHeaders).length < Object.keys(details.requestHeaders || {}).length) countBlocked(partition, 'cookies');
 
     callback({ requestHeaders });
   });
 
-  webSession.webRequest.onHeadersReceived(requestFilter, (details, callback) => {
-    const current = webSessionSettings.get(partition) || normalizeWebSessionSettings();
-    const responseHeaders = filterResponseHeaders(
+  webSession.webRequest.onHeadersReceived(requestFilter, async (details, callback) => {
+    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
+    let responseHeaders = filterResponseHeaders(
       details.responseHeaders,
       details.url,
       current
     );
-
+    if (Object.keys(responseHeaders).length < Object.keys(details.responseHeaders || {}).length) countBlocked(partition, 'cookies');
+    if (current.adBlock) {
+      try { responseHeaders = addFilterCsp((await getFilterService()).engine, details, responseHeaders, current.topLevelUrl); }
+      catch (error) { console.error('Could not apply ad filter policy.', error); callback({ cancel: true }); return; }
+    }
     callback({ responseHeaders });
   });
 
@@ -239,6 +318,15 @@ handleTrusted('web-session:configure', async (_event, payload = {}) => {
   return configureWebSession(partition, payload.settings || {});
 });
 
+handleTrusted('web-viewport:configure', async (event, payload = {}) => {
+  const guest = Number.isInteger(payload.guestId) ? webContents.fromId(payload.guestId) : null;
+  if (!guest || guest.isDestroyed() || guest.getType() !== 'webview' ||
+      guest.hostWebContents !== event.sender || !getPartitionForWebContents(guest)) {
+    throw new Error('Web viewport request does not belong to this board window.');
+  }
+  return configureWebViewport(guest, payload, process.versions.chrome, process.platform);
+});
+
 handleTrusted('web-session:clear', async (_event, partition) => {
   if (!isAllowedWebPartition(partition)) {
     return false;
@@ -259,6 +347,14 @@ handleTrusted('web-session:clear', async (_event, partition) => {
   });
   await webSession.clearCache();
   return true;
+});
+
+handleTrusted('web-session:status', async (_event, partition) => {
+  if (!isAllowedWebPartition(partition)) return null;
+  const settings = webSessionSettings.get(partition);
+  if (!settings) return null;
+  const filters = settings.adBlock ? (await getFilterService()).manifest : null;
+  return { ...(blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 }), filtersUpdatedAt: filters?.fetchedAt ?? null, filterRules: filters ? filters.networkRules + filters.cosmeticRules : 0 };
 });
 
 function createWindow() {
@@ -293,13 +389,22 @@ function createWindow() {
 
   win.webContents.once('did-finish-load', updateZoomFactor);
   win.on('resize', updateZoomFactor);
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) {
+      shell.openExternal(url).catch(error => console.warn('Could not open web link.', error));
+    }
+    return { action: 'deny' };
+  });
   win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
     delete webPreferences.preload;
     webPreferences.nodeIntegration = false;
+    // Required for our trusted preload in child frames. Page worlds stay
+    // sandboxed and isolated with no Node APIs (covered by native tests).
+    webPreferences.nodeIntegrationInSubFrames = true;
     webPreferences.contextIsolation = true;
     webPreferences.sandbox = true;
     webPreferences.webSecurity = true;
+    webPreferences.zoomFactor = 1;
     webPreferences.allowRunningInsecureContent = false;
     const allowedPartition = isAllowedWebPartition(params.partition);
     if (allowedPartition) {
@@ -343,7 +448,8 @@ function createWindow() {
 }
 
 app.on('web-contents-created', (_event, contents) => {
-  if (contents.getType?.() !== 'webview') return;
+  const isGuest = contents.getType?.() === 'webview';
+  if (!isGuest && !getPartitionForWebContents(contents)) return;
   installPermissionDenyHandlers(contents.session);
 
   contents.setWindowOpenHandler((details) => {
@@ -353,6 +459,7 @@ app.on('web-contents-created', (_event, contents) => {
       : normalizeWebSessionSettings();
 
     if (shouldBlockPopup(details.url, current)) {
+      if (partition) countBlocked(partition, 'popups');
       return { action: 'deny' };
     }
 
@@ -367,16 +474,16 @@ app.on('web-contents-created', (_event, contents) => {
       navigateEvent.preventDefault();
       return;
     }
-    updateWebSessionTopLevelUrl(contents, url);
+    if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
   contents.on('will-redirect', (redirectEvent, url) => {
     if (!isAllowedEmbeddedWebUrl(url)) redirectEvent.preventDefault();
   });
   contents.on('did-navigate', (_navigateEvent, url) => {
-    updateWebSessionTopLevelUrl(contents, url);
+    if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
   contents.on('did-navigate-in-page', (_navigateEvent, url) => {
-    updateWebSessionTopLevelUrl(contents, url);
+    if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
 });
 

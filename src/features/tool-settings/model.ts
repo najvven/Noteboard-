@@ -8,6 +8,9 @@ export interface ToolMenuSettings {
   alwaysOnTop: boolean;
   keepToolActive: boolean;
   previewMode: "box" | "realistic";
+  /** Opt-in transforms with the element's own creation tool. */
+  allowEditing?: boolean;
+  allowMoving?: boolean;
 }
 
 export type ToolMenuSettingKey = keyof ToolMenuSettings;
@@ -53,6 +56,12 @@ export const resolveToolMenuSettings = (
   alwaysOnTop: override?.alwaysOnTop ?? global.alwaysOnTop,
   keepToolActive: override?.keepToolActive ?? global.keepToolActive,
   previewMode: override?.previewMode ?? global.previewMode,
+  ...((override?.allowEditing ?? global.allowEditing) !== undefined
+    ? { allowEditing: override?.allowEditing ?? global.allowEditing }
+    : {}),
+  ...((override?.allowMoving ?? global.allowMoving) !== undefined
+    ? { allowMoving: override?.allowMoving ?? global.allowMoving }
+    : {}),
 });
 
 export const resolveToolMenuSettingsForId = (

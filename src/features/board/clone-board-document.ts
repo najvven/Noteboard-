@@ -116,6 +116,7 @@ export function cloneBoardDocument(
         options.preserveExternalLinks === true,
       ),
       position: { ...element.position },
+      ...(element.type === 'embed' ? { webSessionId: elementIds.get(element.id)! } : {}),
       zIndex: Number.isFinite(element.zIndex) ? element.zIndex : index,
       size: element.size ? { ...element.size } : undefined,
       points: element.points?.map((point) => ({ ...point })),

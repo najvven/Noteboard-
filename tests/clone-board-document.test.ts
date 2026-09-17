@@ -6,6 +6,15 @@ import {
   cloneBoardDocument,
 } from "../src/features/board/clone-board-document";
 
+test('cloned Web fields retain privacy choices without sharing the source session', () => {
+  const original: BoardElement = { id: 'web', type: 'embed', position: { x: 0, y: 0 }, content: 'https://example.com', zIndex: 1, webSessionId: 'original-session', webAdBlock: true, webPopupBlocker: true, webCookieBlocker: 'all' };
+  const copy = cloneBoardDocument([original], [], () => 'copy').elements[0];
+  assert.equal(copy.webSessionId, copy.id);
+  assert.notEqual(copy.webSessionId, original.webSessionId);
+  assert.equal(original.webSessionId, 'original-session');
+  assert.equal(copy.webAdBlock, true); assert.equal(copy.webPopupBlocker, true); assert.equal(copy.webCookieBlocker, 'all');
+});
+
 test("cloning a board remaps element and spreadsheet references without mutating source", () => {
   const elements: BoardElement[] = [
     {

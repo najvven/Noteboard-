@@ -75,6 +75,8 @@ export interface BoardElement {
   textAlign?: 'left' | 'center' | 'right';
   lineHeight?: number;
   fontSize?: number;
+  textScaling?: boolean;
+  textScale?: number;
   fontWeight?: number;
   textSnapToGrid?: boolean;
   textLinesMode?: 'everywhere' | 'text-only';
@@ -132,6 +134,7 @@ export interface BoardEditorSettings {
   overlapShortcut?: string;
   cropShortcut?: string;
   scrollZoomShortcut?: string;
+  zoomToCursor?: boolean;
   cutShortcut?: string;
   proportionalScale?: boolean;
   altResizeCrops?: boolean;

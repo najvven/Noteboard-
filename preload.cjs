@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 contextBridge.exposeInMainWorld("noteboardAPI", {
   loadPages: () => ipcRenderer.invoke("storage:get-pages"),
@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld("noteboardAPI", {
   saveSettings: (settings) => ipcRenderer.invoke("storage:save-settings", settings),
   openBoardsFolder: () => ipcRenderer.invoke("storage:open-boards-folder"),
   configureWebSession: (payload) => ipcRenderer.invoke("web-session:configure", payload),
+  configureWebViewport: (payload) => ipcRenderer.invoke("web-viewport:configure", payload),
+  getWebHostZoom: () => webFrame.getZoomFactor(),
+  getWebBlockingStatus: (partition) => ipcRenderer.invoke("web-session:status", partition),
   clearWebSession: (partition) => ipcRenderer.invoke("web-session:clear", partition),
   onBoardsChanged: (callback) => {
     if (typeof callback !== "function") return () => undefined;

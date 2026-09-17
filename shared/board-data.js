@@ -178,6 +178,12 @@ export function assertValidBoard(page) {
     if (element.content !== undefined && typeof element.content !== "string") {
       throw new Error("Board element content is invalid.");
     }
+    if (element.textScale !== undefined && (!Number.isFinite(element.textScale) || element.textScale <= 0 || element.textScale > MAX_BOARD_DIMENSION)) {
+      throw new Error('Board text scale is invalid.');
+    }
+    if (element.textScaling !== undefined && typeof element.textScaling !== 'boolean') {
+      throw new Error('Board text scaling setting is invalid.');
+    }
     if (
       element.previewMode !== undefined &&
       element.previewMode !== "box" &&

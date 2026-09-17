@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import SegmentedControl from "./SegmentedControl";
 import { cn } from "../lib/utils";
 import { ChevronDown, Settings2 } from "lucide-react";
 
@@ -13,6 +14,10 @@ interface MenuSettingsBlockProps {
   onPreviewModeChange: (value: PreviewMode) => void;
   compact?: boolean;
   narrow?: boolean;
+  allowEditing?: boolean;
+  onAllowEditingChange?: (value: boolean) => void;
+  allowMoving?: boolean;
+  onAllowMovingChange?: (value: boolean) => void;
 }
 
 const Toggle = ({
@@ -60,6 +65,10 @@ const MenuSettingsBlock = ({
   onPreviewModeChange,
   compact = false,
   narrow = false,
+  allowEditing = false,
+  onAllowEditingChange,
+  allowMoving = false,
+  onAllowMovingChange,
 }: MenuSettingsBlockProps) => {
   const [expanded, setExpanded] = useState(false);
 
@@ -67,12 +76,12 @@ const MenuSettingsBlock = ({
     <div
       data-compact={compact ? "true" : undefined}
       data-narrow={narrow ? "true" : undefined}
-      data-menu-settings-height="32"
+      data-menu-settings-height="24"
       className={cn(
         "menu-settings-block relative box-border min-w-0 w-full",
         compact
           ? "mt-0 border-t-0"
-          : "mt-2 border-t-2 border-gray-300 pt-2",
+          : "mt-0 border-t-2 border-gray-300 pt-2",
       )}
     >
       <button
@@ -83,20 +92,20 @@ const MenuSettingsBlock = ({
           setExpanded((value) => !value);
         }}
         className={cn(
-          "menu-settings-header box-border flex h-8 min-h-8 w-full items-center justify-between rounded-lg py-0 text-left font-bold leading-none text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900",
+          "menu-settings-header box-border flex h-6 min-h-6 w-full items-center justify-between rounded-lg py-0 text-left font-bold leading-none text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900",
           narrow ? "px-1.5 text-[10px]" : "px-2 text-xs",
         )}
       >
         <span
           data-menu-settings-caption="true"
-          className="menu-settings-caption flex min-w-0 translate-y-px items-center gap-2 leading-4"
+          className="menu-settings-caption flex min-w-0 items-center gap-2 leading-4"
         >
           <Settings2 className="h-3.5 w-3.5 text-gray-500" />
           Tool settings
         </span>
         <ChevronDown
           className={cn(
-            "h-3.5 w-3.5 shrink-0 translate-y-px text-gray-500 transition-transform",
+            "h-3.5 w-3.5 shrink-0 text-gray-500 transition-transform",
             expanded && "rotate-180",
           )}
         />
@@ -110,6 +119,16 @@ const MenuSettingsBlock = ({
           )}
         >
           <div className="menu-settings-content-inner flex w-full min-w-0 flex-col gap-2">
+          {[
+            { label: 'Allow editing elements', value: allowEditing, change: onAllowEditingChange },
+            { label: 'Allow moving elements', value: allowMoving, change: onAllowMovingChange },
+          ].map(({ label, value, change }) => change ? (
+            <button key={label} type="button" aria-pressed={value}
+              onClick={() => change(!value)}
+              className="flex min-h-8 w-full items-center justify-between gap-3 text-left text-xs font-bold text-gray-700">
+              <span>{label}</span><Toggle checked={value} narrow={narrow} />
+            </button>
+          ) : null)}
           <div
             className={cn(
               "flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700 select-none",
@@ -137,34 +156,7 @@ const MenuSettingsBlock = ({
             )}
           >
             <span className="shrink-0 whitespace-nowrap">Tool mode</span>
-            <div className="menu-settings-control flex shrink-0 rounded-lg border border-gray-200 bg-gray-100 p-0.5 shadow-inner">
-              <button
-                type="button"
-                onClick={() => onKeepToolActiveChange(false)}
-                className={cn(
-                  "font-bold rounded-md uppercase tracking-wider text-center leading-none transition-colors",
-                  narrow ? "min-h-5 px-1 py-0.5 text-[9px]" : "min-h-6 px-1.5 py-1 text-[10px]",
-                  !keepToolActive
-                    ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                    : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-                )}
-              >
-                Unfixed
-              </button>
-              <button
-                type="button"
-                onClick={() => onKeepToolActiveChange(true)}
-                className={cn(
-                  "font-bold rounded-md uppercase tracking-wider text-center leading-none transition-colors",
-                  narrow ? "min-h-5 px-1 py-0.5 text-[9px]" : "min-h-6 px-1.5 py-1 text-[10px]",
-                  keepToolActive
-                    ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                    : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-                )}
-              >
-                Fixed
-              </button>
-            </div>
+            <SegmentedControl label="Tool mode" narrow={narrow} value={keepToolActive ? 'fixed' : 'unfixed'} onChange={value => onKeepToolActiveChange(value === 'fixed')} options={[{ value: 'unfixed', label: 'Unfixed' }, { value: 'fixed', label: 'Fixed' }]} />
           </div>
 
           <div
@@ -174,24 +166,7 @@ const MenuSettingsBlock = ({
             )}
           >
             <span className="shrink-0 whitespace-nowrap">Preview</span>
-            <div className="menu-settings-control flex shrink-0 rounded-lg border border-gray-200 bg-gray-100 p-0.5 shadow-inner">
-              {(["box", "realistic"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => onPreviewModeChange(mode)}
-                  className={cn(
-                    "font-bold rounded-md uppercase tracking-wider text-center leading-none transition-colors",
-                    narrow ? "min-h-5 px-1 py-0.5 text-[9px]" : "min-h-6 px-1.5 py-1 text-[10px]",
-                    previewMode === mode
-                      ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                      : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-                  )}
-                >
-                  {mode === "box" ? "Translucent" : "True"}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl label="Preview" narrow={narrow} value={previewMode} onChange={onPreviewModeChange} options={[{ value: 'box', label: 'Translucent' }, { value: 'realistic', label: 'True' }]} />
           </div>
           </div>
         </div>

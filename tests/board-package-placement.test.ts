@@ -3,15 +3,16 @@ import test from "node:test";
 
 import type { Page } from "../src/types";
 import { placeBoardPackage } from "../src/features/board/board-package-placement";
-import { createSectionSheetFromSections } from "../src/features/spreadsheet/model";
+import { createLegacySheet } from './helpers/legacy-sheet';
+import { parseWorkbookDocument } from '../src/features/spreadsheet/workbook';
 
 const sequentialIds = () => {
   let value = 0;
   return () => `placed-${++value}`;
 };
 
-test("placing a board package preserves sheets and remaps internal references", () => {
-  const created = createSectionSheetFromSections([], {
+test("placing a legacy board package converts old spreadsheet cells into an independent workbook", () => {
+  const created = createLegacySheet({
     sectionIds: [],
     layout: "rows",
     rows: 1,
@@ -42,19 +43,10 @@ test("placing a board package preserves sheets and remaps internal references", 
     createId: sequentialIds(),
   });
 
-  assert.equal(result.importedSheets.length, 1);
-  assert.equal(result.importedElements.length, 2);
-  const [placedA1, placedB1] = result.importedSheets[0].cellIds[0];
-  assert.notEqual(placedA1, a1);
-  assert.equal(
-    result.importedElements.find((element) => element.id === placedB1)?.linkToId,
-    placedA1,
-  );
-  assert.equal(
-    result.importedElements.find((element) => element.id === placedA1)?.sheetCell
-      ?.sheetId,
-    result.importedSheets[0].id,
-  );
+  assert.equal(result.importedSheets.length, 0);
+  assert.equal(result.importedElements.length, 1);
+  assert.equal(result.importedElements[0].type,'table');
+  assert.ok(parseWorkbookDocument(result.importedElements[0].content));
   assert.ok(
     result.importedElements.every(
       (element) => element.parentId === "target-layer",
@@ -64,7 +56,7 @@ test("placing a board package preserves sheets and remaps internal references", 
 });
 
 test("placing a legacy sheet supplies optional defaults before cloning", () => {
-  const created = createSectionSheetFromSections([], {
+  const created = createLegacySheet({
     sectionIds: [],
     layout: "rows",
     rows: 1,
@@ -96,8 +88,8 @@ test("placing a legacy sheet supplies optional defaults before cloning", () => {
     createId: sequentialIds(),
   });
 
-  assert.equal(result.importedSheets[0].automations.length, 4);
-  assert.equal(typeof result.importedSheets[0].shortcuts.addRow, "string");
+  assert.equal(result.importedSheets.length,0);
+  assert.ok(parseWorkbookDocument(result.importedElements[0].content));
 });
 
 test("placing a package preserves source stacking independently of array order", () => {

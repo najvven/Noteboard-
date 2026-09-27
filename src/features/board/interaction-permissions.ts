@@ -10,7 +10,7 @@ export function matchesElementTool(tool: string, element: Pick<BoardElement, 'ty
 
 export function getElementPermissions({ tool, element, locked = false, handEditing = true, handMoving = false, matchingEditing = false, matchingMoving = false }: {
   tool: string;
-  element: Pick<BoardElement, 'type'>;
+  element: Pick<BoardElement, 'type' | 'mediaMime'>;
   locked?: boolean;
   handEditing?: boolean;
   handMoving?: boolean;
@@ -18,9 +18,10 @@ export function getElementPermissions({ tool, element, locked = false, handEditi
   matchingMoving?: boolean;
 }) {
   const matching = matchesElementTool(tool, element);
-  const canResize = !locked && element.type !== 'board' && (tool === 'select' || (tool === 'pan' && handEditing) || (matching && matchingEditing));
+  const cropTarget=tool==='crop'&&(element.type==='image'||(element.type==='media'&&/^(image|video)\//.test(element.mediaMime??'')));
+  const canResize = !locked && element.type !== 'board' && (cropTarget || tool === 'select' || (tool === 'pan' && handEditing) || (matching && matchingEditing));
   const canMove = !locked && element.type !== 'board' && (tool === 'select' || (tool === 'pan' && handMoving) || (matching && matchingMoving));
   const canEditText = !locked && ((matching && (TEXT_TOOLS.has(element.type) || element.type === 'sticky' || element.type === 'section')) || tool === 'link');
-  const canEditContent = canEditText || (!locked && matching && ['media', 'image', 'embed'].includes(element.type));
+  const canEditContent = canEditText || (!locked && matching && ['media', 'image', 'embed', 'table'].includes(element.type));
   return { canResize, canMove, canEditText, canEditContent, canSelect: canResize || canMove || canEditContent || (!locked && tool === 'link') };
 }

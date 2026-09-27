@@ -31,6 +31,10 @@ interface NoteboardDesktopApi {
   configureWebSession: (payload: WebSessionPayload) => Promise<boolean>;
   configureWebViewport: (payload: { guestId: number; deviceMode: string; width: number; height: number }) => Promise<boolean>;
   getWebHostZoom: () => number;
+  enterWebFullscreen: (guestId: number) => Promise<boolean>;
+  sampleBoardColor: (point:{x:number;y:number})=>Promise<string>;
+  setBoardZoomState: (state: {shortcut:string;active:boolean}) => Promise<boolean>;
+  onWebWheel: (callback: (event:{guestId:number;guestX:number;guestY:number;deltaY:number})=>void) => () => void;
   getWebBlockingStatus?: (partition: string) => Promise<WebBlockingStatus | null>;
   clearWebSession: (partition: string) => Promise<boolean>;
   onBoardsChanged: (callback: () => void) => () => void;

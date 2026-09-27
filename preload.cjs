@@ -12,6 +12,14 @@ contextBridge.exposeInMainWorld("noteboardAPI", {
   configureWebSession: (payload) => ipcRenderer.invoke("web-session:configure", payload),
   configureWebViewport: (payload) => ipcRenderer.invoke("web-viewport:configure", payload),
   getWebHostZoom: () => webFrame.getZoomFactor(),
+  enterWebFullscreen: (guestId) => ipcRenderer.invoke('web-view:fullscreen', guestId),
+  sampleBoardColor: (point) => ipcRenderer.invoke('board:sample-color',point),
+  setBoardZoomState: (state) => ipcRenderer.invoke('web-zoom:state', state),
+  onWebWheel: (callback) => {
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('noteboard:web-wheel', listener);
+    return () => ipcRenderer.removeListener('noteboard:web-wheel', listener);
+  },
   getWebBlockingStatus: (partition) => ipcRenderer.invoke("web-session:status", partition),
   clearWebSession: (partition) => ipcRenderer.invoke("web-session:clear", partition),
   onBoardsChanged: (callback) => {

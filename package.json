@@ -58,13 +58,22 @@
   "dependencies": {
     "@ghostery/adblocker": "2.18.2",
     "@ghostery/adblocker-electron-preload": "2.18.2",
+    "@univerjs/core": "1.0.2",
+    "@univerjs/preset-sheets-conditional-formatting": "1.0.2",
+    "@univerjs/preset-sheets-core": "1.0.2",
+    "@univerjs/preset-sheets-data-validation": "1.0.2",
+    "@univerjs/preset-sheets-filter": "1.0.2",
+    "@univerjs/preset-sheets-sort": "1.0.2",
+    "@univerjs/presets": "1.0.2",
     "clsx": "^2.1.1",
+    "exceljs": "4.4.0",
     "express": "^4.21.2",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "rxjs": "7.8.2",
     "tailwind-merge": "^3.5.0",
     "tldts": "^7.4.9"
   },
@@ -85,5 +94,10 @@
     "typescript": "~5.8.2",
     "vite": "^6.4.3",
     "wait-on": "^9.0.5"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   }
 }

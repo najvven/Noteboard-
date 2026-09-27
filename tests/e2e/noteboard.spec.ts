@@ -351,8 +351,8 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
   const moreMenu = page.locator(
     '[data-toolbar-item="more"] > .toolbar-dropdown',
   );
-  await expect(moreMenu.locator("[data-more-toolbar-item]")).toHaveCount(4);
-  for (const id of ["embed", "board", "link", "object-presets"]) {
+  await expect(moreMenu.locator("[data-more-toolbar-item]")).toHaveCount(9);
+  for (const id of ["embed", "board", "link", "object-presets", "table", "polygon-select", "lasso", "crop", "eyedropper"]) {
     await expect(
       moreMenu.locator(`[data-more-toolbar-item="${id}"]`),
     ).toBeVisible();
@@ -986,7 +986,7 @@ test("shows every moved tool's complete menu inline in More", async ({
         .evaluate(
           (element) =>
             element.previousElementSibling?.getAttribute("data-more-toolbar-item") ===
-            "object-presets",
+            "eyedropper",
         ),
     )
     .toBe(true);

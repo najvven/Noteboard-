@@ -95,6 +95,8 @@ export default function NativeWebView(props: Props) {
       }
     };
     const crashed = () => reportError('The Web page stopped responding. Please retry.');
+    const enterFullscreen = () => { void window.noteboardAPI?.enterWebFullscreen(guest.getWebContentsId()).catch(error => console.warn('Could not enter Web fullscreen.', error)); };
+    const leaveFullscreen = () => { if (document.fullscreenElement === viewport) void document.exitFullscreen().catch(() => undefined); };
     guest.addEventListener('dom-ready', ready);
     guest.addEventListener('did-navigate', navigated);
     guest.addEventListener('did-navigate-in-page', navigated);
@@ -102,6 +104,8 @@ export default function NativeWebView(props: Props) {
     guest.addEventListener('did-start-navigation', navigationStarted);
     guest.addEventListener('did-fail-load', failed);
     guest.addEventListener('render-process-gone', crashed);
+    guest.addEventListener('enter-html-full-screen', enterFullscreen);
+    guest.addEventListener('leave-html-full-screen', leaveFullscreen);
     const observer = new ResizeObserver(resized);
     observer.observe(viewport);
     window.addEventListener('resize', resized);
@@ -120,6 +124,8 @@ export default function NativeWebView(props: Props) {
       guest.removeEventListener('did-start-navigation', navigationStarted);
       guest.removeEventListener('did-fail-load', failed);
       guest.removeEventListener('render-process-gone', crashed);
+      guest.removeEventListener('enter-html-full-screen', enterFullscreen);
+      guest.removeEventListener('leave-html-full-screen', leaveFullscreen);
     };
   }, []);
 

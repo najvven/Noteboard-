@@ -2,15 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { migratePage } from "../src/features/board/migrate-page";
-import { createSectionSheetFromSections } from "../src/features/spreadsheet/model";
+import { createLegacySheet } from './helpers/legacy-sheet';
+import { parseWorkbookDocument } from '../src/features/spreadsheet/workbook';
 
 const sequentialIds = () => {
   let value = 0;
   return () => `migrate-${++value}`;
 };
 
-test("page migration recomputes spreadsheet-derived values instead of trusting storage", () => {
-  const created = createSectionSheetFromSections([], {
+test("page migration converts old cells to a workbook and discards untrusted derived values", () => {
+  const created = createLegacySheet({
     sectionIds: [],
     layout: "rows",
     rows: 1,
@@ -41,10 +42,13 @@ test("page migration recomputes spreadsheet-derived values instead of trusting s
   };
 
   const migrated = migratePage(stored);
-  const formula = migrated.elements.find((element) => element.id === b1);
-
-  assert.equal(formula?.sheetCell?.computedValue, 14);
-  assert.equal(formula?.sheetCell?.error, undefined);
+  const workbook=parseWorkbookDocument(migrated.elements.find(element=>element.type==='table')!.content)!;
+  assert.equal(workbook.workbook.sheets!['sheet-1'].cellData[0][0].v,7);
+  assert.equal(workbook.workbook.sheets!['sheet-1'].cellData[0][1].f,'=A1*2');
+  assert.equal(workbook.workbook.sheets!['sheet-1'].cellData[0][1].v,undefined);
+  assert.equal(migrated.sectionSheets?.length,0);
+  assert.equal(migrated.elements.length,1);
+  assert.deepEqual(migrated.elements[0].size,{width:240,height:40});
   assert.notEqual(migrated.elements, storedElements);
 });
 
@@ -94,7 +98,7 @@ test("page migration scales with spreadsheet cells instead of sheets times all e
   const elapsed = performance.now() - startedAt;
 
   assert.equal(migrated.elements.length, count);
-  assert.equal(migrated.elements.at(-1)?.sheetCell?.computedValue, count - 1);
+  assert.equal(parseWorkbookDocument(migrated.elements.at(-1)!.content)!.workbook.sheets!['sheet-1'].cellData[0][0].v,count-1);
   assert.ok(elapsed < 4_000, `migration took ${Math.round(elapsed)} ms`);
 });
 

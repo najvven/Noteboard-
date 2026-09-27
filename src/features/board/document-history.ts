@@ -1,9 +1,11 @@
 import type { BoardElement } from "../../types";
 import type { SectionSheet } from "../spreadsheet/types";
+import type { MainBoardGeometry } from './board-resize';
 
 export interface BoardDocumentSnapshot {
   elements: BoardElement[];
   sectionSheets: SectionSheet[];
+  boardGeometry?: MainBoardGeometry;
 }
 
 export interface BoardDocumentHistory {

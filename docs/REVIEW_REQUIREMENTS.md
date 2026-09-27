@@ -65,6 +65,39 @@ Do not replace product requirements with generic UI preferences.
 
 ## Saving and review evidence
 
+- Ctrl+C/Cut/Paste use the current system clipboard. A previously copied board
+  object must not override newer OS text or media. Text editors and spreadsheet
+  cells own their own clipboard and keyboard gestures.
+- Native Web forwards the configured zoom shortcut over pages, video and nested
+  frames; ordinary scrolling remains ordinary after modifier release. Cursor
+  anchoring works through host zoom, board zoom and device emulation, up to 3200%.
+  Fullscreen preserves the existing guest and playback. Consent popup lifecycles
+  and background filter refresh must not throw in Electron's main process.
+- Main/additional board resizing share Keep content in place. When enabled,
+  adding/removing space leaves content stationary in the workspace; when disabled,
+  that board's contents follow its moved origin. Independent boards stay stationary.
+  Undo/redo restores both geometry and content; canceled Main Board resizing rolls back.
+- Polygon selection closes with Enter, a double click or the first vertex; Lasso
+  follows a freehand gesture. Respect hidden/locked objects and visible Section
+  clipping. Shift adds and Alt subtracts. Multi-selection moves, copies, duplicates,
+  cuts and deletes coherently; grouped moves commit once and honor preview mode.
+- Smart Guides show actual alignment and distances, and snapping uses the existing
+  object-snapping preference. Crop retains the source image/video and resizes its
+  crop independently of ratio. Native Eyedropper samples the actual rendered pixel
+  inside the app and applies the chosen supported color property.
+- The old Section-cell formula engine is replaced by workbook objects. Convert old
+  data once on import, preserve cell values/formulas/styles, and discard old computed
+  caches. Keep a single workbook snapshot through clone, history, save and export.
+- Spreadsheet editing has an explicit isolated input context. Cell selection, typing,
+  Delete, Undo, range paste, sorting, filtering, validation and conditional formatting
+  must not activate canvas gestures. Flush the current draft before Done and wait
+  for formula results. Removing a filter must recalculate visibility-aware formulas.
+- Use the OSS Univer engine and local workers; do not imply complete Excel format
+  compatibility. XLSX exchange supports values, formulas and basic formatting/merges/
+  dimensions; macros, charts and pivots are not provided. Import adds independent
+  sheets without replacing existing data and handles name/ID collisions. Large valid
+  workbook boards must round-trip through the normal portable archive limits.
+
 - Save as offers Template, independent New Board and portable File. Remap references
   and sessions when cloning. Include media in archives; preserve rich text and editor
   settings. Async failures must not report success or create silent duplicate copies.

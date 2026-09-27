@@ -1,5 +1,10 @@
 import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
+import { webWheelClientPoint } from '../features/web/wheel-point';
+import {useOutlineSelection} from '../features/board/use-outline-selection';
+import {selectedBounds} from '../features/board/selection';
+import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
+import SmartGuidesOverlay,{type SmartGuidesHandle} from './SmartGuidesOverlay';
 import {
   Page,
   BoardElement,
@@ -11,9 +16,6 @@ import {
 import { generateId, cn } from "../lib/utils";
 import { sanitizeRichText } from "../lib/sanitize-rich-text";
 import { BoardSettingsIcon } from "./icons/BoardSettingsIcon";
-import {
-  reconcileSectionSheetsAfterDeletion,
-} from "../features/spreadsheet/model";
 import {
   BUILT_IN_MORE_TOOL_IDS,
   canMoveToolbarItemToMore,
@@ -37,9 +39,13 @@ import WebBlockingBadge from "./WebBlockingBadge";
 import NativeWebView from "./NativeWebView";
 import { WEB_DEVICE_PROFILES, normalizeWebDeviceMode } from "../../shared/web-device.js";
 import SegmentedControl from "./SegmentedControl";
+import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget } from "../features/board/clipboard";
+import { boardMemberIds, resizeMainBoard, type MainBoardGeometry } from "../features/board/board-resize";
 import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
 import { elementColors, defaultFillColor } from "../features/board/element-colors";
 import SaveAsDialog from "./SaveAsDialog";
+import SpreadsheetElement from "./SpreadsheetElement";
+import { createWorkbookDocument, readLiveWorkbookSnapshots } from "../features/spreadsheet/workbook";
 import { createSavedBoard, createSavedTemplate, type SaveAsKind } from "../features/board/save-as";
 import MenuSettingsBlock, { type PreviewMode } from "./MenuSettingsBlock";
 import {
@@ -79,6 +85,11 @@ import {
 } from "../lib/storage";
 import {
   Move,
+  Table2,
+  Lasso,
+  LassoSelect,
+  Crop,
+  Pipette,
   ArrowLeft,
   Undo2,
   Redo2,
@@ -405,6 +416,11 @@ const TOOLBAR_ITEMS: {
   { id: "embed", label: "Web", icon: Globe2, slots: 2 },
   { id: "board", label: "New Board", icon: BoardSettingsIcon, slots: 2 },
   { id: "link", label: "Object Links", icon: Link2, slots: 2 },
+  { id: "table", label: "Spreadsheet", icon: Table2, slots: 2 },
+  { id: "polygon-select", label: "Polygon selection", icon: LassoSelect, slots: 2 },
+  { id: "lasso", label: "Lasso", icon: Lasso, slots: 2 },
+  { id: "crop", label: "Crop", icon: Crop, slots: 2 },
+  { id: "eyedropper", label: "Eyedropper", icon: Pipette, slots: 2 },
   {
     id: "object-presets",
     label: "Object Presets",
@@ -485,6 +501,7 @@ const getNextVideoPlaybackRate = (current?: number) => {
 };
 
 const getElementMinSize = (element: Pick<BoardElement, "type" | "mediaMime">) => {
+  if (element.type === "table") return { width: 280, height: 180 };
   if (element.type === "embed") return MIN_WEB_SIZE;
   if (element.type === "media") {
     if (element.mediaMime?.startsWith("audio/")) return AUDIO_DEFAULT_SIZE;
@@ -1003,6 +1020,24 @@ export default function BoardEditor({
   onSavePreset,
 }: Props) {
   const initialEditorSettings = page.editorSettings ?? {};
+  const [pageDimensions, setPageDimensions] = useState({
+    width: page.width || 1024,
+    height: page.height || 1024,
+  });
+  const [boardPosition, setBoardPosition] = useState({
+    x:
+      page.boardX ??
+      (page.workspaceWidth || 100000) / 2 - (page.width || 1024) / 2,
+    y:
+      page.boardY ??
+      (page.workspaceHeight || 100000) / 2 - (page.height || 1024) / 2,
+  });
+  const [keepBoardContentPosition,setKeepBoardContentPosition]=useState(initialEditorSettings.keepBoardContentPosition ?? true);
+  const boardGeometryRef=useRef<MainBoardGeometry>({size:pageDimensions,position:boardPosition});
+  boardGeometryRef.current={size:pageDimensions,position:boardPosition};
+  const applyMainBoardGeometry=(geometry:MainBoardGeometry)=>{boardGeometryRef.current=geometry;setPageDimensions(geometry.size);setBoardPosition(geometry.position);};
+  const secondaryResizeRef=useRef<{id:string;origin:{x:number;y:number};elements:BoardElement[];members:Set<string>;keepContent:boolean}|null>(null);
+  const beginSecondaryBoardResize=(id:string)=>{const board=elementsRef.current.find(element=>element.id===id);if(board)secondaryResizeRef.current={id,origin:{...board.position},elements:elementsRef.current,members:boardMemberIds(elementsRef.current,id,pageDimensions),keepContent:keepBoardContentPosition};};
   const initialSectionSheets = page.sectionSheets ?? [];
   const desktopWebRuntime = hasDesktopWebRuntime();
   const [elements, setElements] = useState<BoardElement[]>(page.elements);
@@ -1028,6 +1063,7 @@ export default function BoardEditor({
     createBoardDocumentHistory({
       elements: page.elements,
       sectionSheets: initialSectionSheets,
+      boardGeometry: boardGeometryRef.current,
     }),
   );
   const documentHistoryRef = useRef(documentHistory);
@@ -1041,7 +1077,7 @@ export default function BoardEditor({
   ) => {
     const nextHistory = pushBoardDocumentHistory(
       documentHistoryRef.current,
-      { elements: newElements, sectionSheets: newSectionSheets },
+      { elements: newElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current },
       50,
     );
     documentHistoryRef.current = nextHistory;
@@ -1073,6 +1109,7 @@ export default function BoardEditor({
       sectionSheetsRef.current = snapshot.sectionSheets;
       setElements(snapshot.elements);
       setSectionSheets(snapshot.sectionSheets);
+      if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
       setSelectedId(null);
     }
   };
@@ -1087,12 +1124,17 @@ export default function BoardEditor({
       sectionSheetsRef.current = snapshot.sectionSheets;
       setElements(snapshot.elements);
       setSectionSheets(snapshot.sectionSheets);
+      if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
       setSelectedId(null);
     }
   };
 
   const [title, setTitle] = useState(page.title);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectedId=selectedIds.length===1?selectedIds[0]:null;
+  const setSelectedId=(id:string|null)=>setSelectedIds(id?[id]:[]);
+  const groupMoveRef=useRef<{pointerId:number;x:number;y:number;elements:BoardElement[];ids:Set<string>;changed:boolean;preview:'box'|'realistic';latest?:BoardElement[]}|null>(null);
+  const selectionOutlineRef=useRef<HTMLDivElement>(null);
   const [customColors, setCustomColors] = useState<Record<string, string[]>>({
     bg: initialEditorSettings.customColors?.bg ?? ["", "", "", ""],
     text: initialEditorSettings.customColors?.text ?? ["", "", "", ""],
@@ -1121,10 +1163,7 @@ export default function BoardEditor({
     maxY: number;
   } | null>(null);
 
-  const [pageDimensions, setPageDimensions] = useState({
-    width: page.width || 1024,
-    height: page.height || 1024,
-  });
+
 
   const [workspaceDimensions] = useState({
     width: page.workspaceWidth || 100000,
@@ -1191,6 +1230,10 @@ export default function BoardEditor({
     height: number;
     boardX: number;
     boardY: number;
+    elements: BoardElement[];
+    members: Set<string>;
+    keepContent: boolean;
+    changed: boolean;
   } | null>(null);
   const beginMainBoardResize = (
     event: React.PointerEvent,
@@ -1206,6 +1249,7 @@ export default function BoardEditor({
       height: pageDimensions.height,
       boardX: boardPosition.x,
       boardY: boardPosition.y,
+      elements: elementsRef.current, members: boardMemberIds(elementsRef.current,"main-board",pageDimensions),keepContent:keepBoardContentPosition,changed:false,
     };
     setSelectedId(null);
     setIsMainBoardSelected(true);
@@ -1308,6 +1352,11 @@ export default function BoardEditor({
   const [enableObjectSnapping, setEnableObjectSnapping] = useState(
     initialEditorSettings.enableObjectSnapping ?? true,
   );
+  const [smartGuidesEnabled,setSmartGuidesEnabled]=useState(initialEditorSettings.smartGuidesEnabled??true);
+  const [eyedropperTarget,setEyedropperTarget]=useState<'fill'|'stroke'|'text'>('fill');
+  const [sampledColor,setSampledColor]=useState('#000000'),[samplingError,setSamplingError]=useState('');
+  const guidesOverlayRef=useRef<SmartGuidesHandle>(null);
+  const setVisibleGuides=(guides:SmartGuide[])=>guidesOverlayRef.current?.setGuides(guides);
   const [activeTool, _setActiveTool] = useState<string>(
     initialEditorSettings.activeTool ?? "select",
   );
@@ -1557,7 +1606,7 @@ export default function BoardEditor({
     null,
   );
   const [isInteracting, setIsInteracting] = useState(false);
-  const [zoom, setZoom] = useState(page.zoom ?? 1);
+  const [zoom, setZoom] = useState(clampZoom(page.zoom ?? 1));
   const zoomRef = useRef(zoom);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   const pendingZoomScrollRef = useRef<{ left: number; top: number } | null>(null);
@@ -1718,14 +1767,7 @@ export default function BoardEditor({
   const [presetSettingsChecked, setPresetSettingsChecked] = useState(true);
   const [presetContentChecked, setPresetContentChecked] = useState(true);
 
-  const [boardPosition, setBoardPosition] = useState({
-    x:
-      page.boardX ??
-      (page.workspaceWidth || 100000) / 2 - (page.width || 1024) / 2,
-    y:
-      page.boardY ??
-      (page.workspaceHeight || 100000) / 2 - (page.height || 1024) / 2,
-  });
+
 
   useEffect(() => {
     // Dropdown auto-show removed as per user request
@@ -1915,6 +1957,7 @@ export default function BoardEditor({
     cropShortcut,
     scrollZoomShortcut,
     zoomToCursor,
+    keepBoardContentPosition,
     cutShortcut,
     proportionalScale,
     altResizeCrops,
@@ -1923,6 +1966,7 @@ export default function BoardEditor({
     isSelectionLockEnabled,
     selectionLockTime,
     enableObjectSnapping,
+    smartGuidesEnabled,
     autoSelectOnPlace,
     autoToolOnSelect,
     spinSnapEnabled,
@@ -1967,7 +2011,7 @@ export default function BoardEditor({
     setCurrentDrawPoints(null);
     setIsHoldingToCreate(false);
     setIsInteracting(false);
-    if (activeTool !== "select") {
+    if (!["select","crop","eyedropper","polygon-select","lasso"].includes(activeTool)) {
       setSelectedId(null);
     }
   }, [activeTool]);
@@ -2032,6 +2076,9 @@ export default function BoardEditor({
     setZoom(nextZoom);
   };
 
+  const syncWebZoomState=(active:boolean)=>{void window.noteboardAPI?.setBoardZoomState({shortcut:scrollZoomShortcut,active}).catch(()=>undefined);};
+  useEffect(()=>{syncWebZoomState(false);},[scrollZoomShortcut]);
+
   // Wheel gestures and the Zoom tool share the same anchor calculation.
   useEffect(() => {
     const container = containerRef.current;
@@ -2050,7 +2097,8 @@ export default function BoardEditor({
     };
 
     container.addEventListener("wheel", handleWheel, { passive: false });
-    return () => container.removeEventListener("wheel", handleWheel);
+    const unsubscribe=window.noteboardAPI?.onWebWheel(event=>{const point=webWheelClientPoint(event);if(point)zoomAtPoint(-event.deltaY*0.0015*scrollZoomSensitivity,point.clientX,point.clientY);});
+    return () => {container.removeEventListener("wheel", handleWheel);unsubscribe?.();};
   }, [scrollZoomSensitivity, scrollZoomShortcut, zoomToCursor, boardPosition]);
 
   const cycleOverlapMode = () => {
@@ -2230,7 +2278,11 @@ export default function BoardEditor({
         activeElement?.tagName === "TEXTAREA" ||
         (activeElement instanceof HTMLElement && activeElement.isContentEditable);
       // Other editor shortcuts must not intercept ordinary text entry.
-      if (isTypingTarget) return;
+      if (isTypingTarget || document.querySelector("dialog[data-spreadsheet-editor][open]")) return;
+      if(e.key==='Escape'&&activePointerIdRef.current!==null){e.preventDefault();handlePointerCancel({pointerId:activePointerIdRef.current} as PointerEvent);return;}
+      if(outlineSelection.key(e))return;
+      if(e.key==='Escape'&&selectedIds.length){e.preventDefault();setSelectedIds([]);return;}
+      syncWebZoomState(isShortcutPressed(scrollZoomShortcut,e));
 
       if (!e.repeat && shortcutMatches(toolModeShortcut, e)) {
         e.preventDefault();
@@ -2247,17 +2299,11 @@ export default function BoardEditor({
         cycleOverlapMode();
         return;
       }
-      if (!e.repeat && shortcutMatches(cutShortcut, e)) {
-        if (selectedId) {
-          const selected = elements.find((element) => element.id === selectedId);
-          if (selected) {
-            e.preventDefault();
-            setClipboard(selected);
-            setClipboardGroup(null);
-            removeElement(selectedId);
-            return;
-          }
+      if (!e.repeat && shortcutMatches(cutShortcut, e) && selectedIds.length) {
+        if (getShortcutFromEvent(e) !== "Ctrl+X" && getShortcutFromEvent(e) !== "Meta+X") {
+          e.preventDefault(); document.execCommand('cut');
         }
+        return;
       }
       const matchedPreset = objectPresets.find(
         (preset) =>
@@ -2282,59 +2328,12 @@ export default function BoardEditor({
         } else if (e.key.toLowerCase() === "y") {
           e.preventDefault();
           handleRedo();
-        } else if (!e.repeat && e.key.toLowerCase() === "c") {
-          if (selectedId) {
-            e.preventDefault();
-            const el = elements.find((e) => e.id === selectedId);
-            if (el) {
-              setClipboard(el);
-              setClipboardGroup(null);
-            }
-          } else if (quickAddRegion) {
-            e.preventDefault();
-            const copied = elements.filter((el) => {
-              if (el.type === "layer" || el.isEraser) return false;
-              const ew = el.size?.width || 100;
-              const eh = el.size?.height || 40;
-              return !(
-                el.position.x > quickAddRegion.x + quickAddRegion.w ||
-                el.position.x + ew < quickAddRegion.x ||
-                el.position.y > quickAddRegion.y + quickAddRegion.h ||
-                el.position.y + eh < quickAddRegion.y
-              );
-            });
-            if (copied.length) {
-              setClipboardGroup(copied);
-              setClipboard(null);
-            }
-          }
-        } else if (!e.repeat && e.key.toLowerCase() === "v") {
-          if (clipboardGroup?.length) {
-            e.preventDefault();
-            const clones = cloneElementsWithOffset(clipboardGroup);
-            pushElements([...elements, ...clones]);
-            setSelectedId(clones[clones.length - 1]?.id || null);
-          } else if (clipboard) {
-            e.preventDefault();
-            const newEl = {
-              ...clipboard,
-              id: generateId(),
-              sheetCell: undefined,
-              position: {
-                x: clipboard.position.x + 20,
-                y: clipboard.position.y + 20,
-              },
-              zIndex: elements.length + 1,
-            };
-            pushElements([...elements, newEl]);
-            setSelectedId(newEl.id);
-          }
         }
       } else {
         if (e.key === "Delete" || e.key === "Backspace") {
-          if (selectedId) {
+          if (selectedIds.length) {
             e.preventDefault();
-            removeElement(selectedId);
+            removeSelection();
           }
         }
       }
@@ -2344,10 +2343,12 @@ export default function BoardEditor({
     const handleKeyUp = (e: KeyboardEvent) => {
       pressedKeysRef.current.delete(normalizeShortcutKey(e.key));
       setIsAltKeyDown(isShortcutPressed(cropShortcut));
+      syncWebZoomState(isShortcutPressed(scrollZoomShortcut,e));
     };
     const handleBlur = () => {
       pressedKeysRef.current.clear();
       setIsAltKeyDown(false);
+      syncWebZoomState(false);
     };
     window.addEventListener("keyup", handleKeyUp);
     window.addEventListener("blur", handleBlur);
@@ -2359,6 +2360,8 @@ export default function BoardEditor({
   }, [
     elements,
     selectedId,
+    selectedIds,
+    activeTool,
     history,
     historyIndex,
     clipboard,
@@ -2368,6 +2371,7 @@ export default function BoardEditor({
     gridToggleShortcut,
     overlapShortcut,
     cropShortcut,
+    scrollZoomShortcut,
     cutShortcut,
     objectPresets,
   ]);
@@ -2627,6 +2631,11 @@ export default function BoardEditor({
           </button>
         ))}
       </div>
+      <button type="button" aria-pressed={keepBoardContentPosition} onClick={()=>setKeepBoardContentPosition(value=>!value)}
+        title="Keep element positions fixed while adding or removing board space"
+        className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white">
+        <span>Keep content in place</span>{renderSwitch(keepBoardContentPosition)}
+      </button>
       <div className="h-px w-full bg-gray-200" />
 
       <div className="flex flex-col gap-3">
@@ -3706,6 +3715,14 @@ export default function BoardEditor({
         );
       case "media":
         return renderMenuSettingsBlock("media", true);
+      case "table":
+        return renderMenuSettingsBlock("table", true);
+      case "polygon-select":
+      case "lasso":
+      case "crop":
+        return renderMenuSettingsBlock(id,true);
+      case "eyedropper":
+        return <div className="flex flex-col gap-2"><div className="flex items-center justify-between gap-2 text-xs font-semibold text-gray-600"><span>Apply to</span><SegmentedControl label="Apply sampled color to" value={eyedropperTarget} onChange={setEyedropperTarget} options={[{value:'fill',label:'Fill'},{value:'stroke',label:'Stroke'},{value:'text',label:'Text'}]}/></div><div className="flex items-center gap-2 text-xs text-gray-600"><span className="h-5 w-5 rounded border border-gray-300" style={{backgroundColor:sampledColor}}/>{sampledColor.toUpperCase()}</div>{renderMenuSettingsBlock(id,true)}</div>;
       case "draw":
         return (
           <div className="flex flex-col gap-3">
@@ -4414,6 +4431,19 @@ export default function BoardEditor({
       case "media":
         setActiveTool("media");
         break;
+      case "table":
+        setActiveTool("table");
+        break;
+      case "polygon-select":
+      case "lasso":
+      case "crop":
+        setActiveTool(id);
+        break;
+      case "eyedropper": {
+        const source=elements.find(element=>element.id===selectedId)?.type??activeTool;
+        setEyedropperTarget(elementColors(source).strokeOnly?'stroke':isTextToolActive(source)?'text':'fill');
+        setActiveTool(id);break;
+      }
       case "draw":
         setActiveTool("draw");
         break;
@@ -4558,7 +4588,7 @@ export default function BoardEditor({
         ? { ...rect, w: 360, h: 220 }
         : { ...rect };
 
-    if (type === "embed" || type === "media") {
+    if (type === "embed" || type === "media" || type === "table") {
       const minimum = getElementMinSize({
         type,
         mediaMime: extraProps?.mediaMime,
@@ -4602,6 +4632,7 @@ export default function BoardEditor({
     let defaultContent = "";
     if (type === "h1" || type === "h2" || type === "h3") defaultContent = "";
     if (type === "text") defaultContent = "";
+    if (type === "table") defaultContent = JSON.stringify(createWorkbookDocument());
 
     const placementProps = resolveObjectPlacementProps({
       type,
@@ -4653,7 +4684,7 @@ export default function BoardEditor({
     // Keep newly placed text selected even when auto-select is disabled. A
     // blank text object is intentionally editable immediately after placement;
     // clearing selection here made it look as if the field had disappeared.
-    if (autoSelectOnPlace || TEXT_TYPES.includes(type as (typeof TEXT_TYPES)[number]) || type === "sticky") {
+    if (autoSelectOnPlace || TEXT_TYPES.includes(type as (typeof TEXT_TYPES)[number]) || type === "sticky" || type === "table") {
       setTimeout(() => setSelectedId(newElement.id), 0);
     } else {
       setTimeout(() => setSelectedId(null), 0);
@@ -4717,17 +4748,25 @@ export default function BoardEditor({
     updates: Partial<BoardElement>,
     skipHistory = false,
   ) => {
-    const updateAndPreserveLegacySheets = (source: BoardElement[]) =>
-      source.map((element) =>
-        element.id === id ? { ...element, ...updates } : element,
-      );
+    const applyElementUpdate = (source: BoardElement[]) => {
+      const resizing=secondaryResizeRef.current;
+      return source.map(element=>{
+        if(element.id===id)return {...element,...updates};
+        if(resizing?.id===id&&!resizing.keepContent&&updates.position&&resizing.members.has(element.id)) {
+          const initial=resizing.elements.find(item=>item.id===element.id)!;
+          return {...element,position:{x:initial.position.x+updates.position.x-resizing.origin.x,y:initial.position.y+updates.position.y-resizing.origin.y}};
+        }
+        return element;
+      });
+    };
 
     if (skipHistory) {
-      const next = updateAndPreserveLegacySheets(elementsRef.current);
+      const next = applyElementUpdate(elementsRef.current);
       elementsRef.current = next;
       setElements(next);
     } else {
-      pushElements(updateAndPreserveLegacySheets(elementsRef.current));
+      pushElements(applyElementUpdate(elementsRef.current));
+      if(secondaryResizeRef.current?.id===id)secondaryResizeRef.current=null;
     }
   };
 
@@ -4832,30 +4871,56 @@ export default function BoardEditor({
   };
 
   useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
-      const files = Array.from(e.clipboardData?.files || []).filter((file) =>
-        isSupportedMediaMime(inferFileMime(file)),
-      );
-      if (!files.length) return;
-
-      const boardSurfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
-      const viewportRect = containerRef.current?.getBoundingClientRect();
-      if (!boardSurfaceRect || !viewportRect) return;
-
-      e.preventDefault();
-      const centerX = (viewportRect.left + viewportRect.width / 2 - boardSurfaceRect.left) / zoom;
-      const centerY = (viewportRect.top + viewportRect.height / 2 - boardSurfaceRect.top) / zoom;
-
-      files.forEach((file, index) => {
-        addMediaFileToBoard(file, {
-          x: centerX + index * 24,
-          y: centerY + index * 24,
-        });
-      });
+    const handleCopyOrCut = (event: ClipboardEvent) => {
+      if (!event.clipboardData || isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement)) return;
+      const latest = syncLiveEditableState(elementsRef.current);
+      const roots = selectedIds.length ? new Set<string>(selectedIds) : new Set<string>(latest.filter(element => {
+        if (!quickAddRegion || element.type === 'layer' || element.isEraser) return false;
+        const {x,y}=element.position;
+        return x <= quickAddRegion.x+quickAddRegion.w && x+(element.size?.width??100) >= quickAddRegion.x && y <= quickAddRegion.y+quickAddRegion.h && y+(element.size?.height??40) >= quickAddRegion.y;
+      }).map(element => element.id));
+      if (!roots.size) return;
+      const hierarchy = createElementHierarchy(latest);
+      const source = latest.filter(element => roots.has(element.id) || [...roots].some(id => hierarchy.isDescendantOf(element.id,id)));
+      const copy = cloneBoardDocument(source, sectionSheetsRef.current, generateId);
+      if (!writeBoardClipboard(event.clipboardData, copy.elements, copy.sheets)) return;
+      event.preventDefault();
+      setClipboard(null);setClipboardGroup(copy.elements);
+      if (event.type === 'cut') {
+        const kept = latest.filter(element => !source.some(copied => copied.id===element.id));
+        pushDocument(kept,[]);setSelectedId(null);setQuickAddRegion(null);
+      }
     };
-
-    window.addEventListener("paste", handlePaste);
-    return () => window.removeEventListener("paste", handlePaste);
+    const handlePaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || !event.clipboardData || isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement)) return;
+      const boardRect=boardSurfaceRef.current?.getBoundingClientRect(), viewport=containerRef.current?.getBoundingClientRect();
+      if (!boardRect || !viewport) return;
+      const position={x:(viewport.left+viewport.width/2-boardRect.left)/zoomRef.current,y:(viewport.top+viewport.height/2-boardRect.top)/zoomRef.current};
+      const copied=readBoardClipboard(event.clipboardData);
+      if (copied) {
+        event.preventDefault();
+        const cloned=cloneBoardDocument(copied.elements,copied.sectionSheets,generateId);
+        const topZ=Math.max(0,...elementsRef.current.map(element=>element.zIndex));
+        const lowZ=Math.min(...cloned.elements.map(element=>element.zIndex));
+        const pasted=cloned.elements.map(element=>({...element,position:{x:element.position.x+20,y:element.position.y+20},zIndex:topZ+element.zIndex-lowZ+1}));
+        pushDocument([...elementsRef.current,...pasted],[...sectionSheetsRef.current,...cloned.sheets]);
+        setSelectedIds(pasted.filter(element=>element.type!=='layer'&&element.type!=='board'&&!element.isEraser).map(element=>element.id));
+        return;
+      }
+      const files=Array.from(event.clipboardData.files).filter(file=>isSupportedMediaMime(inferFileMime(file)));
+      if (files.length) {
+        event.preventDefault();files.forEach((file,index)=>addMediaFileToBoard(file,{x:position.x+index*24,y:position.y+index*24}));return;
+      }
+      const text=event.clipboardData.getData('text/plain'), html=event.clipboardData.getData('text/html');
+      if (!text && !html) return;
+      event.preventDefault();
+      const plain=()=>text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\r?\n/g,'<br>');
+      const content=sanitizeRichText(html || plain());
+      const element: BoardElement={...objectDefaultsRef.current.text,id:generateId(),type:'text',content,position,size:{width:400,height:240},zIndex:Math.max(0,...elementsRef.current.map(item=>item.zIndex))+1};
+      pushElements([...elementsRef.current,element]);setSelectedId(element.id);setActiveTool('text');
+    };
+    window.addEventListener('copy',handleCopyOrCut);window.addEventListener('cut',handleCopyOrCut);window.addEventListener('paste',handlePaste);
+    return ()=>{window.removeEventListener('copy',handleCopyOrCut);window.removeEventListener('cut',handleCopyOrCut);window.removeEventListener('paste',handlePaste);};
   });
 
   const removeElement = (
@@ -4865,12 +4930,7 @@ export default function BoardEditor({
     const removal = removeElementTreeAndReferences(cascadedElements, id);
     const newElements = removal.elements;
     const removedElementIds = removal.removedIds;
-    const reconciled = reconcileSectionSheetsAfterDeletion(
-      newElements,
-      sectionSheetsRef.current,
-      removedElementIds,
-    );
-    pushDocument(reconciled.elements, reconciled.sectionSheets);
+    pushDocument(newElements, []);
     if (
       (selectedId && removedElementIds.has(selectedId)) ||
       !newElements.some((el) => el.id === selectedId)
@@ -5274,6 +5334,7 @@ export default function BoardEditor({
     cropShortcut,
     scrollZoomShortcut,
     zoomToCursor,
+    keepBoardContentPosition,
     cutShortcut,
     proportionalScale,
     altResizeCrops,
@@ -5282,6 +5343,7 @@ export default function BoardEditor({
     isSelectionLockEnabled,
     selectionLockTime,
     enableObjectSnapping,
+    smartGuidesEnabled,
     autoSelectOnPlace,
     autoToolOnSelect,
     spinSnapEnabled,
@@ -5307,7 +5369,7 @@ export default function BoardEditor({
     } = {},
   ): Page => {
     const syncedElements = syncLiveEditableState(
-      syncLiveWebviewState(elementsRef.current),
+      readLiveWorkbookSnapshots(syncLiveWebviewState(elementsRef.current)),
     );
     let currentScrollX = containerRef.current?.scrollLeft;
     let currentScrollY = containerRef.current?.scrollTop;
@@ -5443,6 +5505,9 @@ export default function BoardEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    if(activeTool==='eyedropper'){e.preventDefault();e.stopPropagation();if(e.button===0)void sampleColor(e.clientX,e.clientY);return;}
+    if(activeTool==='crop'){e.preventDefault();return;}
+    if(outlineSelection.begin(e)){setQuickAddRegion(null);setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
       activePointerIdRef.current !== null &&
       activePointerIdRef.current !== e.pointerId
@@ -5603,6 +5668,8 @@ export default function BoardEditor({
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
+    if(groupMoveRef.current){moveSelection(e);return;}
+    if(outlineSelection.move(e))return;
     const activeAreaGesture = areaGestureRef.current;
     if (
       activePointerIdRef.current !== null &&
@@ -5695,39 +5762,9 @@ export default function BoardEditor({
       const start = boardResizeStartRef.current;
       const dx = (e.clientX - start.clientX) / zoom;
       const dy = (e.clientY - start.clientY) / zoom;
-      const changesLeft = resizeMode.includes("left");
-      const changesRight = resizeMode.includes("right") || resizeMode === "both";
-      const changesTop = resizeMode.includes("top");
-      const changesBottom = resizeMode.includes("bottom") || resizeMode === "both";
-      const nextWidth = snap(
-        Math.max(
-          100,
-          changesLeft
-            ? start.width - dx
-            : changesRight
-              ? start.width + dx
-              : start.width,
-        ),
-      );
-      const nextHeight = snap(
-        Math.max(
-          100,
-          changesTop
-            ? start.height - dy
-            : changesBottom
-              ? start.height + dy
-              : start.height,
-        ),
-      );
-      setPageDimensions({ width: nextWidth, height: nextHeight });
-      setBoardPosition({
-        x: changesLeft
-          ? start.boardX + start.width - nextWidth
-          : start.boardX,
-        y: changesTop
-          ? start.boardY + start.height - nextHeight
-          : start.boardY,
-      });
+      const next=resizeMainBoard({start:{size:{width:start.width,height:start.height},position:{x:start.boardX,y:start.boardY}},elements:start.elements,members:start.members,mode:resizeMode,dx,dy,zoom,keepContent:start.keepContent,snap});
+      start.changed=next.geometry.size.width!==start.width||next.geometry.size.height!==start.height;
+      applyMainBoardGeometry(next.geometry);elementsRef.current=next.elements;setElements(next.elements);
       return;
     }
 
@@ -5834,6 +5871,14 @@ export default function BoardEditor({
     }
     activePointerIdRef.current = null;
     pointerCaptureTargetRef.current = null;
+    if(groupMoveRef.current){
+      if(event&&'clientX' in event)moveSelection(event);
+      const moved=groupMoveRef.current;groupMoveRef.current=null;
+      if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform='';selectionOutlineRef.current.style.backgroundColor='';}
+      if(moved.changed&&moved.latest)pushElements(moved.latest);
+      setIsInteracting(false);setVisibleGuides([]);return;
+    }
+    if(outlineSelection.end(event))return;
     const latestElements = elementsRef.current;
     const activeBounds =
       activeSurfaceBoundsRef.current ??
@@ -6073,6 +6118,7 @@ export default function BoardEditor({
       return;
     }
 
+    if(resizeMode && boardResizeStartRef.current?.changed) pushDocument(elementsRef.current);
     if (resizeMode || isBoardMoveEnabled) {
       setResizeMode(null);
       boardResizeStartRef.current = null;
@@ -6287,6 +6333,15 @@ export default function BoardEditor({
     pointerCaptureTargetRef.current = null;
     areaGestureRef.current = null;
     activeSurfaceBoundsRef.current = null;
+    outlineSelection.cancel();
+    setVisibleGuides([]);
+    if(groupMoveRef.current){elementsRef.current=groupMoveRef.current.elements;setElements(groupMoveRef.current.elements);groupMoveRef.current=null;}
+    if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform='';selectionOutlineRef.current.style.backgroundColor='';}
+    const cancelledResize=boardResizeStartRef.current;
+    if(cancelledResize){
+      elementsRef.current=cancelledResize.elements;setElements(cancelledResize.elements);
+      applyMainBoardGeometry({size:{width:cancelledResize.width,height:cancelledResize.height},position:{x:cancelledResize.boardX,y:cancelledResize.boardY}});
+    }
     boardResizeStartRef.current = null;
     setDragStart(null);
     setDragCurrent(null);
@@ -6298,6 +6353,73 @@ export default function BoardEditor({
     setIsInteracting(false);
   };
 
+  const sampleColor=async(x:number,y:number)=>{
+    try {
+      setSamplingError('');
+      let color:string;
+      if(window.noteboardAPI?.sampleBoardColor)color=await window.noteboardAPI.sampleBoardColor({x,y});
+      else {
+        const Picker=(window as any).EyeDropper;
+        if(!Picker)throw Error('Color sampling is available in the desktop app and browsers with an eyedropper.');
+        color=(await new Picker().open()).sRGBHex;
+      }
+      if(!/^#[a-f0-9]{6}$/i.test(color))throw Error('Could not read the selected color.');
+      setSampledColor(color);
+      const property=eyedropperTarget==='fill'?'color':eyedropperTarget==='stroke'?'borderColor':'textColor';
+      setPendingProps(current=>({...current,[property]:color}));
+      const selected=elementsRef.current.find(element=>element.id===selectedId);
+      if(selected&&elementColors(selected.type)[eyedropperTarget]){
+        if(eyedropperTarget==='text')changeTextColor(color);else updateElement(selected.id,{[property]:color});
+      }
+      finishToolUse('eyedropper');
+    }catch(error){if((error as any)?.name!=='AbortError')setSamplingError((error as any)?.message||'Could not read the selected color.');}
+  };
+  const updateSmartGuides=(element:BoardElement,position:{x:number;y:number},allowSnap=true,excludedIds?:Set<string>)=>{
+    if(!smartGuidesEnabled)return position;
+    const others=elementsRef.current.filter(other=>!excludedIds?.has(other.id)&&!elementHierarchy.isDescendantOf(other.id,element.id)&&elementHierarchy.isVisible(other.id,respectLayerVisibility));
+    const result=smartGuides(element,position,[mainSurface,...others],zoomRef.current,allowSnap&&enableObjectSnapping);
+    setVisibleGuides(result.guides);return result.position;
+  };
+  const outlineSelection=useOutlineSelection({tool:activeTool,zoom,surface:boardSurfaceRef,elements,selectedIds,onSelect:ids=>{setSelectedIds(ids);finishToolUse(activeTool);},respectVisibility:respectLayerVisibility,capture:captureSurfacePointer,onInteraction:setIsInteracting});
+  const selectionBounds=selectedIds.length>1?selectedBounds(elements,selectedIds):null;
+  const selectionTreeIds=()=>{
+    const result=new Set(selectedIds);
+    for(const element of elementsRef.current){let id=element.parentId;const seen=new Set<string>();while(id&&!seen.has(id)){seen.add(id);if(result.has(id)){result.add(element.id);break;}id=elementHierarchy.byId.get(id)?.parentId;}}
+    return result;
+  };
+  const removeSelection=()=>{
+    let next=elementsRef.current;
+    selectedIds.forEach(id=>{next=removeElementTreeAndReferences(next,id).elements;});
+    pushElements(next);setSelectedIds([]);
+  };
+  const duplicateSelection=()=>{
+    const ids=selectionTreeIds(),source=elementsRef.current.filter(element=>ids.has(element.id));
+    const cloned=cloneElementsWithOffset(source);
+    pushElements([...elementsRef.current,...cloned]);setSelectedIds(cloned.filter(element=>element.type!=='layer').map(element=>element.id));
+  };
+  const startSelectionMove=(event:React.PointerEvent)=>{
+    if(activeTool!=='select'||selectedIds.length<2||event.button!==0)return;
+    const target=event.target as HTMLElement;
+    if(target.closest('button,input,textarea,dialog'))return;
+    const id=target.closest<HTMLElement>('[data-board-element-id]')?.dataset.boardElementId;
+    if(!id||!selectedIds.includes(id))return;
+    event.preventDefault();event.stopPropagation();window.getSelection()?.removeAllRanges();
+    groupMoveRef.current={pointerId:event.pointerId,x:event.clientX,y:event.clientY,elements:elementsRef.current,ids:selectionTreeIds(),changed:false,preview:getEffectiveToolMenuSettings('select').previewMode};
+    captureSurfacePointer(event);setIsInteracting(true);
+  };
+  const moveSelection=(event:{pointerId:number;clientX:number;clientY:number})=>{
+    const start=groupMoveRef.current;if(!start||event.pointerId!==start.pointerId)return;
+    let dx=snap((event.clientX-start.x)/zoomRef.current),dy=snap((event.clientY-start.y)/zoomRef.current);
+    if(!start.changed&&Math.hypot(dx,dy)*zoomRef.current<2)return;
+    start.changed=true;
+    const bounds=selectedBounds(start.elements,[...start.ids]);
+    if(bounds){const position=updateSmartGuides({id:'__group-selection',type:'rectangle',content:'',position:{x:bounds.x,y:bounds.y},size:bounds,zIndex:0},{x:bounds.x+dx,y:bounds.y+dy},true,start.ids);dx=position.x-bounds.x;dy=position.y-bounds.y;}
+    const next=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
+    start.latest=next;
+    if(start.preview==='box'){
+      if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform=`translate(${dx}px,${dy}px)`;selectionOutlineRef.current.style.backgroundColor='rgba(59,130,246,.08)';}
+    }else{elementsRef.current=next;setElements(next);}
+  };
   const moreToolbarItemProps = toolbarItemProps("more");
   const maskBoards = [mainSurface, ...elements.filter(element => element.type === 'board')];
   const maskMinX = Math.min(...maskBoards.map(board => board.position.x));
@@ -7096,6 +7218,7 @@ export default function BoardEditor({
                   {renderToolMenuTitle("More", "-mx-1 -mt-1 mb-1")}
                   <div className="mx-1 mb-1 rounded-lg border border-gray-200 bg-gray-50 p-1">
                     {renderAlwaysOnTopControl("more")}
+                    <button type="button" aria-pressed={smartGuidesEnabled} onClick={()=>{setSmartGuidesEnabled(value=>!value);setVisibleGuides([]);}} className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 text-xs font-bold text-gray-700"><span>Smart guides</span>{renderSwitch(smartGuidesEnabled)}</button>
                   </div>
                   {toolbarLayout.more.map((id) => {
                     const item = TOOLBAR_ITEMS.find(
@@ -7390,7 +7513,7 @@ export default function BoardEditor({
                                   "ring-2 ring-gray-300/80",
                                  isDraggingThisLayer
                                    ? "border-[3px] border-blue-500 bg-blue-50 shadow-none ring-2 ring-blue-200 [&>*]:invisible"
-                                        : selectedId === el.id
+                                        : selectedIds.includes(el.id)
                                           ? "bg-white text-[#1A1A1A] border-[3px] border-gray-400 shadow-sm z-10"
                                           : "bg-white text-gray-500 border-[3px] border-gray-200 hover:text-[#1A1A1A] hover:border-gray-300 shadow-sm",
                               )}
@@ -7741,6 +7864,7 @@ export default function BoardEditor({
                       : "crosshair",
                 }}
                 onPointerDown={handlePointerDown}
+                onPointerDownCapture={startSelectionMove}
                 onContextMenu={(e) => e.preventDefault()}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -7768,14 +7892,22 @@ export default function BoardEditor({
                 }}
               >
                 <div
-                  className="absolute inset-0 overflow-visible"
+                  className="absolute inset-0 overflow-visible pointer-events-none"
                   data-board-surface="true"
                 >
+                {(outlineSelection.enabled||activeTool==='eyedropper')&&<div data-selection-tool={activeTool} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
+                  onDoubleClick={event=>{if(activeTool==='polygon-select'&&outlineSelection.points.length>=3){event.preventDefault();event.stopPropagation();outlineSelection.finish();}}}/>}
+                {outlineSelection.points.length>0&&<svg className="pointer-events-none absolute inset-0 overflow-visible" data-selection-outline={activeTool} style={{width:pageDimensions.width,height:pageDimensions.height,zIndex:100001}}>
+                  <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')} Z`} fill="rgba(59,130,246,.08)" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} fillRule="evenodd"/>
+                  {activeTool==='polygon-select'&&outlineSelection.points.map((point,index)=><circle key={index} cx={point.x} cy={point.y} r={(index===0?4:2.5)/zoom} fill="white" stroke="#3b82f6" strokeWidth={1.5/zoom}/>)}
+                </svg>}
+                {selectionBounds&&<div ref={selectionOutlineRef} data-multi-selection={selectedIds.length} className="pointer-events-none absolute border border-dashed border-blue-500" style={{left:selectionBounds.x,top:selectionBounds.y,width:selectionBounds.width,height:selectionBounds.height,zIndex:100001}}/>}
+                <SmartGuidesOverlay ref={guidesOverlayRef} zoom={zoom} width={pageDimensions.width} height={pageDimensions.height}/>
                 {/* Main Board Visual Background */}
                   <div
                     id="main-board"
                     className={cn(
-                      "absolute inset-0",
+                      "absolute inset-0 pointer-events-auto",
                       mainBoardHidden && "hidden",
                       isMainBoardSelected && "ring-2 ring-blue-500 ring-inset",
                     )}
@@ -7785,7 +7917,7 @@ export default function BoardEditor({
                       ...boardSurfaceStyle(mainSurface, { showGrid, gridColor, gridSize, gridThickness }),
                   }}
                 />
-                <div className="absolute inset-0 overflow-visible" style={eraserMaskStyle} data-board-surface="true">
+                <div className="absolute inset-0 overflow-visible pointer-events-none" style={eraserMaskStyle} data-board-surface="true">
                 {/* Active drag region */}
                 {activeTool !== "draw" &&
                   activeTool !== "pan" &&
@@ -8054,7 +8186,8 @@ export default function BoardEditor({
                         activeTool === "board"
                       }
                       activeTool={activeTool}
-                      isSelected={selectedId === el.id}
+                      isSelected={selectedIds.includes(el.id)}
+                      isGroupSelected={selectedIds.length > 1 && selectedIds.includes(el.id)}
                       manualLinkSourceId={manualLinkSourceId}
                       onSelect={() => {
                         if (pickingObjectPresetId) {
@@ -8132,6 +8265,9 @@ export default function BoardEditor({
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
+                      onBoardResizeStart={beginSecondaryBoardResize}
+                      onSmartMove={updateSmartGuides}
+                      onGuidesEnd={()=>setVisibleGuides([])}
                       highlightAll={highlightAll}
                       overlapMode={overlapMode}
                       elements={elements}
@@ -8216,7 +8352,8 @@ export default function BoardEditor({
                         activeTool === "board"
                       }
                       activeTool={activeTool}
-                      isSelected={selectedId === el.id}
+                      isSelected={selectedIds.includes(el.id)}
+                      isGroupSelected={selectedIds.length > 1 && selectedIds.includes(el.id)}
                       manualLinkSourceId={manualLinkSourceId}
                       onSelect={() => {
                         if (pickingObjectPresetId) {
@@ -8255,6 +8392,9 @@ export default function BoardEditor({
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
+                      onBoardResizeStart={beginSecondaryBoardResize}
+                      onSmartMove={updateSmartGuides}
+                      onGuidesEnd={()=>setVisibleGuides([])}
                       highlightAll={highlightAll}
                       overlapMode={overlapMode}
                       elements={elements}
@@ -8297,18 +8437,22 @@ export default function BoardEditor({
                   <>
                     <div
                       className={cn("absolute right-[-10px] top-1/2 -mt-2.5 w-5 h-5 bg-white border-2 border-gray-500 cursor-e-resize z-[100000] hover:bg-blue-500", !isMainBoardSelected && "pointer-events-none opacity-0")}
+                      data-main-board-resize="right"
                       onPointerDown={(e) => beginMainBoardResize(e, "right")}
                     />
                     <div
                       className={cn("absolute left-[-10px] top-1/2 -mt-2.5 w-5 h-5 bg-white border-2 border-gray-500 cursor-w-resize z-[100000] hover:bg-blue-500", !isMainBoardSelected && "pointer-events-none opacity-0")}
+                      data-main-board-resize="left"
                       onPointerDown={(e) => beginMainBoardResize(e, "left")}
                     />
                     <div
                       className={cn("absolute top-[-10px] left-1/2 -ml-2.5 w-5 h-5 bg-white border-2 border-gray-500 cursor-n-resize z-[100000] hover:bg-blue-500", !isMainBoardSelected && "pointer-events-none opacity-0")}
+                      data-main-board-resize="top"
                       onPointerDown={(e) => beginMainBoardResize(e, "top")}
                     />
                     <div
                       className={cn("absolute bottom-[-10px] left-1/2 -ml-2.5 w-5 h-5 bg-white border-2 border-gray-500 cursor-s-resize z-[100000] hover:bg-blue-500", !isMainBoardSelected && "pointer-events-none opacity-0")}
+                      data-main-board-resize="bottom"
                       onPointerDown={(e) => beginMainBoardResize(e, "bottom")}
                     />
 
@@ -9117,6 +9261,17 @@ export default function BoardEditor({
           </div>
 
           {/* Unified Floating Properties Panel */}
+          {samplingError&&<div role="alert" className="absolute bottom-24 left-1/2 z-50 flex max-w-lg -translate-x-1/2 items-center gap-3 rounded-xl border border-red-200 bg-white p-3 text-sm text-red-700 shadow-lg">{samplingError}<button type="button" title="Dismiss" onClick={()=>setSamplingError('')}><X className="h-4 w-4"/></button></div>}
+          {selectedIds.length>1&&!toolbarEditingMode&&<ToolPropertiesBar key="selection-toolbar">
+            <div className="flex h-12 items-center gap-3 px-2 text-xs font-semibold">
+              <span role="status">{selectedIds.length} selected</span>
+              <button type="button" title="Move selected objects" onClick={()=>setActiveTool('select')} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Move className="h-4 w-4"/></button>
+              <button type="button" title="Copy selected objects" onClick={()=>document.execCommand('copy')} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Copy className="h-4 w-4"/></button>
+              <button type="button" title="Duplicate selected objects" onClick={duplicateSelection} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><ClipboardPaste className="h-4 w-4"/></button>
+              <button type="button" title="Delete selected objects" onClick={removeSelection} className="rounded-lg border border-red-200 p-2 text-red-400 hover:bg-red-50"><Trash2 className="h-4 w-4"/></button>
+              <button type="button" title="Clear selection" onClick={()=>setSelectedIds([])} className="rounded-lg border border-blue-200 p-2 text-blue-500 hover:bg-blue-50"><Check className="h-4 w-4"/></button>
+            </div>
+          </ToolPropertiesBar>}
           {(() => {
             const isAnySelected =
               !!selectedElement &&
@@ -10024,9 +10179,13 @@ export default function BoardEditor({
 function BoardElementNode({
   element,
   renderZIndex,
+  onBoardResizeStart,
+  onSmartMove,
+  onGuidesEnd,
   isSelectMode: _isSelectMode,
   activeTool,
   isSelected,
+  isGroupSelected = false,
   onSelect,
   onUpdate,
   onJumpToTarget,
@@ -10061,6 +10220,9 @@ function BoardElementNode({
   key?: React.Key;
   element: BoardElement;
   renderZIndex?: number;
+  onBoardResizeStart?: (id:string)=>void;
+  onSmartMove?: (element:BoardElement,position:{x:number;y:number},allowSnap?:boolean)=>{x:number;y:number};
+  onGuidesEnd?: ()=>void;
   allowEditing?: boolean;
   matchingToolEditing?: boolean;
   matchingToolMoving?: boolean;
@@ -10070,6 +10232,7 @@ function BoardElementNode({
   isSelectMode: boolean;
   activeTool?: string;
   isSelected: boolean;
+  isGroupSelected?: boolean;
   onSelect: () => void;
   onUpdate: (u: Partial<BoardElement>, skipHistory?: boolean) => void;
   onJumpToTarget?: (id: string) => void;
@@ -10159,6 +10322,7 @@ function BoardElementNode({
     e.preventDefault();
     e.stopPropagation();
     if (!nodeRef.current || !canResize) return;
+    if(element.type==="board")onBoardResizeStart?.(element.id);
 
     activePointerGestureCleanupRef.current?.();
     const pointerGesture = captureElementPointer(e);
@@ -10211,7 +10375,7 @@ function BoardElementNode({
         ? (v: number) => v
         : snap;
 
-      if (altResizeCrops && (isAltKeyDown || evt.altKey)) {
+      if (activeTool==='crop' || (altResizeCrops && (isAltKeyDown || evt.altKey))) {
         const crop = normalizeCrop(startCrop);
         const visibleWidthPct = Math.max(1, 100 - crop.left - crop.right);
         const visibleHeightPct = Math.max(1, 100 - crop.top - crop.bottom);
@@ -10286,6 +10450,7 @@ function BoardElementNode({
           },
         };
         latestUpdatePayload = cropUpdatePayload;
+        onSmartMove?.({...element,...cropUpdatePayload},cropUpdatePayload.position,false);
         if (resolvedPreviewMode === "box") {
           setInteractionPreview(cropUpdatePayload);
         } else {
@@ -10494,6 +10659,7 @@ function BoardElementNode({
       }
 
       latestUpdatePayload = updatePayload;
+      onSmartMove?.({...element,...updatePayload},updatePayload.position,false);
       if (resolvedPreviewMode === "box") {
         setInteractionPreview(updatePayload);
       } else {
@@ -10510,6 +10676,7 @@ function BoardElementNode({
     const cleanupPointerGesture = () => {
       if (timeoutId) clearTimeout(timeoutId);
       pointerGesture.release();
+      onGuidesEnd?.();
       document.body.style.userSelect = "";
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
@@ -10722,7 +10889,7 @@ function BoardElementNode({
         }
       }
 
-      latestPosition = { x: newX, y: newY };
+      latestPosition = onSmartMove?.(element,{x:newX,y:newY}) ?? { x: newX, y: newY };
       const updatePayload = { position: latestPosition };
       if (resolvedPreviewMode === "box") {
         setInteractionPreview(updatePayload);
@@ -10733,6 +10900,7 @@ function BoardElementNode({
 
     const cleanupPointerGesture = () => {
       pointerGesture.release();
+      onGuidesEnd?.();
       document.body.style.userSelect = "";
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
@@ -10789,7 +10957,8 @@ function BoardElementNode({
           }
         }
       }
-      onUpdate({ position: { x: newX, y: newY } }, false); // push history
+      onUpdate({ position: onSmartMove?.(element,{x:newX,y:newY}) ?? { x: newX, y: newY } }, false);
+      onGuidesEnd?.();
     };
 
     const onPointerCancel = (cancelEvt: PointerEvent) => {
@@ -10806,7 +10975,7 @@ function BoardElementNode({
   };
 
   const permissions = getElementPermissions({ tool: activeTool ?? "select", element, locked: isInteractionLocked, handEditing: allowEditing, handMoving: allowMovingElementsInPan, matchingEditing: matchingToolEditing, matchingMoving: matchingToolMoving });
-  const canResize = permissions.canResize || (element.type === "board" && isBoardResizeEnabled && !isInteractionLocked);
+  const canResize = !isGroupSelected && (permissions.canResize || (element.type === "board" && isBoardResizeEnabled && !isInteractionLocked));
   const canMove = permissions.canMove || (element.type === "board" && isBoardMoveEnabled && !isInteractionLocked);
   const canInteract = permissions.canSelect || canResize || canMove;
   const isBoardInteraction = element.type === "board" && (canResize || canMove);
@@ -10816,7 +10985,7 @@ function BoardElementNode({
     ((element.type === "image" || element.type === "media") &&
       element.keepRatio !== false);
   const showEdgeResizeHandles =
-    !isRatioLocked || (altResizeCrops && isAltKeyDown);
+    !isRatioLocked || activeTool==='crop' || (altResizeCrops && isAltKeyDown);
   const selfManagedCrop =
     element.type === "media" &&
     inferMediaMime(element.content, element.mediaMime).startsWith("video");
@@ -11050,7 +11219,7 @@ function BoardElementNode({
                   element={croppedElement}
                   onUpdate={onUpdate}
                   isSelected={isSelected}
-                  allowEditing={permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent)}
+                  allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
                   activeTool={activeTool}
                   showGrid={showGrid}
@@ -11069,7 +11238,7 @@ function BoardElementNode({
               element={croppedElement}
               onUpdate={onUpdate}
               isSelected={isSelected}
-              allowEditing={permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent)}
+              allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
               activeTool={activeTool}
               showGrid={showGrid}
@@ -11192,6 +11361,7 @@ function BoardElementNode({
                      };
                      const cleanupPointerGesture = () => {
                        pointerGesture.release();
+      onGuidesEnd?.();
                        window.removeEventListener("pointermove", onMove);
                       window.removeEventListener("pointerup", onUp);
                       window.removeEventListener("pointercancel", onCancel);
@@ -12812,36 +12982,7 @@ function ElementVisuals({
       );
     }
     case "table":
-      return (
-        <div
-          className="bg-white shadow-sm border border-gray-200 overflow-hidden"
-          style={{
-            width: size?.width || 400,
-            height: size?.height || "auto",
-            ...containerStyle,
-            borderRadius: containerStyle.borderRadius || undefined,
-          }}
-        >
-          <table className="w-full text-sm text-left text-gray-500">
-            <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3">Column 1</th>
-                <th className="px-6 py-3">Column 2</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr className="bg-white border-b border-gray-200">
-                <td className="px-6 py-4">Data A</td>
-                <td className="px-6 py-4">Data B</td>
-              </tr>
-              <tr className="bg-white">
-                <td className="px-6 py-4 border-gray-200">Data C</td>
-                <td className="px-6 py-4 border-gray-200">Data D</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      );
+      return <SpreadsheetElement element={element} onUpdate={onUpdate} isSelected={isSelected} allowEditing={allowEditing||allowContentEditing}/>;
     case "diamond":
       return (
         <div

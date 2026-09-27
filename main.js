@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net } from 'electron';
 import fs from 'fs/promises';
 import { watch as watchDirectory } from 'fs';
 import path from 'path';
@@ -48,11 +48,16 @@ const presetsFile = () => path.join(dataDir(), 'presets.json');
 const settingsFile = () => path.join(dataDir(), 'settings.json');
 const webSessionSettings = new Map();
 const configuredWebSessions = new Map();
+const webZoomStates = new WeakMap();
+const webPointerPositions = new WeakMap();
 const webNavigationUrls = new WeakMap();
 const guestPreload = path.join(__dirname, 'dist', 'web-privacy-preload.cjs');
 const blockingCounts = new Map();
 let filterServicePromise;
 const getFilterService = () => filterServicePromise ??= createWebFilterService({
+  // Electron's Chromium network stack avoids Node/undici socket-parser crashes
+  // during background filter refreshes; these public downloads never use cookies.
+  fetchImpl: (url, options) => net.fetch(url, { ...options, credentials: 'omit' }),
   cacheFile: path.join(app.getPath('userData'), 'web-filters-cache.json'),
 }).then(service => {
   const refresh = () => service.refresh().catch(error => console.warn('Filter update unavailable; keeping verified local lists.', error.message));
@@ -99,7 +104,39 @@ ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
   // The trusted preload has the new document URL even before frame.url commits.
   const frameUrl = /^https?:\/\//i.test(documentUrl || '') ? documentUrl : frame?.url || '';
   const topLevelUrl = webNavigationUrls.get(event.sender) || event.sender.mainFrame.url || settings.topLevelUrl;
-  event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }) };
+  const host = event.sender.getType() === 'webview' ? event.sender.hostWebContents : null;
+  const boardZoom = host && !host.isDestroyed() ? webZoomStates.get(host) || { shortcut: 'Ctrl', active: false } : null;
+  event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }), boardZoom };
+});
+
+handleTrusted('web-zoom:state', (event, state = {}) => {
+  if (typeof state.shortcut !== 'string' || state.shortcut.length > 100) return false;
+  const normalized = { shortcut: state.shortcut, active: state.active === true };
+  webZoomStates.set(event.sender, normalized);
+  for (const guest of webContents.getAllWebContents()) {
+    if (!guest.isDestroyed() && guest.getType() === 'webview' && guest.hostWebContents === event.sender) {
+      for(const frame of guest.mainFrame.framesInSubtree) {
+        try { frame.send('noteboard:web-zoom-state',normalized); } catch { /* A navigating frame receives the current policy in its preload. */ }
+      }
+    }
+  }
+  return true;
+});
+
+ipcMain.on('noteboard:web-wheel', (event, data = {}) => {
+  const guest = event.sender;
+  if (guest.isDestroyed() || guest.getType() !== 'webview' || !getPartitionForWebContents(guest)) return;
+  const host = guest.hostWebContents;
+  if (!host || host.isDestroyed() || !['screenX','screenY','clientX','clientY','deltaY'].every(key => Number.isFinite(data[key]))) return;
+  const pointer = webPointerPositions.get(guest);
+  const topFrame=event.senderFrame === guest.mainFrame;
+  if(!topFrame && (!pointer || Math.abs(pointer.x-data.screenX)>2 || Math.abs(pointer.y-data.screenY)>2))return;
+  host.send('noteboard:web-wheel', {
+    guestId:guest.id,
+    guestX:topFrame?data.clientX:pointer.localX,
+    guestY:topFrame?data.clientY:pointer.localY,
+    deltaY: Math.max(-16000,Math.min(16000,data.deltaY)),
+  });
 });
 
 const updateWebSessionTopLevelUrl = (contents, url) => {
@@ -139,7 +176,7 @@ const configureWebSession = async (partition, settings = {}) => {
     return true;
   }
 
-  installPermissionDenyHandlers(webSession);
+  installPermissionDenyHandlers(webSession, { allowFullscreen: true });
   configuredWebSessions.set(partition, webSession);
   webSession.registerPreloadScript({ type: 'frame', filePath: guestPreload });
   webSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
@@ -327,6 +364,32 @@ handleTrusted('web-viewport:configure', async (event, payload = {}) => {
   return configureWebViewport(guest, payload, process.versions.chrome, process.platform);
 });
 
+handleTrusted('web-view:fullscreen', async (event, guestId) => {
+  const guest = Number.isInteger(guestId) ? webContents.fromId(guestId) : null;
+  if (!guest || guest.isDestroyed() || guest.getType() !== 'webview' || guest.hostWebContents !== event.sender || !getPartitionForWebContents(guest)) return false;
+  // Put the existing host element in the DOM top layer. Moving/recreating the
+  // webview would discard playback and page state.
+  return event.sender.executeJavaScript(`(async () => {
+    const guest = [...document.querySelectorAll('webview')].find(view => { try { return view.getWebContentsId() === ${guestId}; } catch { return false; } });
+    const viewport = guest?.parentElement;
+    if (!viewport) return false;
+    if (document.fullscreenElement !== viewport) await viewport.requestFullscreen();
+    return true;
+  })()`, true);
+});
+
+handleTrusted('board:sample-color',async(event,point={})=>{
+  const win=BrowserWindow.fromWebContents(event.sender);
+  if(!win||win.isDestroyed()||!Number.isFinite(point.x)||!Number.isFinite(point.y))throw Error('Invalid sample position.');
+  const zoom=event.sender.getZoomFactor(),bounds=win.getContentBounds();
+  const x=Math.floor(point.x*zoom),y=Math.floor(point.y*zoom);
+  if(x<0||y<0||x>=bounds.width||y>=bounds.height)throw Error('Choose a point inside the board window.');
+  const image=await event.sender.capturePage({x,y,width:1,height:1});
+  if(image.isEmpty())throw Error('Could not read the selected color.');
+  const pixel=image.toBitmap();
+  return '#'+[pixel[2],pixel[1],pixel[0]].map(value=>value.toString(16).padStart(2,'0')).join('');
+});
+
 handleTrusted('web-session:clear', async (_event, partition) => {
   if (!isAllowedWebPartition(partition)) {
     return false;
@@ -450,6 +513,9 @@ function createWindow() {
 app.on('web-contents-created', (_event, contents) => {
   const isGuest = contents.getType?.() === 'webview';
   if (!isGuest && !getPartitionForWebContents(contents)) return;
+  if (isGuest) contents.on('before-mouse-event', (_event, mouse) => {
+    if (Number.isFinite(mouse.globalX) && Number.isFinite(mouse.globalY)) webPointerPositions.set(contents,{x:mouse.globalX,y:mouse.globalY,localX:mouse.x,localY:mouse.y});
+  });
   installPermissionDenyHandlers(contents.session);
 
   contents.setWindowOpenHandler((details) => {
@@ -488,7 +554,7 @@ app.on('web-contents-created', (_event, contents) => {
 });
 
 app.whenReady().then(() => {
-  installPermissionDenyHandlers(session.defaultSession);
+  installPermissionDenyHandlers(session.defaultSession, { allowFullscreen: true });
   createWindow();
 
   app.on('activate', () => {

@@ -29,6 +29,9 @@ async function launch(t, board = seed(), { hostRules } = {}) {
   const bootstrap=path.join(profile,'bootstrap.cjs');
   await fs.writeFile(bootstrap, `const {app}=require('electron');
     app.setPath('userData',process.env.NOTEBOARD_QA_PROFILE);
+    app.__qaMainErrors=[];
+    process.on('uncaughtException',error=>app.__qaMainErrors.push(error.stack||error.message));
+    process.on('unhandledRejection',error=>app.__qaMainErrors.push(String(error)));
     app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();});
     app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
     import(${JSON.stringify(pathToFileURL(process.env.NOTEBOARD_TEST_APP_ENTRY || path.join(root,'main.js')).href)});`);
@@ -39,6 +42,7 @@ async function launch(t, board = seed(), { hostRules } = {}) {
   const window=await app.firstWindow();
   const errors=[];
   window.on('pageerror',error=>errors.push(error.message));
+  if(process.env.NOTEBOARD_PRIVACY_TRACE)window.on('console',message=>{if(message.type()==='error')console.error('HOST',message.text());});
   assert.equal(await app.evaluate(({app})=>app.getPath('userData')),profile);
   t.after(async()=>{
     try {
@@ -49,6 +53,7 @@ async function launch(t, board = seed(), { hostRules } = {}) {
         t.diagnostic(JSON.stringify(state));
       }
       if(errors.length) t.diagnostic(JSON.stringify(errors));
+      assert.deepEqual(await app.evaluate(({app})=>app.__qaMainErrors),[], 'Electron main process must not throw');
     } finally {
       await app.close();
       const resolved=path.resolve(profile), temp=path.resolve(os.tmpdir())+path.sep;
@@ -71,13 +76,116 @@ async function fixtureServer(t) {
     if(request.url==='/slow') setTimeout(render,1200); else render();
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  t.after(()=>new Promise(resolve=>server.close(resolve)));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   return `http://127.0.0.1:${server.address().port}`;
 }
 
 const guestState = app => app.evaluate(async ({webContents}) => Promise.all(webContents.getAllWebContents().filter(c=>c.getType()==='webview').map(async c=>({
   id:c.id,url:c.getURL(),title:c.getTitle(),body:await c.executeJavaScript('document.body?.innerText || ""').catch(()=>''),
 }))));
+
+test('Ctrl+wheel over native Web zooms the board around the cursor, including focused mobile guests', {timeout:60000}, async t=>{
+  const origin=await fixtureServer(t);
+  const {app,window}=await launch(t,seed('embed',origin+'/page'));
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  const root=window.locator('[data-board-root]');
+  const scale=()=>root.evaluate(node=>Number(node.style.transform.match(/scale\(([^)]+)\)/)[1]));
+  for(const focused of [false,true]) {
+    const box=await window.locator('[data-web-viewport]').boundingBox();
+    const x=box.x+90,y=box.y+80,before=await root.boundingBox(),oldZoom=await scale();
+    if(focused)await window.mouse.click(x,y);else await window.mouse.move(x,y);
+    const point={x:(x-before.x)/oldZoom,y:(y-before.y)/oldZoom};
+    await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
+    await expect.poll(scale).toBeGreaterThan(oldZoom);
+    const nextZoom=await scale(),after=await root.boundingBox();
+    assert.ok(Math.abs(after.x+point.x*nextZoom-x)<2,'horizontal cursor anchor');
+    assert.ok(Math.abs(after.y+point.y*nextZoom-y)<2,'vertical cursor anchor');
+    assert.equal(await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').getZoomFactor()),1);
+  }
+  const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script),script);
+  await run('document.body.style.minHeight="3000px"; void 0');
+  let beforePlain=await scale();await window.mouse.wheel(0,120);
+  await expect.poll(()=>run('scrollY')).toBeGreaterThan(0);assert.equal(await scale(),beforePlain);
+  await run(`scrollTo(0,0);document.body.innerHTML='<iframe src="${origin.replace('127.0.0.1','localhost')}/child" style="width:900px;height:400px;border:0"></iframe>'; void 0`);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.length)).toBe(2);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.find(frame=>frame.url.endsWith('/child'))?.executeJavaScript('document.readyState'))).toBe('complete');
+  const childBox=await window.locator('[data-web-viewport]').boundingBox();beforePlain=await scale();
+  await window.mouse.click(childBox.x+90,childBox.y+90);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
+  await expect.poll(scale).toBeGreaterThan(beforePlain);
+  await window.getByRole('button',{name:'Select Tool',exact:true}).click();
+  await window.locator('[data-board-element-id="web"]').click();
+  await window.getByRole('button',{name:'More',exact:true}).click();
+  const menu=window.locator('[data-more-toolbar-item="embed"]');await menu.getByRole('button',{name:'Web settings',exact:true}).click();
+  await menu.getByRole('button',{name:'Phone',exact:true}).click();await window.getByRole('button',{name:'More',exact:true}).click();
+  await window.getByRole('button',{name:'More',exact:true}).click();await menu.getByRole('button',{name:'Web',exact:true}).click();
+  const box=await window.locator('[data-web-viewport]').boundingBox(),before=await scale();
+  await window.mouse.click(box.x+60,box.y+80);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
+  await expect.poll(scale).toBeGreaterThan(before);
+});
+
+test('cookie consent popups close without main-process errors and Web fullscreen restores its viewport', {timeout:60000}, async t=>{
+  const server=http.createServer((request,response)=>{
+    response.setHeader('Content-Type','text/html');
+    if(request.url==='/popup')response.end('<title>Consent popup</title><button id="accept" onclick="document.cookie=\'consent=accepted;path=/\';window.opener.location.href=\'/accepted\';window.close()">Accept cookies</button><iframe src="/frame"></iframe>');
+    else if(request.url==='/frame')response.end('<script>document.cookie="frame=1;path=/"</script>');
+    else response.end('<title>Consent fixture</title><button id="open" onclick="window.open(\'/popup\')">Open consent</button><div id="video" style="width:100%;height:100%;background:#126">Video</div>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const {app,window,errors}=await launch(t,seed('embed',`http://127.0.0.1:${server.address().port}/page`));
+  const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script,true),script);
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Consent fixture');
+  for(let i=0;i<3;i++){
+    await run('document.querySelector("#open").click(); void 0');
+    await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().some(c=>c.getTitle()==='Consent popup'))).toBe(true);
+    await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getTitle()==='Consent popup').executeJavaScript('setTimeout(()=>document.querySelector("#accept").click(),0); void 0',true));
+    await expect.poll(async()=>(await guestState(app))[0]?.url).toContain('/accepted');
+    await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(1);
+  }
+  assert.match(await run('document.cookie'),/consent=accepted/);
+  await run('window.__retained=42;document.querySelector("#video").requestFullscreen(); void 0');
+  await expect.poll(()=>window.evaluate(()=>!!document.fullscreenElement?.hasAttribute('data-web-viewport'))).toBe(true);
+  await expect.poll(()=>run('!!document.fullscreenElement')).toBe(true);
+  const full=await window.locator('[data-web-viewport]').boundingBox(),viewport=await window.evaluate(()=>({width:innerWidth,height:innerHeight}));
+  assert.ok(Math.abs(full.width-viewport.width)<2&&Math.abs(full.height-viewport.height)<2);
+  await run('document.exitFullscreen(); void 0');
+  await expect.poll(()=>window.evaluate(()=>!!document.fullscreenElement)).toBe(false);
+  assert.equal(await run('window.__retained'),42);
+  assert.deepEqual(errors,[]);
+});
+
+test('desktop eyedropper reads the rendered pixel and applies it to the selected object', {timeout:30000},async t=>{
+  const board=seed('select');board.elements=[
+    {id:'target',type:'rectangle',position:{x:100,y:120},size:{width:120,height:90},content:'',color:'#ff0000',zIndex:1},
+    {id:'source',type:'rectangle',position:{x:350,y:120},size:{width:120,height:90},content:'',color:'#34a853',zIndex:2},
+  ];
+  const {app,window,profile}=await launch(t,board);
+  const source=await window.locator('[data-board-element-id="source"]').boundingBox();
+  const point={x:source.x+source.width/2,y:source.y+source.height/2};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),point),'#34a853');
+  await window.locator('[data-board-element-id="target"]').click();
+  await window.getByRole('button',{name:'More',exact:true}).click();await window.locator('[data-more-toolbar-item="eyedropper"]').getByRole('button',{name:'Eyedropper',exact:true}).click();
+  await window.mouse.click(point.x,point.y);
+  await expect.poll(async()=>JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8')).elements.find(element=>element.id==='target').color).toBe('#34a853');
+  await expect(window.getByRole('alert')).toHaveCount(0);
+});
+
+test('desktop spreadsheet edits and imports through the packaged-style file origin without taking board shortcuts', {timeout:60000},async t=>{
+  const board=seed('select');board.elements=[{id:'sheet',type:'table',name:'Desktop sheet',position:{x:100,y:120},size:{width:700,height:400},content:'',zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  await window.locator('[data-board-element-id="sheet"]').click();await window.getByRole('button',{name:'Edit spreadsheet',exact:true}).click();
+  const dialog=window.getByRole('dialog',{name:'Spreadsheet editor'});await expect(dialog.getByRole('status')).toHaveCount(0,{timeout:30000});await expect(dialog.getByRole('alert')).toHaveCount(0);
+  const frame=window.frameLocator('iframe[title="Spreadsheet cells"]');await frame.locator('canvas[id^="univer-sheet-main-canvas_"]').click({position:{x:95,y:32}});
+  await window.keyboard.type('15',{delay:30});await window.keyboard.press('Enter');
+  await dialog.getByLabel('Import spreadsheet file').setInputFiles({name:'Native.csv',mimeType:'text/csv',buffer:Buffer.from('Value\n23')});
+  await expect(dialog.getByRole('button',{name:'Done',exact:true})).toBeEnabled({timeout:30000});await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await dialog.getByRole('button',{name:'Done',exact:true}).click();await expect(dialog).toHaveCount(0);
+  await window.getByRole('button',{name:'Edit spreadsheet',exact:true}).click();await expect(dialog.getByRole('status')).toHaveCount(0,{timeout:30000});
+  const data=await window.locator('iframe[title="Spreadsheet cells"]').evaluate(frame=>JSON.parse(frame.contentWindow.noteboardSheet.snapshot()));
+  assert.equal(data.workbook.sheetOrder.length,2);assert.equal(data.workbook.sheets['sheet-1'].cellData[0][0].v,15);
+  assert.equal(data.workbook.sheets[data.activeSheetId].cellData[1][0].v,23);
+  assert.deepEqual(errors,[]);
+});
 
 test('desktop Web enforces ad, popup and cookie settings from first load and after toggling', {timeout:60000}, async t => {
   const progress = label => { if (process.env.NOTEBOARD_PRIVACY_TRACE) console.log(label); };
@@ -395,15 +503,25 @@ test('desktop More keeps a held drag across embedded web content and cancels out
   assert.deepEqual(errors,[]);
 });
 
-test('live YouTube renders and plays inside desktop Web with default settings', {timeout:60000,skip:process.env.NOTEBOARD_LIVE_WEB_TEST!=='1'}, async t=>{
+test('live YouTube renders, plays, zooms under the cursor and enters fullscreen with default settings', {timeout:90000,skip:process.env.NOTEBOARD_LIVE_WEB_TEST!=='1'}, async t=>{
   const url='https://www.youtube.com/watch?v=M7lc1UVf-VE';
   const {app,window,errors}=await launch(t,seed('embed',url));
+  await expect.poll(async()=> (await guestState(app))[0]?.body?.length||0,{timeout:30000}).toBeGreaterThan(0);
+  const consent=await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('Array.from(document.querySelectorAll("button")).map(b=>b.innerText).filter(t=>/^(Accept all|Zaakceptuj wszystko|Tout accepter)$/i.test(t.trim()))'));
+  if(consent.length)await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('Array.from(document.querySelectorAll("button")).find(b=>/^(Accept all|Zaakceptuj wszystko|Tout accepter)$/i.test(b.innerText.trim()))?.click(); void 0',true));
   await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:30000}).toContain('YouTube');
   await expect.poll(async()=> (await guestState(app))[0]?.body,{timeout:30000}).toContain('Embedded Web Player Customization');
   await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('Boolean(document.querySelector("video"))')),{timeout:20000}).toBe(true);
   await expect(window.getByText('Loading page…',{exact:true})).toHaveCount(0);
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.querySelector("video").muted=true; document.querySelector("video").play().catch(()=>{})',true));
   await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.querySelector("video")?.currentTime || 0')),{timeout:20000}).toBeGreaterThan(.1);
+  const zoom=()=>window.locator('[data-board-root]').evaluate(node=>Number(node.style.transform.match(/scale\(([^)]+)\)/)[1]));
+  const before=await zoom(),box=await window.locator('[data-web-viewport]').boundingBox();await window.mouse.move(box.x+180,box.y+160);
+  await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');await expect.poll(zoom).toBeGreaterThan(before);
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.querySelector(".ytp-fullscreen-button")?.click(); void 0',true));
+  await expect.poll(()=>window.evaluate(()=>!!document.fullscreenElement?.hasAttribute('data-web-viewport'))).toBe(true);
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.exitFullscreen(); void 0',true));
+  await expect.poll(()=>window.evaluate(()=>!!document.fullscreenElement)).toBe(false);
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.querySelector("video")?.pause()'));
   assert.deepEqual(errors,[]);
 });

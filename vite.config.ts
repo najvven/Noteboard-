@@ -5,6 +5,8 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   base: './',
+  worker: { format: 'es' },
+  build: { rollupOptions: { input: { main: path.resolve(__dirname,'index.html'), sheet: path.resolve(__dirname,'sheet.html') } } },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

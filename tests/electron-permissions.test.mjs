@@ -23,4 +23,9 @@ test("Electron sessions deny permission checks and requests by default", () => {
   });
   assert.equal(decision, false);
   assert.equal(installPermissionDenyHandlers(webSession), false);
+  installPermissionDenyHandlers(webSession,{allowFullscreen:true});
+  assert.equal(checkHandler?.({},'fullscreen','https://www.youtube.com'),true);
+  assert.equal(checkHandler?.({},'media','https://www.youtube.com'),false);
+  requestHandler?.({},'fullscreen',allowed=>{decision=allowed});assert.equal(decision,true);
+  for(const permission of ['geolocation','notifications','clipboard-read','display-capture','pointerLock']) assert.equal(checkHandler?.({},permission,'https://www.youtube.com'),false);
 });

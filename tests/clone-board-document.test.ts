@@ -71,15 +71,11 @@ test("cloning a board remaps element and spreadsheet references without mutating
 
   const clone = cloneBoardDocument(elements, sheets, () => `new-${++nextId}`);
 
-  assert.notEqual(clone.elements[0].id, elements[0].id);
-  assert.equal(clone.elements[1].parentId, clone.elements[0].id);
-  assert.equal(clone.elements[1].linkToId, clone.elements[0].id);
-  assert.equal(clone.sheets[0].cellIds[0][0], clone.elements[0].id);
-  assert.equal(clone.elements[0].sheetCell?.sheetId, clone.sheets[0].id);
-  assert.equal(
-    clone.elements[0].sheetCell?.rowId,
-    clone.sheets[0].rowOrder[0],
-  );
+  const workbook=clone.elements.find(element=>element.type==='table')!,text=clone.elements.find(element=>element.type==='text')!;
+  assert.notEqual(workbook.id,elements[0].id);
+  assert.equal(text.parentId,undefined);
+  assert.equal(text.linkToId,workbook.id);
+  assert.equal(clone.sheets.length,0);
   assert.equal(elements[0].id, "section-a");
   assert.equal(sheets[0].cellIds[0][0], "section-a");
 });

@@ -4,7 +4,9 @@ export const CURRENT_BOARD_VERSION = 3;
 export const MAX_SECTION_SHEETS = 10_000;
 export const MAX_BOARD_FILE_BYTES = 128 * 1024 * 1024;
 export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
-export const MAX_BOARD_JSON_BYTES = 8 * 1024 * 1024;
+// Portable board JSON supports the same documents as normal board storage.
+// Total archive expansion remains bounded before any entry is read.
+export const MAX_BOARD_JSON_BYTES = MAX_BOARD_FILE_BYTES;
 export const MAX_ARCHIVE_ASSET_BYTES = 32 * 1024 * 1024;
 // Media is embedded as base64 in board JSON. Keep one file comfortably below
 // the 128 MB board-read boundary after the roughly 4/3 encoding expansion.

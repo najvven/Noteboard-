@@ -1,30 +1,9 @@
 import type { Page } from "../../types";
-import {
-  createSectionSheetOperationBudget,
-  recalculateSectionSheetsElements,
-} from "../spreadsheet/model";
-import {
-  createDefaultSectionSheetAutomations,
-  DEFAULT_SECTION_SHEET_SHORTCUTS,
-  SECTION_SHEET_COMMAND_BY_ACTION,
-  type SectionSheet,
-  type SectionSheetAutomationId,
-} from "../spreadsheet/types";
+import { upgradeLegacyWorkbooks } from "../spreadsheet/workbook";
 import { CURRENT_BOARD_VERSION } from "../../../shared/board-data.js";
 import { repairLegacyBoard } from "../../../shared/board-migration.js";
 
 export const CURRENT_PAGE_VERSION = CURRENT_BOARD_VERSION;
-const MAX_PAGE_MIGRATION_OPERATIONS = 500_000;
-
-const SECTION_SHEET_ACTIONS = new Set([
-  "auto-fit",
-  "fill-down",
-  "fill-right",
-  "series",
-]);
-const SECTION_SHEET_TRIGGERS = new Set(["manual", "shortcut", "cell-change"]);
-const SECTION_SHEET_SHORTCUT_KEYS = Object.keys(DEFAULT_SECTION_SHEET_SHORTCUTS);
-
 const inferStoredMediaMime = (content?: unknown, mediaMime?: unknown) => {
   if (typeof mediaMime === "string" && mediaMime) return mediaMime;
   if (typeof content !== "string" || !content) return "";
@@ -37,79 +16,6 @@ const inferStoredMediaMime = (content?: unknown, mediaMime?: unknown) => {
   if (/\.(mp3|wav|ogg|m4a|aac)(\?|#|$)/i.test(content)) return "audio/url";
   return "";
 };
-
-const migrateSectionSheets = (value: unknown): SectionSheet[] =>
-  Array.isArray(value)
-    ? value
-        .filter(
-          (sheet: any) =>
-            sheet &&
-            sheet.version === 1 &&
-            typeof sheet.id === "string" &&
-            Array.isArray(sheet.rowOrder) &&
-            Array.isArray(sheet.columnOrder) &&
-            Array.isArray(sheet.cellIds) &&
-            sheet.rows &&
-            typeof sheet.rows === "object" &&
-            sheet.columns &&
-            typeof sheet.columns === "object",
-        )
-        .map((sheet: any) => {
-          const shortcuts = {
-            ...DEFAULT_SECTION_SHEET_SHORTCUTS,
-            ...(sheet.shortcuts && typeof sheet.shortcuts === "object"
-              ? Object.fromEntries(
-                  SECTION_SHEET_SHORTCUT_KEYS.filter(
-                    (key) => typeof sheet.shortcuts[key] === "string",
-                  ).map((key) => [key, sheet.shortcuts[key]]),
-                )
-              : {}),
-          };
-          const validAutomations = Array.isArray(sheet.automations)
-            ? sheet.automations.filter(
-                (automation: any) =>
-                  automation &&
-                  typeof automation.id === "string" &&
-                  typeof automation.name === "string" &&
-                  typeof automation.enabled === "boolean" &&
-                  SECTION_SHEET_ACTIONS.has(automation.action) &&
-                  SECTION_SHEET_TRIGGERS.has(automation.trigger),
-              )
-            : [];
-          const existingByAction = new Map(
-            validAutomations.map((automation: any) => [automation.action, automation]),
-          );
-          const automations = createDefaultSectionSheetAutomations(
-            (action) => `automation-${sheet.id}-${action}`,
-            shortcuts,
-          ).map((fallback) => {
-            const existing = existingByAction.get(fallback.action) as
-              | Record<string, unknown>
-              | undefined;
-            const action = fallback.action as SectionSheetAutomationId;
-            return {
-              ...fallback,
-              ...(existing ?? {}),
-              action,
-              shortcut: shortcuts[SECTION_SHEET_COMMAND_BY_ACTION[action]],
-            };
-          });
-          return {
-            ...sheet,
-            name:
-              typeof sheet.name === "string" && sheet.name.trim()
-                ? sheet.name
-                : "Section Spreadsheet",
-            shortcuts,
-            automations,
-            headerRows: Number.isInteger(sheet.headerRows) ? sheet.headerRows : 1,
-            headerColumns: Number.isInteger(sheet.headerColumns)
-              ? sheet.headerColumns
-              : 0,
-            showHeaders: sheet.showHeaders !== false,
-          };
-        })
-    : [];
 
 export const migratePage = (source: any): Page => {
   source = repairLegacyBoard(source);
@@ -124,7 +30,7 @@ export const migratePage = (source: any): Page => {
       `Board version ${source.version} is newer than this version of Noteboard.`,
     );
   }
-  const sectionSheets = migrateSectionSheets(source.sectionSheets);
+  const sectionSheets = Array.isArray(source.sectionSheets) ? source.sectionSheets.filter((sheet: any) => sheet?.version === 1 && typeof sheet.id === "string" && Array.isArray(sheet.cellIds)) : [];
   const validSheetIds = new Set(sectionSheets.map((sheet) => sheet.id));
   const migratedElements = Array.isArray(source.elements)
     ? source.elements.map((element: any) => {
@@ -164,14 +70,7 @@ export const migratePage = (source: any): Page => {
         return { ...migratedElement };
       })
     : [];
-  const migrationBudget = createSectionSheetOperationBudget(
-    MAX_PAGE_MIGRATION_OPERATIONS,
-  );
-  const elements = recalculateSectionSheetsElements(
-    migratedElements,
-    sectionSheets,
-    migrationBudget,
-  );
+  const elements = upgradeLegacyWorkbooks(migratedElements, sectionSheets);
 
   return {
     ...source,
@@ -189,6 +88,6 @@ export const migratePage = (source: any): Page => {
     workspaceGridThickness: source.workspaceGridThickness ?? 1,
     workspaceGridSize: source.workspaceGridSize ?? 50,
     elements,
-    sectionSheets,
+    sectionSheets: [],
   } as Page;
 };

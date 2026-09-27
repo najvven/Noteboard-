@@ -135,6 +135,7 @@ export interface BoardEditorSettings {
   cropShortcut?: string;
   scrollZoomShortcut?: string;
   zoomToCursor?: boolean;
+  keepBoardContentPosition?: boolean;
   cutShortcut?: string;
   proportionalScale?: boolean;
   altResizeCrops?: boolean;
@@ -143,6 +144,7 @@ export interface BoardEditorSettings {
   isSelectionLockEnabled?: boolean;
   selectionLockTime?: number;
   enableObjectSnapping?: boolean;
+  smartGuidesEnabled?: boolean;
   autoSelectOnPlace?: boolean;
   autoToolOnSelect?: boolean;
   spinSnapEnabled?: boolean;

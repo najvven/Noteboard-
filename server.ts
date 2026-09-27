@@ -45,6 +45,10 @@ async function startServer() {
     Object.entries(getLocalSecurityHeaders()).forEach(([name, value]) =>
       res.setHeader(name, value),
     );
+    if (req.path === '/sheet.html') {
+      res.setHeader('Content-Security-Policy', "frame-ancestors 'self'");
+      res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    }
     if (!isTrustedLocalHost(req.headers.host)) {
       res.status(403).json({ error: "Untrusted local host" });
       return;

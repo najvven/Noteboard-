@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "re
 import { createPortal } from "react-dom";
 import { webWheelClientPoint } from '../features/web/wheel-point';
 import {useOutlineSelection} from '../features/board/use-outline-selection';
-import {selectedBounds, selectElementsInOutline} from '../features/board/selection';
+import {selectedBounds, selectElementsInOutline, selectionOutline, createSelectionArea} from '../features/board/selection';
 import {mergeAreaElements,ungroupAreaElements,updateMergedGroup,isMergedGroupMember,localGroupElement} from '../features/board/grouping';
 import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
 import SmartGuidesOverlay,{type SmartGuidesHandle} from './SmartGuidesOverlay';
@@ -32,7 +32,7 @@ import { getBrowserWebSource, normalizeWebUrl } from "../features/web/model";
 import { createToolbarDragPreview, TOOLBAR_EDITING_CLASSES } from "../features/toolbar/drag-preview";
 import { mergeLiveWebviewUrls, readLiveWebviewUrl } from "../features/web/webview-state";
 import { colorTextRange, replaceTextEditorHtml } from "../features/board/rich-text-formatting";
-import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle } from "../features/board/board-surfaces";
+import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary } from "../features/board/board-surfaces";
 import { elementPolygon, getPlacementSection, getSectionClipPath } from "../features/board/section-clipping";
 import { getElementPermissions } from "../features/board/interaction-permissions";
 import ToolPropertiesBar from "./ToolPropertiesBar";
@@ -69,6 +69,8 @@ import {
   usesAreaPlacement,
   resolveAreaDragPoint,
   getBoardPlacementRect,
+  resolveLineDragPoint,
+  getLinePlacementRect,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import {
@@ -1300,12 +1302,7 @@ export default function BoardEditor({
     x: number;
     y: number;
   } | null>(null);
-  const [quickAddRegion, setQuickAddRegion] = useState<{
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-  } | null>(null);
+  const [quickAddRegion, setQuickAddRegion] = useState<ClipboardRegion | null>(null);
   const [currentDrawPoints, setCurrentDrawPoints] = useState<
     { x: number; y: number }[] | null
   >(null);
@@ -2577,6 +2574,10 @@ export default function BoardEditor({
           onAllowEditingChange={["text", "shapes", "media", "embed", "draw", "grid", "section", "fill"].includes(menuId) ? value => updateToolMenuSetting(menuId, "allowEditing", value) : undefined}
           allowMoving={settings.allowMoving ?? false}
           onAllowMovingChange={["text", "shapes", "media", "embed", "draw", "grid", "section", "fill"].includes(menuId) ? value => updateToolMenuSetting(menuId, "allowMoving", value) : undefined}
+          pageInteractionWithSelect={settings.pageInteractionWithSelect ?? false}
+          onPageInteractionWithSelectChange={menuId === "embed" ? value => updateToolMenuSetting(menuId, "pageInteractionWithSelect", value) : undefined}
+          pageInteractionWithHand={settings.pageInteractionWithHand ?? true}
+          onPageInteractionWithHandChange={menuId === "embed" ? value => updateToolMenuSetting(menuId, "pageInteractionWithHand", value) : undefined}
           previewMode={settings.previewMode}
           onPreviewModeChange={(mode: PreviewMode) =>
             updateToolMenuSetting(menuId, "previewMode", mode)
@@ -3463,7 +3464,13 @@ export default function BoardEditor({
     { type: "arrow", icon: ArrowUpRight, label: "Arrow" },
   ] as const;
 
-  const renderShapeToolSettings = (inMore = false) => (
+  const renderShapeToolSettings = (inMore = false) => {
+    const selectedTriangle = elements.find(element => element.id === selectedId && element.type === 'triangle');
+    const triangleProps = selectedTriangle ?? resolveObjectPlacementProps({
+      type:'triangle', pendingProps, savedDefaults:objectDefaultsRef.current.triangle,
+      baseline:pendingPropsBaselineRef.current,
+    });
+    return (
     <div className="flex flex-col gap-1">
       {shapeToolOptions.map((shape) => (
         <button
@@ -3490,8 +3497,15 @@ export default function BoardEditor({
           <span>{shape.label}</span>
         </button>
       ))}
+      {activeTool === "triangle" && <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs font-bold text-gray-600">
+        <span>Corners</span>
+        <SegmentedControl label="Triangle corners" value={triangleProps.strokeLinejoin ?? 'miter'}
+          onChange={value => selectedTriangle ? updateElement(selectedTriangle.id,{strokeLinejoin:value}) : updatePendingToolProps({strokeLinejoin:value})}
+          options={[{value:'miter',label:'Sharp'},{value:'round',label:'Rounded'}]} />
+      </div>}
     </div>
-  );
+    );
+  };
 
   const updatePendingToolProps = (updates: Partial<BoardElement>) => {
     setPendingProps((current) => ({ ...current, ...updates }));
@@ -4624,17 +4638,21 @@ export default function BoardEditor({
   const creationParentId = (point: { x: number; y: number }) =>
     getPlacementSection(point, elementsRef.current)?.id ?? targetLayerId ?? undefined;
 
-  const creationClip = (rect: { x: number; y: number; w: number; h: number }, rotation = 0) => getSectionClipPath({
+  const creationClip = (rect: { x: number; y: number; w: number; h: number }, rotation = 0, preview?: BoardElement) => {
+    const element = preview ?? {
     id: 'creation-preview', type: activeTool as ElementType, content: '',
     position: { x: rect.x, y: rect.y }, size: { width: rect.w, height: rect.h }, rotation,
     parentId: creationParentId(areaGestureRef.current?.start ?? { x: rect.x, y: rect.y }),
-    zIndex: Math.max(0, ...elementsRef.current.map(e => e.zIndex)) + 1,
-  }, elementsRef.current);
+    zIndex: activeTool === 'section' ? Math.min(0,...elementsRef.current.map(e=>e.zIndex))-1 : Math.max(0, ...elementsRef.current.map(e => e.zIndex)) + 1,
+    };
+    return getSectionClipPath(element, elementsRef.current, elementBoardBoundary(element,elementsRef.current,pageDimensions));
+  };
 
-  const handleAddRegionElement = (
+  const buildRegionElement = (
     type: ElementType,
     rect: { x: number; y: number; w: number; h: number },
     extraProps?: Partial<BoardElement>,
+    id = "preview",
   ) => {
     const latestElements = elementsRef.current;
     let finalRect = type === "board"
@@ -4667,24 +4685,6 @@ export default function BoardEditor({
       }
     }
 
-    if (overlapMode === "full" && type !== "section" && type !== "board") {
-      const isOverlap = latestElements.some((el) => {
-        if (el.type === "section" || el.type === "board") return false;
-        const ew = el.size?.width || 100;
-        const eh = el.size?.height || 40;
-        return (
-          finalRect.x < el.position.x + ew &&
-          finalRect.x + finalRect.w > el.position.x &&
-          finalRect.y < el.position.y + eh &&
-          finalRect.y + finalRect.h > el.position.y
-        );
-      });
-      if (isOverlap) {
-        finishToolUse(type);
-        return; // Block placement
-      }
-    }
-
     // Convert generic shapes
     let defaultContent = "";
     if (type === "h1" || type === "h2" || type === "h3") defaultContent = "";
@@ -4698,7 +4698,7 @@ export default function BoardEditor({
       baseline: pendingPropsBaselineRef.current,
     });
     const newElement: BoardElement = {
-      id: generateId(),
+      id,
       type,
       parentId: type === "board" ? undefined : creationParentId(areaGestureRef.current?.start ?? { x: finalRect.x, y: finalRect.y }),
       position: { x: finalRect.x, y: finalRect.y },
@@ -4731,6 +4731,27 @@ export default function BoardEditor({
       ...extraProps,
     };
 
+    return { ...newElement, size: newElement.size ?? { width: finalRect.w, height: finalRect.h } };
+  };
+
+  const handleAddRegionElement = (
+    type: ElementType,
+    rect: { x: number; y: number; w: number; h: number },
+    extraProps?: Partial<BoardElement>,
+  ) => {
+    const latestElements = elementsRef.current;
+    const newElement = buildRegionElement(type, rect, extraProps, generateId());
+    if (overlapMode === "full" && type !== "section" && type !== "board") {
+      const isOverlap = latestElements.some(el => {
+        if (el.type === "section" || el.type === "board") return false;
+        const w = newElement.size?.width ?? 0, h = newElement.size?.height ?? 0;
+        return newElement.position.x < el.position.x + (el.size?.width ?? 100) &&
+          newElement.position.x + w > el.position.x &&
+          newElement.position.y < el.position.y + (el.size?.height ?? 40) &&
+          newElement.position.y + h > el.position.y;
+      });
+      if (isOverlap) { finishToolUse(type); return; }
+    }
     const placedElement = type === 'board'
       ? createBoardSurface(newElement.id, newElement.position, newElement.size!, newElement.color, newElement.zIndex)
       : newElement;
@@ -4962,10 +4983,7 @@ export default function BoardEditor({
 
   const clipboardSelection = (region: ClipboardRegion | undefined = quickAddRegion ?? undefined) => {
     const latest = syncLiveEditableState(elementsRef.current);
-    const ids = region ? selectElementsInOutline(latest,[
-      {x:region.x,y:region.y},{x:region.x+region.w,y:region.y},
-      {x:region.x+region.w,y:region.y+region.h},{x:region.x,y:region.y+region.h},
-    ], respectLayerVisibility) : selectedIds;
+    const ids = region ? selectElementsInOutline(latest, selectionOutline(region), respectLayerVisibility) : selectedIds;
     const roots = new Set(ids), hierarchy = createElementHierarchy(latest);
     return latest.filter(element => roots.has(element.id) || ids.some(id => hierarchy.isDescendantOf(element.id,id)));
   };
@@ -5148,6 +5166,7 @@ export default function BoardEditor({
       "borderColor",
       "borderWidth",
       "borderRadius",
+      "strokeLinejoin",
       "opacity",
       "flipX",
       "flipY",
@@ -5657,7 +5676,7 @@ export default function BoardEditor({
   const handlePointerDown = (e: React.PointerEvent) => {
     if(activeTool==='eyedropper'){e.preventDefault();e.stopPropagation();if(e.button===0)void sampleColor(e.clientX,e.clientY);return;}
     if(activeTool==='crop'){e.preventDefault();return;}
-    if(outlineSelection.begin(e)){setQuickAddRegion(null);setIsMainBoardSelected(false);closeAllDropdowns();return;}
+    if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
       activePointerIdRef.current !== null &&
       activePointerIdRef.current !== e.pointerId
@@ -6014,10 +6033,12 @@ export default function BoardEditor({
       const extent = Math.max(Math.abs(dx), Math.abs(dy));
       current = { x: start.x + Math.sign(dx) * extent, y: start.y + Math.sign(dy) * extent };
     }
-    return resolveAreaDragPoint(start, current, gridSize, point => {
+    const projectPoint = (point: {x:number;y:number}) => {
       const gridPoint = { x: snap(point.x), y: snap(point.y) };
       return line && snapToGrid ? gridPoint : getSnapPoint(gridPoint.x, gridPoint.y, line ? 8 : 30);
-    }, proportionalScale && !line);
+    };
+    return line ? resolveLineDragPoint(start, current, projectPoint)
+      : resolveAreaDragPoint(start, current, gridSize, projectPoint, proportionalScale);
   };
 
   const handlePointerUp = (event?: React.PointerEvent | PointerEvent) => {
@@ -6317,36 +6338,8 @@ export default function BoardEditor({
       const snappedCurrent = resolvePlacementPoint(activeDragStart, activeDragCurrent, activeTool);
 
       if (activeTool === "arrow" || activeTool === "line") {
-        const dx = snappedCurrent.x - snappedStart.x;
-        const dy = snappedCurrent.y - snappedStart.y;
-        const rawDistance = Math.sqrt(dx * dx + dy * dy);
-
-        let distance = Math.max(rawDistance, gridSize);
-        let angle = Math.atan2(dy, dx) * (180 / Math.PI);
-        if (snapToGrid) {
-          angle = Math.round(angle / 45) * 45;
-          distance = Math.max(
-            gridSize,
-            Math.round(distance / gridSize) * gridSize,
-          );
-        }
-
-        const rad = angle * (Math.PI / 180);
-        const endX = snappedStart.x + Math.cos(rad) * distance;
-        const endY = snappedStart.y + Math.sin(rad) * distance;
-        let cx = (snappedStart.x + endX) / 2;
-        let cy = (snappedStart.y + endY) / 2;
-
-        handleAddRegionElement(
-          activeTool as ElementType,
-          {
-            x: cx - distance / 2,
-            y: cy - 20,
-            w: distance,
-            h: 40,
-          },
-          { rotation: Math.round(angle) },
-        );
+        const geometry = getLinePlacementRect(snappedStart, snappedCurrent, gridSize, snapToGrid);
+        handleAddRegionElement(activeTool as ElementType, geometry.rect, { rotation: geometry.rotation });
       } else {
         const clipped = getClippedRect(
           overlapMode,
@@ -6480,7 +6473,10 @@ export default function BoardEditor({
     const result=smartGuides(element,position,[mainSurface,...others],zoomRef.current,allowSnap&&enableObjectSnapping);
     setVisibleGuides(result.guides);return result.position;
   };
-  const outlineSelection=useOutlineSelection({tool:activeTool,zoom,surface:boardSurfaceRef,elements,selectedIds,onSelect:ids=>{setSelectedIds(ids);finishToolUse(activeTool);},respectVisibility:respectLayerVisibility,capture:captureSurfacePointer,onInteraction:setIsInteracting});
+  const outlineSelection=useOutlineSelection({tool:activeTool,zoom,surface:boardSurfaceRef,elements,selectedIds,
+    onSelect:ids=>{setSelectedIds(ids);finishToolUse(activeTool);},
+    onArea:outline=>setQuickAddRegion(outline?createSelectionArea(outline):null),
+    respectVisibility:respectLayerVisibility,capture:captureSurfacePointer,onInteraction:setIsInteracting});
   const selectionBounds=selectedIds.length>1?selectedBounds(elements,selectedIds):null;
   const selectionTreeIds=()=>{
     const result=new Set(selectedIds);
@@ -6505,6 +6501,7 @@ export default function BoardEditor({
     const id=target.closest<HTMLElement>('[data-board-element-id]')?.dataset.boardElementId;
     if(!id||!selectedIds.includes(id))return;
     event.preventDefault();event.stopPropagation();window.getSelection()?.removeAllRanges();
+    setQuickAddRegion(null);
     groupMoveRef.current={pointerId:event.pointerId,x:event.clientX,y:event.clientY,elements:elementsRef.current,ids:selectionTreeIds(),changed:false,preview:getEffectiveToolMenuSettings('select').previewMode};
     captureSurfacePointer(event);setIsInteracting(true);
   };
@@ -7981,7 +7978,7 @@ export default function BoardEditor({
                   <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')} Z`} fill="rgba(59,130,246,.08)" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} fillRule="evenodd"/>
                   {activeTool==='polygon-select'&&outlineSelection.points.map((point,index)=><circle key={index} cx={point.x} cy={point.y} r={(index===0?4:2.5)/zoom} fill="white" stroke="#3b82f6" strokeWidth={1.5/zoom}/>)}
                 </svg>}
-                {selectionBounds&&<div ref={selectionOutlineRef} data-multi-selection={selectedIds.length} className="pointer-events-none absolute border border-dashed border-blue-500" style={{left:selectionBounds.x,top:selectionBounds.y,width:selectionBounds.width,height:selectionBounds.height,zIndex:100001}}/>}
+                {selectionBounds&&<div ref={selectionOutlineRef} data-multi-selection={selectedIds.length} className={cn("pointer-events-none absolute",!quickAddRegion?.outline&&"border border-dashed border-blue-500")} style={{left:selectionBounds.x,top:selectionBounds.y,width:selectionBounds.width,height:selectionBounds.height,zIndex:100001}}/>}
                 <SmartGuidesOverlay ref={guidesOverlayRef} zoom={zoom} width={pageDimensions.width} height={pageDimensions.height}/>
                 {/* Main Board Visual Background */}
                   <div
@@ -8048,65 +8045,33 @@ export default function BoardEditor({
                         }
 
                         if (activeTool === "arrow" || activeTool === "line") {
+                          const geometry = getLinePlacementRect(dragStart, previewCurrent, gridSize, snapToGrid);
                           if (getActiveToolMenuSettings().previewMode === "box") {
                             return (
                               <div
                                 className="absolute border-[1.5px] border-blue-500 bg-blue-500/10 pointer-events-none"
                                 style={{
-                                  left: Math.min(dragStart.x, previewCurrent.x),
-                                  top: Math.min(dragStart.y, previewCurrent.y),
-                                  width: Math.max(
-                                    1,
-                                    Math.abs(previewCurrent.x - dragStart.x),
-                                  ),
-                                  height: Math.max(
-                                    1,
-                                    Math.abs(previewCurrent.y - dragStart.y),
-                                  ),
+                                  left: Math.min(dragStart.x, geometry.end.x),
+                                  top: Math.min(dragStart.y, geometry.end.y),
+                                  width: Math.max(1, Math.abs(geometry.end.x - dragStart.x)),
+                                  height: Math.max(1, Math.abs(geometry.end.y - dragStart.y)),
                                 }}
                               />
                             );
                           }
 
-                          const dx = previewCurrent.x - dragStart.x;
-                          const dy = previewCurrent.y - dragStart.y;
-                          const rawDistance = Math.sqrt(dx * dx + dy * dy);
-
-                          let distance = Math.max(rawDistance, gridSize);
-                          let angle = Math.atan2(dy, dx) * (180 / Math.PI);
-                          if (snapToGrid) {
-                            angle = Math.round(angle / 45) * 45;
-                            distance = Math.max(
-                              gridSize,
-                              Math.round(distance / gridSize) * gridSize,
-                            );
-                          }
-
-                          const rad = angle * (Math.PI / 180);
-                          const endX = dragStart.x + Math.cos(rad) * distance;
-                          const endY = dragStart.y + Math.sin(rad) * distance;
-                          let cx = (dragStart.x + endX) / 2;
-                          let cy = (dragStart.y + endY) / 2;
-
-                          const previewElement = {
-                            id: "preview",
-                            type: activeTool,
-                            position: { x: cx - distance / 2, y: cy - 20 },
-                            size: { width: distance, height: 40 },
-                            rotation: Math.round(angle),
-                            borderColor: pendingProps.borderColor || "#000000",
-                            borderWidth: pendingProps.borderWidth || 4,
-                          };
+                          const previewElement = buildRegionElement(activeTool, geometry.rect, {rotation:geometry.rotation});
                           return (
                             <div
                               style={{
                                 position: "absolute",
-                                clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }, angle),
+                                clipPath: creationClip(geometry.rect, geometry.rotation, previewElement),
                                 left: previewElement.position.x,
                                 top: previewElement.position.y,
                                 width: Math.max(1, previewElement.size.width),
                                 height: Math.max(1, previewElement.size.height),
-                                transform: `rotate(${angle}deg)`,
+                                transform: `rotate(${geometry.rotation}deg) scaleX(${previewElement.flipX ? -1 : 1}) scaleY(${previewElement.flipY ? -1 : 1})`,
+                                opacity: (previewElement.opacity ?? 100) / 100,
                                 transformOrigin: "center center",
                               }}
                             >
@@ -8146,39 +8111,16 @@ export default function BoardEditor({
                               />
                             );
                           } else {
-                            const previewElement = {
-                              id: "preview",
-                              type: activeTool,
-                              position: { x: clipped.x, y: clipped.y },
-                              size: { width: clipped.w, height: clipped.h },
-                              borderColor:
-                                pendingProps.borderColor || "#000000",
-                              borderWidth:
-                                activeTool === "triangle"
-                                  ? pendingProps.borderWidth !== undefined
-                                    ? pendingProps.borderWidth
-                                    : 2
-                                  : pendingProps.borderWidth || 4,
-                              content:
-                                TEXT_TYPES.includes(activeTool) ||
-                                activeTool === "sticky"
-                                  ? "Text"
-                                  : "",
-                              fontSize: pendingProps.fontSize,
-                              textAlign: pendingProps.textAlign,
-                              fontWeight: pendingProps.fontWeight,
-                              color:
-                                pendingProps.color ||
-                                (TEXT_TYPES.includes(activeTool)
-                                  ? "transparent"
-                                  : "#ffffff"),
-                            };
+                            const previewElement = buildRegionElement(activeTool as ElementType, clipped);
                             return (
                               <div
                                 className="pointer-events-none"
                                 style={{
                                   position: "absolute",
-                                  clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }),
+                                  opacity: (previewElement.opacity ?? 100) / 100,
+                                  transform: `rotate(${previewElement.rotation ?? 0}deg) scaleX(${previewElement.flipX ? -1 : 1}) scaleY(${previewElement.flipY ? -1 : 1})`,
+                                  transformOrigin: "center center",
+                                  clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }, previewElement.rotation ?? 0, previewElement),
                                   left: previewElement.position.x,
                                   top: previewElement.position.y,
                                   width: Math.max(1, previewElement.size.width),
@@ -8219,7 +8161,12 @@ export default function BoardEditor({
                   )}
 
                 {/* Quick Add Region Preview Outline */}
-                {quickAddRegion && (
+                {quickAddRegion?.outline && <svg data-selection-region="committed" data-selection-shape="outline" className="absolute pointer-events-none overflow-visible z-[100]"
+                  style={{left:quickAddRegion.x,top:quickAddRegion.y,width:quickAddRegion.w,height:quickAddRegion.h}}>
+                  <path d={`M ${quickAddRegion.outline.map(point=>`${point.x-quickAddRegion.x},${point.y-quickAddRegion.y}`).join(' L ')} Z`}
+                    fill="rgba(59,130,246,.1)" stroke="#3b82f6" strokeWidth={1.5/zoom} fillRule="evenodd" />
+                </svg>}
+                {quickAddRegion && !quickAddRegion.outline && (
                   <div
                     data-selection-region="committed"
                     className="absolute border-[1.5px] border-blue-500 bg-blue-500/10 pointer-events-none"
@@ -8260,6 +8207,8 @@ export default function BoardEditor({
                       }
                       isInteractionLocked={elementHierarchy.isLocked(el.id)}
                       allowMovingElementsInPan={allowMovingElementsInPan}
+                      webSelectInteraction={getEffectiveToolMenuSettings('embed').pageInteractionWithSelect ?? false}
+                      webHandInteraction={getEffectiveToolMenuSettings('embed').pageInteractionWithHand ?? true}
                       isBoardResizeEnabled={isBoardResizeEnabled}
                       isBoardMoveEnabled={isBoardMoveEnabled}
                       isSelectMode={
@@ -8427,6 +8376,8 @@ export default function BoardEditor({
                       }
                       isInteractionLocked={elementHierarchy.isLocked(el.id)}
                       allowMovingElementsInPan={allowMovingElementsInPan}
+                      webSelectInteraction={getEffectiveToolMenuSettings('embed').pageInteractionWithSelect ?? false}
+                      webHandInteraction={getEffectiveToolMenuSettings('embed').pageInteractionWithHand ?? true}
                       isBoardResizeEnabled={isBoardResizeEnabled}
                       isBoardMoveEnabled={isBoardMoveEnabled}
                       isSelectMode={
@@ -8505,6 +8456,14 @@ export default function BoardEditor({
                     resolvePlacementPoint(dragStart, dragCurrent, activeTool),
                     gridSize,
                   );
+                  if (getActiveToolMenuSettings().previewMode === 'realistic') {
+                    const preview = buildRegionElement('board',rect);
+                    const surface = createBoardSurface(preview.id,preview.position,preview.size,preview.color,preview.zIndex);
+                    return <div data-new-board-preview="true" className="absolute pointer-events-none z-[120]"
+                      style={{left:surface.position.x,top:surface.position.y,width:surface.size?.width,height:surface.size?.height}}>
+                      <ElementVisuals element={surface} onUpdate={()=>{}} allowEditing={false} showGrid={showGrid} gridColor={gridColor} gridSize={gridSize} gridThickness={gridThickness}/>
+                    </div>;
+                  }
                   return <div
                     data-new-board-preview="true"
                     className="absolute pointer-events-none border-[1.5px] border-blue-500 bg-blue-500/10 z-[120]"
@@ -8585,7 +8544,7 @@ export default function BoardEditor({
                 {/* Quick Add Menu */}
                 <AnimatePresence>
                   {quickAddRegion && (
-                    <div className="absolute z-[200]"
+                    <div data-selection-area-toolbar="true" className="absolute z-[100003]"
                       style={{
                         left: quickAddRegion.x + quickAddRegion.w / 2,
                         top: quickAddRegion.y + quickAddRegion.h + 20 / zoom,
@@ -9833,6 +9792,14 @@ export default function BoardEditor({
                     </div>
                   )}
 
+                  {activeType === "triangle" && <div className={bottomToolbarGroupClass}>
+                    <div className="flex items-center gap-2 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1" title="Triangle corners">
+                      <span className="text-[11px] font-bold text-gray-600">Corners</span>
+                      <SegmentedControl label="Triangle corners" value={targetProps.strokeLinejoin ?? 'miter'}
+                        onChange={value => onUpdateTarget({strokeLinejoin:value})}
+                        options={[{value:'miter',label:'Sharp'},{value:'round',label:'Rounded'}]} />
+                    </div>
+                  </div>}
                   {/* Element opacity */}
                   {!["embed", "eraser", "media", "image"].includes(activeType) && (
                     <div className={bottomToolbarGroupClass}>
@@ -10300,6 +10267,8 @@ function BoardElementNode({
   matchingToolMoving = false,
   isInteractionLocked = false,
   allowMovingElementsInPan = false,
+  webSelectInteraction = false,
+  webHandInteraction = true,
   isBoardResizeEnabled = false,
   isBoardMoveEnabled = false,
   showGrid = false,
@@ -10320,6 +10289,8 @@ function BoardElementNode({
   matchingToolEditing?: boolean;
   matchingToolMoving?: boolean;
   allowMovingElementsInPan?: boolean;
+  webSelectInteraction?: boolean;
+  webHandInteraction?: boolean;
   isBoardResizeEnabled?: boolean;
   isBoardMoveEnabled?: boolean;
   isSelectMode: boolean;
@@ -11073,7 +11044,7 @@ function BoardElementNode({
     window.addEventListener("pointercancel", onPointerCancel);
   };
 
-  const permissions = getElementPermissions({ tool: activeTool ?? "select", element, locked: isInteractionLocked, handEditing: allowEditing, handMoving: allowMovingElementsInPan, matchingEditing: matchingToolEditing, matchingMoving: matchingToolMoving });
+  const permissions = getElementPermissions({ tool: activeTool ?? "select", element, locked: isInteractionLocked, handEditing: allowEditing, handMoving: allowMovingElementsInPan, matchingEditing: matchingToolEditing, matchingMoving: matchingToolMoving, webSelectInteraction, webHandInteraction });
   const canResize = !isGroupSelected && (permissions.canResize || (element.type === "board" && isBoardResizeEnabled && !isInteractionLocked));
   const canMove = permissions.canMove || (element.type === "board" && isBoardMoveEnabled && !isInteractionLocked);
   const canInteract = permissions.canSelect || canResize || canMove;
@@ -11114,10 +11085,7 @@ function BoardElementNode({
     : element;
   const boardClipStyle = (() => {
     if (!pageDimensions || element.type === "board") return undefined;
-    const center = { x: element.position.x + (element.size?.width ?? 100) / 2, y: element.position.y + (element.size?.height ?? 40) / 2 };
-    const board = (elements ?? []).filter(e => e.type === 'board').sort((a,b) => b.zIndex-a.zIndex).find(e =>
-      center.x >= e.position.x && center.x <= e.position.x + (e.size?.width ?? 0) && center.y >= e.position.y && center.y <= e.position.y + (e.size?.height ?? 0));
-    const boundary = board ? elementPolygon(board) : elementPolygon({ position: { x:0, y:0 }, size: pageDimensions });
+    const boundary = elementBoardBoundary(element,elements??[],pageDimensions);
     return { clipPath: getSectionClipPath(element, elements ?? [], boundary, sceneHierarchy) };
   })();
 
@@ -11250,6 +11218,12 @@ function BoardElementNode({
 
         if (!canInteract) return;
 
+        if (permissions.canInteractWeb && normalizeWebUrl(element.content)) {
+          e.stopPropagation();
+          onSelect();
+          return;
+        }
+
         // If only resize is enabled, prevent moving the board body
         if (
           element.type === "board" &&
@@ -11325,6 +11299,7 @@ function BoardElementNode({
                   isSelected={isSelected}
                   allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
+                  webInteractive={permissions.canInteractWeb}
                   activeTool={activeTool}
                   showGrid={showGrid}
                   gridColor={gridColor}
@@ -11345,6 +11320,7 @@ function BoardElementNode({
               isSelected={isSelected}
               allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
+                  webInteractive={permissions.canInteractWeb}
               activeTool={activeTool}
               showGrid={showGrid}
               gridColor={gridColor}
@@ -11766,6 +11742,7 @@ function WebBrowserElement({
   onUpdate,
   allowEditing,
   allowContentEditing = false,
+  webInteractive,
   isSelected,
   containerStyle,
 }: {
@@ -11773,10 +11750,12 @@ function WebBrowserElement({
   onUpdate: (u: Partial<BoardElement>) => void;
   allowEditing?: boolean;
   allowContentEditing?: boolean;
+  webInteractive?: boolean;
   isSelected?: boolean;
   containerStyle: React.CSSProperties;
 }) {
   const [linkInputVal, setLinkInputVal] = useState("");
+  const interactive = webInteractive ?? !allowEditing;
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadError, setLoadError] = useState("");
   const [retryVersion, setRetryVersion] = useState(0);
@@ -11881,7 +11860,7 @@ function WebBrowserElement({
           <NativeWebView
             key={`${partition}-${settings.deviceMode}-${retryVersion}`}
             elementId={element.id} src={normalizedContent} partition={partition}
-            deviceMode={settings.deviceMode} interactive={!allowEditing} guestRef={webviewRef}
+            deviceMode={settings.deviceMode} interactive={interactive} guestRef={webviewRef}
             onReady={() => { setLoadState('ready'); setLoadError(''); }}
             onLoading={() => setLoadState(current => current === 'ready' ? current : 'loading')}
             onError={message => { setLoadState('error'); setLoadError(message); }}
@@ -11905,7 +11884,7 @@ function WebBrowserElement({
             onError={() => { setLoadState("error"); setLoadError("The page could not be loaded here."); }}
             className={cn(
               "w-full h-full bg-white",
-              allowEditing ? "pointer-events-none" : "pointer-events-auto",
+              interactive ? "pointer-events-auto" : "pointer-events-none",
             )}
             frameBorder="0"
             scrolling="auto"
@@ -11995,6 +11974,7 @@ function ElementVisuals({
   isSelected,
   allowEditing = true,
   allowContentEditing = false,
+  webInteractive = false,
   activeTool,
   showGrid,
   gridColor,
@@ -12011,6 +11991,7 @@ function ElementVisuals({
   isSelected?: boolean;
   allowEditing?: boolean;
   allowContentEditing?: boolean;
+  webInteractive?: boolean;
   activeTool?: string;
   showGrid?: boolean;
   gridColor?: string;
@@ -12426,6 +12407,7 @@ function ElementVisuals({
               fill={color || "#ffffff"}
               stroke={borderColor || "#000000"}
               strokeWidth={borderWidth || 0}
+              strokeLinejoin={element.strokeLinejoin ?? 'miter'}
               vectorEffect="non-scaling-stroke"
             />
           </svg>
@@ -13064,6 +13046,7 @@ function ElementVisuals({
     case "embed": {
       return (
         <WebBrowserElement
+          webInteractive={webInteractive}
           allowContentEditing={allowContentEditing}
           element={element}
           onUpdate={onUpdate}

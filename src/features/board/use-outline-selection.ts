@@ -22,6 +22,7 @@ export function useOutlineSelection({
   respectVisibility,
   capture,
   onInteraction,
+  onArea,
 }: {
   tool: string;
   zoom: number;
@@ -32,6 +33,7 @@ export function useOutlineSelection({
   respectVisibility: boolean;
   capture: (event: PointerEvent) => void;
   onInteraction: (active: boolean) => void;
+  onArea?: (outline: Position[] | null) => void;
 }) {
   const enabled = tool === "polygon-select" || tool === "lasso";
   const [points, setPoints] = useState<Position[]>([]),
@@ -40,6 +42,7 @@ export function useOutlineSelection({
     pointer = useRef<number | null>(null),
     operation = useRef<SelectionOperation>("replace"),
     baseline = useRef<string[]>([]);
+  const ownsArea = useRef(false);
   const replacePath = (value: Position[]) => {
     path.current = value;
     setPoints(value);
@@ -51,6 +54,8 @@ export function useOutlineSelection({
     onInteraction(false);
   };
   useEffect(() => {
+    if (ownsArea.current && tool !== "select" && tool !== "pan") onArea?.(null);
+    ownsArea.current = false;
     cancel();
   }, [tool]);
   const point = (event: { clientX: number; clientY: number }) => {
@@ -61,6 +66,8 @@ export function useOutlineSelection({
     };
   };
   const finish = () => {
+    ownsArea.current = operation.current === "replace";
+    onArea?.(operation.current === "replace" ? [...path.current] : null);
     onSelect(
       combineSelection(
         baseline.current,
@@ -76,11 +83,14 @@ export function useOutlineSelection({
     event.stopPropagation();
     window.getSelection()?.removeAllRanges();
     if (event.button !== 0) {
+      onArea?.(null);
       cancel();
       return true;
     }
     const next = point(event);
     if (!path.current.length) {
+      ownsArea.current = false;
+      onArea?.(null);
       baseline.current = [...selectedIds];
       operation.current = event.altKey
         ? "subtract"

@@ -107,6 +107,39 @@ export function resolveAreaDragPoint(
   return { x, y };
 }
 
+/** Lines have a minimum length, not a one-cell minimum on each axis. */
+export const resolveLineDragPoint = (
+  start: PlacementPoint,
+  current: PlacementPoint,
+  snapPoint: (point: PlacementPoint) => PlacementPoint,
+): PlacementPoint => {
+  const snapped = snapPoint(current);
+  return snapped.x === start.x && snapped.y === start.y ? current : snapped;
+};
+
+/** One geometry for the line's visible preview, endpoints and committed object. */
+export const getLinePlacementRect = (
+  start: PlacementPoint,
+  current: PlacementPoint,
+  minimumLength: number,
+  snapToGrid: boolean,
+) => {
+  const dx = current.x - start.x, dy = current.y - start.y;
+  let distance = Math.max(Math.hypot(dx, dy), minimumLength);
+  let rotation = Math.atan2(dy, dx) * 180 / Math.PI;
+  if (snapToGrid) {
+    rotation = Math.round(rotation / 45) * 45;
+    distance = Math.max(minimumLength, Math.round(distance / minimumLength) * minimumLength);
+  }
+  rotation = Math.round(rotation);
+  const radians = rotation * Math.PI / 180;
+  const end = { x: start.x + Math.cos(radians) * distance, y: start.y + Math.sin(radians) * distance };
+  return {
+    rotation, end,
+    rect: { x: (start.x + end.x - distance) / 2, y: (start.y + end.y) / 2 - 20, w: distance, h: 40 },
+  };
+};
+
 /** New Board retains its default size, growing outwards from the fixed anchor. */
 export const getBoardPlacementRect = (
   start: PlacementPoint,

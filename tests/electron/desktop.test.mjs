@@ -120,6 +120,32 @@ test('native held previews keep their anchor across quadrants and commit the vis
   assert.deepEqual(errors,[]);
 });
 
+test('several Web fields remain responsive and release their ad-block engines after deletion', {timeout:90000}, async t => {
+  const origin = await fixtureServer(t), board = seed('select');
+  Object.assign(board,{width:1200,height:900,workspaceWidth:1600,workspaceHeight:1200,boardX:64,boardY:0,viewportCenterX:640,viewportCenterY:428,zoom:.65});
+  board.editorSettings.autoToolOnSelect=false;
+  board.elements=Array.from({length:6},(_,index)=>({id:`field-${index}`,type:'embed',position:{x:60+(index%3)*360,y:100+Math.floor(index/3)*320},size:{width:320,height:260},content:`${origin}/page-${index}`,zIndex:index+1}));
+  const {app,window,errors} = await launch(t,board);
+  await expect.poll(async()=>(await guestState(app)).filter(page=>page.title==='Native web ready').length,{timeout:30000}).toBe(6);
+  assert.equal(await app.evaluate(({webContents})=>webContents.getAllWebContents().filter(item=>!item.isDestroyed()&&item.getType()==='backgroundPage').length),1,'Six fields share one real extension background');
+  const memory = await app.evaluate(({app})=>app.getAppMetrics().reduce((sum,process)=>sum+(process.memory?.workingSetSize??0),0));
+  t.diagnostic(`Six native Web fields: ${Math.round(memory/1024)} MiB working set.`);
+  const root=(await window.locator('[data-board-root]').boundingBox());
+  await window.mouse.move(root.x+10,root.y+10);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
+  await expect(window.getByRole('button',{name:'More',exact:true})).toBeEnabled();
+  await window.getByRole('button',{name:'More',exact:true}).click();await window.locator('[data-more-toolbar-item="lasso"]').getByRole('button',{name:'Lasso',exact:true}).click();
+  const canvas=await window.locator('[data-board-root]').boundingBox();
+  await window.mouse.move(canvas.x+20*.7,canvas.y+60*.7);await window.mouse.down();
+  const scale=canvas.width/1200;
+  for(const [x,y] of [[1180,60],[1180,760],[20,760],[20,60]])await window.mouse.move(canvas.x+x*scale,canvas.y+y*scale,{steps:5});
+  await window.mouse.up();await expect(window.locator('[data-multi-selection="6"]')).toHaveCount(1);
+  await window.keyboard.press('Delete');await expect.poll(async()=>(await guestState(app)).length).toBe(0);
+  const backgroundCount = () => app.evaluate(({webContents})=>webContents.getAllWebContents().filter(item=>!item.isDestroyed()&&item.getType()==='backgroundPage').length);
+  await expect.poll(backgroundCount,{timeout:40000}).toBe(0);
+  await window.keyboard.press('Control+z');await expect.poll(async()=>(await guestState(app)).filter(page=>page.title==='Native web ready').length,{timeout:30000}).toBe(6);
+  assert.deepEqual(errors,[]);
+});
+
 test('native clipboard follows internal objects, external text and external images in order', {timeout:45000}, async t => {
   const board = seed('select');
   board.elements = [{id:'arrow',type:'arrow',position:{x:100,y:150},size:{width:160,height:70},content:'',zIndex:1}];
@@ -167,7 +193,7 @@ test('a merged area keeps the existing native Web guest, page input and session 
   assert.deepEqual(errors,[]);
 });
 
-test('actual ad-block extensions isolate two Web sessions with opposite settings', {timeout:45000},async t=>{
+test('a shared actual ad-block extension keeps opposite settings in isolated Web sessions', {timeout:45000},async t=>{
   const contacted={on:0,off:0};
   const server=http.createServer((request,response)=>{
     const parsed=new URL(request.url,'http://local');
@@ -188,8 +214,34 @@ test('actual ad-block extensions isolate two Web sessions with opposite settings
   await expect.poll(()=>contacted.off).toBe(1);assert.equal(contacted.on,0);
   const partitions=await window.locator('webview').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('partition')));
   const states=await window.evaluate(partitions=>Promise.all(partitions.map(partition=>window.noteboardAPI.getWebBlockingStatus(partition))),partitions);
+  assert.equal(new Set(partitions).size,2,'The websites retain separate session partitions');
   assert.ok(states.every(state=>state.extensionReady&&state.extensionId));
+  assert.equal(new Set(states.map(state=>state.extensionId)).size,1);
   assert.deepEqual(states.map(state=>state.extensionEnabled).sort(),[false,true]);
+  assert.deepEqual(errors,[]);
+});
+
+test('Web Select and Hand controls operate the existing native guest and persist independently', {timeout:45000}, async t => {
+  const {url}=await responsiveServer(t),board=seed('select',url);
+  Object.assign(board.editorSettings,{autoToolOnSelect:false});
+  const {app,window,errors}=await launch(t,board);
+  await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(0);
+  const identity=(await guestState(app))[0].id;
+  await clickWebControl(app,window,'#target');assert.equal((await responsiveState(app)).clicks,0);
+  await window.getByRole('button',{name:'More',exact:true}).click();
+  const row=window.locator('[data-more-toolbar-item="embed"]');
+  await row.getByRole('button',{name:'Web settings',exact:true}).click();
+  await row.getByRole('button',{name:'Tool settings',exact:true}).click();
+  await row.getByRole('button',{name:'Use page with Select',exact:true}).click();
+  await window.getByRole('button',{name:'More',exact:true}).click();
+  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(1);
+  await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
+  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(2);
+  assert.equal((await guestState(app))[0].id,identity);
+  await expect.poll(async()=>{
+    const saved=JSON.parse(await fs.readFile(path.join((await app.evaluate(({app})=>app.getPath('userData'))),'data','boards','native-source.json'),'utf8'));
+    return saved.editorSettings.toolMenuSettingsOverrides?.embed?.pageInteractionWithSelect;
+  }).toBe(true);
   assert.deepEqual(errors,[]);
 });
 
@@ -392,9 +444,10 @@ test('maintained ad filters block real ad URLs and hide ad slots without blockin
   assert.equal(extension.extensionName,'Noteboard Ad Block');
   assert.equal(extension.extensionReady,true);assert.equal(extension.extensionEnabled,true);
   assert.equal(await app.evaluate(({webContents},id)=>{
-    const guest=webContents.getAllWebContents().find(c=>c.getType()==='webview');
-    return guest.session.extensions.getExtension(id)?.name;
+    const background=webContents.getAllWebContents().find(c=>c.getType()==='backgroundPage'&&c.getURL().startsWith(`chrome-extension://${id}/`));
+    return background?.session.extensions.getExtension(id)?.name;
   },extension.extensionId),'Noteboard Ad Block');
+  assert.equal(await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').session.extensions.getAllExtensions().length),0,'Webpage sessions do not duplicate the filter runtime');
   assert.equal(await app.evaluate(({session})=>session.defaultSession.extensions.getAllExtensions().length),0,'Extension must not run in the app UI');
   assert.ok(before>0); assert.ok((await status()).filterRules>100000);
   await window.screenshot({path:path.join(artifacts,'strong-blocker-active.png')});

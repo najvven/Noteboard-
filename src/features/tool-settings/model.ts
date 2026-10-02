@@ -11,6 +11,8 @@ export interface ToolMenuSettings {
   /** Opt-in transforms with the element's own creation tool. */
   allowEditing?: boolean;
   allowMoving?: boolean;
+  pageInteractionWithSelect?: boolean;
+  pageInteractionWithHand?: boolean;
 }
 
 export type ToolMenuSettingKey = keyof ToolMenuSettings;
@@ -62,6 +64,10 @@ export const resolveToolMenuSettings = (
   ...((override?.allowMoving ?? global.allowMoving) !== undefined
     ? { allowMoving: override?.allowMoving ?? global.allowMoving }
     : {}),
+  ...((override?.pageInteractionWithSelect ?? global.pageInteractionWithSelect) !== undefined
+    ? { pageInteractionWithSelect: override?.pageInteractionWithSelect ?? global.pageInteractionWithSelect } : {}),
+  ...((override?.pageInteractionWithHand ?? global.pageInteractionWithHand) !== undefined
+    ? { pageInteractionWithHand: override?.pageInteractionWithHand ?? global.pageInteractionWithHand } : {}),
 });
 
 export const resolveToolMenuSettingsForId = (

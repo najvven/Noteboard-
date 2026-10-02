@@ -8,6 +8,8 @@ import {
   shouldPreservePresetPicking,
   resolveAreaDragPoint,
   getBoardPlacementRect,
+  resolveLineDragPoint,
+  getLinePlacementRect,
 } from "../src/features/board/placement-interaction.ts";
 
 test("a delayed selection starts as one board cell in every drag direction", () => {
@@ -69,6 +71,22 @@ test('New Board preserves drawn dimensions once both axes exceed its minimum', (
     getBoardPlacementRect({ x: 400, y: 320 }, { x: 120, y: 100 }, 40),
     { x: 120, y: 100, w: 280, h: 220 },
   );
+});
+
+test('grid snapping near either line axis does not turn its small offset into a full cell', () => {
+  const start = {x:400,y:320};
+  const snapPoint = (point:{x:number;y:number}) => ({x:Math.round(point.x/40)*40,y:Math.round(point.y/40)*40});
+  const horizontal = getLinePlacementRect(start,resolveLineDragPoint(start,{x:480,y:319},snapPoint),40,true);
+  assert.equal(horizontal.rotation,0); assert.deepEqual(horizontal.end,{x:480,y:320});
+  const vertical = getLinePlacementRect(start,resolveLineDragPoint(start,{x:399,y:400},snapPoint),40,true);
+  assert.equal(vertical.rotation,90); assert.deepEqual(vertical.end,{x:400,y:400});
+});
+
+test('a short reversed line retains its direction when both endpoint coordinates round to its anchor', () => {
+  const start = {x:400,y:320};
+  const current = resolveLineDragPoint(start,{x:392,y:320},()=>start);
+  const geometry = getLinePlacementRect(start,current,40,true);
+  assert.equal(geometry.rotation,180); assert.deepEqual(geometry.end,{x:360,y:320});
 });
 
 test("secondary boards remain valid placement surfaces without drawing through elements", () => {

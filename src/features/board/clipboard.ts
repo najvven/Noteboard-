@@ -3,7 +3,7 @@ import {
   assertValidBoard,
   MAX_BOARD_FILE_BYTES,
 } from "../../../shared/board-data.js";
-import { selectedBounds } from "./selection";
+import { selectedBounds, type SelectionArea } from "./selection";
 import { getTextScale, isScalableText } from "./text-scaling";
 
 export const BOARD_CLIPBOARD_TYPE = "application/x-noteboard-document+json";
@@ -20,7 +20,7 @@ export interface ClipboardContents {
   files: File[];
 }
 
-export interface ClipboardRegion { x: number; y: number; w: number; h: number }
+export type ClipboardRegion = SelectionArea;
 
 export function boardClipboardFormats(elements: BoardElement[], sectionSheets: SectionSheet[]) {
   const payload: BoardClipboard = { format: "noteboard/clipboard", version: 1, elements, sectionSheets };

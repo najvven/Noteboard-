@@ -16,6 +16,15 @@ export function findBoardSurface(point: Position, boards: readonly BoardElement[
     .find(board => pointInPolygon(point, elementPolygon(board)));
 }
 
+/** Preview and placed objects use the same board boundary. */
+export function elementBoardBoundary(element: Pick<BoardElement,'position'|'size'>, boards: readonly BoardElement[], mainSize: Size) {
+  const center={x:element.position.x+(element.size?.width??100)/2,y:element.position.y+(element.size?.height??40)/2};
+  const board=boards.filter(item=>item.type==='board').sort((a,b)=>b.zIndex-a.zIndex).find(item=>
+    center.x>=item.position.x&&center.x<=item.position.x+(item.size?.width??0)&&
+    center.y>=item.position.y&&center.y<=item.position.y+(item.size?.height??0));
+  return elementPolygon(board??{position:{x:0,y:0},size:mainSize});
+}
+
 export function boardSurfaceStyle(board: BoardElement, grid: { showGrid?: boolean; gridColor?: string; gridSize?: number; gridThickness?: number }) {
   const { showGrid = false, gridColor = '#e2e8f0', gridSize = 24, gridThickness = 1 } = grid;
   return {

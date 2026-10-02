@@ -71,6 +71,11 @@ const getFilterService = () => filterServicePromise ??= createWebFilterService({
 const adExtensions=createAdExtensionManager({
   webContents,sourceDirectory:path.join(__dirname,'dist','web-adblock-extension'),
   targetDirectory:path.join(app.getPath('userData'),'web-adblock-extension'),getFilterService,
+  getExtensionSession:()=>{
+    const runtime=session.fromPartition('persist:noteboard-adblock-runtime');
+    installPermissionDenyHandlers(runtime);
+    return runtime;
+  },
 });
 const countBlocked = (partition, kind) => {
   const counts = blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 };
@@ -564,6 +569,10 @@ app.on('web-contents-created', (_event, contents) => {
 });
 
 app.whenReady().then(() => {
+  const adIdleTimer=setInterval(()=>{
+    void adExtensions.releaseIdleSessions().catch(error=>console.warn('Could not release idle Web filters.',error.message));
+  },10000);
+  adIdleTimer.unref();
   installPermissionDenyHandlers(session.defaultSession, { allowFullscreen: true });
   createWindow();
 

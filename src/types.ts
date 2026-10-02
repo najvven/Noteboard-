@@ -101,6 +101,7 @@ export interface BoardElement {
   flipX?: boolean;
   flipY?: boolean;
   borderRadius?: number;
+  strokeLinejoin?: 'miter' | 'round';
   points?: { x: number, y: number }[];
   isSmooth?: boolean;
   drawingAssistSmooth?: boolean;

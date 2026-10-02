@@ -11,7 +11,7 @@ Do not replace product requirements with generic UI preferences.
 - Rectangular selection offers Copy area, Paste into area and Merge area. Copies preserve editable objects. Merge creates one selectable object and layer entry, with existing guest/editor DOM identity preserved; transform/undo/redo/clone/preset/save/reopen/ungroup must retain members and original layer relationships. The group's supported controls must have real effects.
 - Undo records meaningful document actions, including Alt cropping, board names and fill/grid appearance. Ignore identical updates without erasing a redo branch. Canvas interactions move keyboard focus out of previous text inputs while preserving legitimate text editing.
 - Every paste action reads the current OS/browser clipboard. Native Windows file copies may be exposed as text/uri-list with FileNameW data; read actual current files, images and HTML/text without falling back to a remembered canvas copy. Batch media drops/pastes commit together and malformed files report failure.
-- Native Web must load its real ad-block extension into the correct Web session. Guest requests use the loaded extension's matcher, with no independent hidden substitute. Blocked resources must fail to contact the controlled test server; ordinary resources must load, Off must allow ads, and opposite settings in separate sessions must remain independent. Keep cosmetics/CSP/cookie/popup controls and guest isolation intact.
+- Native Web loads its real ad-block extension into a dedicated private runtime and shares that filter engine across isolated webpage sessions. Guest requests carry their own source URL and per-field preference, with no independent hidden matcher. Blocked resources must fail to contact the controlled test server; ordinary resources must load, Off must allow ads, and opposite settings in separate sessions must remain independent. Keep cosmetics/CSP/cookie/popup controls and guest isolation intact. Release idle extension resources without unloading live guests or allowed popups; reopening must restore blocking.
 
 - Text scaling is opt-in. Resize the whole rich-text layout proportionally, like
   an image: wrapping, relative positions, headings, lists, inline font sizes,
@@ -22,6 +22,11 @@ Do not replace product requirements with generic UI preferences.
 - Text remains editable and selectable when scaled. Colors and formatting apply
   only to the selected range when there is one. Preserve selection/caret through
   toolbar actions; the caret remains visible even with white text.
+- True placement previews use the same geometry, style defaults, opacity and
+  board/Section clipping as final elements, including line caps and triangle
+  Sharp/Rounded joins. Lock in time delays both preview modes. Lines have a
+  minimum length rather than a full-cell minimum in each axis; small offsets
+  must not invent a new angle. Grid angle quantization stays consistent.
 - Matching creation tools may move/resize only their own element types through
   explicit opt-in settings. Select works independently of Hand's permissions.
 - Drawing, panning and manipulation must not select unrelated DOM text/media or
@@ -36,6 +41,9 @@ Do not replace product requirements with generic UI preferences.
   dimensions, orientation, UA/client hints and touch capability before site scripts
   run. Device changes preserve the field's session; independent fields/clones use
   separate sessions. Browser iframe previews have explicit capability limits.
+- Web Tool settings offer page control with Select and Hand. These preferences
+  change input ownership without recreating/reloading the guest; element resize
+  handles remain available. Drawing and locked fields never gain page control.
 - Ads, cookies and popups must be enforced in native guest requests/frames/windows,
   including first-load and setting changes. Maintain safe sandboxing, context
   isolation, disabled page Node integration and trusted owner-checked IPC. Do not
@@ -91,6 +99,10 @@ Do not replace product requirements with generic UI preferences.
   follows a freehand gesture. Respect hidden/locked objects and visible Section
   clipping. Shift adds and Alt subtracts. Multi-selection moves, copies, duplicates,
   cuts and deletes coherently; grouped moves commit once and honor preview mode.
+- Normal Polygon/Lasso completion retains the drawn contour and the ordinary
+  area action bar. Copy/Merge use that contour's hits, including concave notches,
+  and retain editable whole objects. Pasting fits editable contents to area bounds.
+  Shift/Alt retain additive/subtractive object selection behavior.
 - Smart Guides show actual alignment and distances, and snapping uses the existing
   object-snapping preference. Crop retains the source image/video and resizes its
   crop independently of ratio. Native Eyedropper samples the actual rendered pixel

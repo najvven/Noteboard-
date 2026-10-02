@@ -2,6 +2,23 @@ import type { BoardElement, Position } from "../../types";
 import { createElementHierarchy } from "./element-hierarchy";
 import { elementPolygon, getSectionVisiblePolygons } from "./section-clipping";
 
+export interface SelectionArea {
+  x: number; y: number; w: number; h: number;
+  outline?: Position[];
+}
+
+export const selectionOutline = (area: SelectionArea): Position[] => area.outline ?? [
+  {x:area.x,y:area.y}, {x:area.x+area.w,y:area.y},
+  {x:area.x+area.w,y:area.y+area.h}, {x:area.x,y:area.y+area.h},
+];
+
+export function createSelectionArea(outline: readonly Position[]): SelectionArea | null {
+  if (outline.length < 3 || outline.some(point => !Number.isFinite(point.x) || !Number.isFinite(point.y))) return null;
+  const x = Math.min(...outline.map(point => point.x)), y = Math.min(...outline.map(point => point.y));
+  const w = Math.max(...outline.map(point => point.x)) - x, h = Math.max(...outline.map(point => point.y)) - y;
+  return w > 0 && h > 0 ? {x,y,w,h,outline:outline.map(point=>({...point}))} : null;
+}
+
 const cross = (a: Position, b: Position, p: Position) =>
   (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
 const onSegment = (a: Position, b: Position, p: Position) =>

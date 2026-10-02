@@ -18,6 +18,10 @@ interface MenuSettingsBlockProps {
   onAllowEditingChange?: (value: boolean) => void;
   allowMoving?: boolean;
   onAllowMovingChange?: (value: boolean) => void;
+  pageInteractionWithSelect?: boolean;
+  onPageInteractionWithSelectChange?: (value: boolean) => void;
+  pageInteractionWithHand?: boolean;
+  onPageInteractionWithHandChange?: (value: boolean) => void;
 }
 
 const Toggle = ({
@@ -69,6 +73,10 @@ const MenuSettingsBlock = ({
   onAllowEditingChange,
   allowMoving = false,
   onAllowMovingChange,
+  pageInteractionWithSelect = false,
+  onPageInteractionWithSelectChange,
+  pageInteractionWithHand = true,
+  onPageInteractionWithHandChange,
 }: MenuSettingsBlockProps) => {
   const [expanded, setExpanded] = useState(false);
 
@@ -122,6 +130,8 @@ const MenuSettingsBlock = ({
           {[
             { label: 'Allow editing elements', value: allowEditing, change: onAllowEditingChange },
             { label: 'Allow moving elements', value: allowMoving, change: onAllowMovingChange },
+            { label: 'Use page with Select', value: pageInteractionWithSelect, change: onPageInteractionWithSelectChange },
+            { label: 'Use page with Hand', value: pageInteractionWithHand, change: onPageInteractionWithHandChange },
           ].map(({ label, value, change }) => change ? (
             <button key={label} type="button" aria-pressed={value}
               onClick={() => change(!value)}

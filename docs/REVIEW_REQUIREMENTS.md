@@ -7,6 +7,12 @@ Do not replace product requirements with generic UI preferences.
 
 ## Text and element editing
 
+- Every area-creation tool follows the shared Lock in time setting; quick drags/clicks do not create ellipses, lines or other shapes when that delay is enabled. Freehand, Fill and Eraser retain their own gestures. Small-object resize handles use the visible size and board zoom.
+- Rectangular selection offers Copy area, Paste into area and Merge area. Copies preserve editable objects. Merge creates one selectable object and layer entry, with existing guest/editor DOM identity preserved; transform/undo/redo/clone/preset/save/reopen/ungroup must retain members and original layer relationships. The group's supported controls must have real effects.
+- Undo records meaningful document actions, including Alt cropping, board names and fill/grid appearance. Ignore identical updates without erasing a redo branch. Canvas interactions move keyboard focus out of previous text inputs while preserving legitimate text editing.
+- Every paste action reads the current OS/browser clipboard. Native Windows file copies may be exposed as text/uri-list with FileNameW data; read actual current files, images and HTML/text without falling back to a remembered canvas copy. Batch media drops/pastes commit together and malformed files report failure.
+- Native Web must load its real ad-block extension into the correct Web session. Guest requests use the loaded extension's matcher, with no independent hidden substitute. Blocked resources must fail to contact the controlled test server; ordinary resources must load, Off must allow ads, and opposite settings in separate sessions must remain independent. Keep cosmetics/CSP/cookie/popup controls and guest isolation intact.
+
 - Text scaling is opt-in. Resize the whole rich-text layout proportionally, like
   an image: wrapping, relative positions, headings, lists, inline font sizes,
   formatting, borders and spacing remain unchanged. Repeated resizes must not

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { _electron, expect } from 'playwright/test';
 import JSZip from 'jszip';
+import sharp from 'sharp';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const artifacts = path.join(os.tmpdir(), 'noteboard-desktop-checks-20260916');
@@ -83,6 +84,79 @@ async function fixtureServer(t) {
 const guestState = app => app.evaluate(async ({webContents}) => Promise.all(webContents.getAllWebContents().filter(c=>c.getType()==='webview').map(async c=>({
   id:c.id,url:c.getURL(),title:c.getTitle(),body:await c.executeJavaScript('document.body?.innerText || ""').catch(()=>''),
 }))));
+
+test('native clipboard follows internal objects, external text and external images in order', {timeout:45000}, async t => {
+  const board = seed('select');
+  board.elements = [{id:'arrow',type:'arrow',position:{x:100,y:150},size:{width:160,height:70},content:'',zIndex:1}];
+  const {app,window,profile,errors} = await launch(t,board);
+  await window.locator('[data-board-element-id="arrow"]').click();
+  await window.keyboard.press('Control+c'); await window.keyboard.press('Control+v');
+  await expect(window.locator('[data-board-element-type="arrow"]')).toHaveCount(2);
+  await app.evaluate(({clipboard})=>clipboard.writeText('Current external clipboard'));
+  await window.keyboard.press('Control+v');
+  await expect(window.locator('[data-board-element-type="text"]')).toContainText('Current external clipboard');
+  await window.getByRole('button',{name:'Select Tool',exact:true}).click();
+  await window.locator('[data-board-element-type="arrow"]').last().click();
+  await window.keyboard.press('Control+c');
+  const imageData='data:image/png;base64,'+(await sharp({create:{width:16,height:16,channels:4,background:'#34a853'}}).png().toBuffer()).toString('base64');
+  assert.equal(await app.evaluate(({clipboard,nativeImage},data)=>{clipboard.writeImage(nativeImage.createFromDataURL(data));return clipboard.readImage().isEmpty();},imageData),false);
+  await window.keyboard.press('Control+v');
+  await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(1);
+  await expect(window.locator('[data-board-element-type="arrow"]')).toHaveCount(2);
+  const filePath=path.join(profile,'external-image.png');
+  await sharp({create:{width:24,height:24,channels:4,background:'#2563eb'}}).png().toFile(filePath);
+  await app.evaluate(({clipboard},name)=>clipboard.writeBuffer('FileNameW',Buffer.from(name+'\0','utf16le')),filePath);
+  assert.equal((await window.evaluate(()=>window.noteboardAPI.readClipboard())).files.length,1,'Explorer file must be read from the current OS clipboard');
+  await window.keyboard.press('Control+v');await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(2);
+  assert.deepEqual(errors,[]);
+});
+
+test('a merged area keeps the existing native Web guest, page input and session through move and ungroup', {timeout:45000}, async t=>{
+  const origin=await fixtureServer(t),board=seed('select',origin+'/page');
+  Object.assign(board,{width:1100,height:700,workspaceWidth:1500,workspaceHeight:1000,boardX:64,boardY:0,viewportCenterX:640,viewportCenterY:328,zoom:1});
+  board.elements[1].size={width:700,height:300};
+  const {app,window,errors}=await launch(t,board);
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  const before=(await guestState(app))[0].id;
+  await app.evaluate(({webContents})=>webContents.fromId(webContents.getAllWebContents().find(c=>c.getType()==='webview').id).executeJavaScript('document.body.innerHTML="<input id=note value=Preserved>"; void 0'));
+  const root=await window.locator('[data-board-root]').boundingBox();
+  await window.mouse.move(root.x+70,root.y+20);await window.mouse.down();await window.waitForTimeout(300);await window.mouse.move(root.x+850,root.y+490,{steps:10});await window.mouse.up();
+  await window.getByRole('button',{name:'Merge area',exact:true}).click();
+  const group=window.locator('[data-board-element-type="group"]');await expect(group).toHaveCount(1);
+  assert.equal((await guestState(app))[0].id,before);
+  const box=await group.boundingBox();await window.mouse.move(box.x+20,box.y+20);await window.mouse.down();await window.mouse.move(box.x+50,box.y+40,{steps:8});await window.mouse.up();
+  assert.equal((await guestState(app))[0].id,before);
+  await window.getByRole('button',{name:'Ungroup',exact:true}).click();await expect(group).toHaveCount(0);
+  assert.equal((await guestState(app))[0].id,before);
+  assert.equal(await app.evaluate(({webContents},id)=>webContents.fromId(id).executeJavaScript('document.getElementById("note").value'),before),'Preserved');
+  assert.deepEqual(errors,[]);
+});
+
+test('actual ad-block extensions isolate two Web sessions with opposite settings', {timeout:45000},async t=>{
+  const contacted={on:0,off:0};
+  const server=http.createServer((request,response)=>{
+    const parsed=new URL(request.url,'http://local');
+    if(parsed.pathname==='/pagead/js/adsbygoogle.js'){
+      contacted[parsed.searchParams.get('tag')]++;response.setHeader('Content-Type','application/javascript');response.end('window.adLoaded=true;');return;
+    }
+    const tag=parsed.searchParams.get('tag');response.setHeader('Content-Type','text/html');
+    response.end(`<title>Publisher ${tag}</title><h1>Useful ${tag}</h1><script src="http://pagead2.googlesyndication.com:${server.address().port}/pagead/js/adsbygoogle.js?tag=${tag}"></script>`);
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const url=`http://publisher.example.org:${server.address().port}/page`;
+  const board=seed('embed',url+'?tag=on');
+  board.elements[1].size={width:600,height:400};
+  board.elements.push({...board.elements[1],id:'web-off',position:{x:750,y:150},size:{width:550,height:400},content:url+'?tag=off',zIndex:3,webAdBlock:false});
+  const {app,window,errors}=await launch(t,board,{hostRules:'MAP publisher.example.org 127.0.0.1, MAP pagead2.googlesyndication.com 127.0.0.1'});
+  await expect.poll(async()=>(await guestState(app)).map(guest=>guest.title).sort()).toEqual(['Publisher off','Publisher on']);
+  await expect.poll(()=>contacted.off).toBe(1);assert.equal(contacted.on,0);
+  const partitions=await window.locator('webview').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('partition')));
+  const states=await window.evaluate(partitions=>Promise.all(partitions.map(partition=>window.noteboardAPI.getWebBlockingStatus(partition))),partitions);
+  assert.ok(states.every(state=>state.extensionReady&&state.extensionId));
+  assert.deepEqual(states.map(state=>state.extensionEnabled).sort(),[false,true]);
+  assert.deepEqual(errors,[]);
+});
 
 test('Ctrl+wheel over native Web zooms the board around the cursor, including focused mobile guests', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
@@ -279,12 +353,21 @@ test('maintained ad filters block real ad URLs and hide ad slots without blockin
   await menu.getByRole('button',{name:'Web settings',exact:true}).click();
   await expect(menu.locator('[data-web-blocking-status]')).toContainText('blocked');
   const before=(await status()).ads;
+  const extension=await status();
+  assert.equal(extension.extensionName,'Noteboard Ad Block');
+  assert.equal(extension.extensionReady,true);assert.equal(extension.extensionEnabled,true);
+  assert.equal(await app.evaluate(({webContents},id)=>{
+    const guest=webContents.getAllWebContents().find(c=>c.getType()==='webview');
+    return guest.session.extensions.getExtension(id)?.name;
+  },extension.extensionId),'Noteboard Ad Block');
+  assert.equal(await app.evaluate(({session})=>session.defaultSession.extensions.getAllExtensions().length),0,'Extension must not run in the app UI');
   assert.ok(before>0); assert.ok((await status()).filterRules>100000);
   await window.screenshot({path:path.join(artifacts,'strong-blocker-active.png')});
   await menu.getByRole('button',{name:/^Ad blocker/}).click();
   await expect.poll(()=>ads).toBeGreaterThan(0);
   await expect.poll(async()=>(await inspect()).hidden).toBe(false);
   assert.equal((await inspect()).ad,true); assert.equal((await status()).ads,before);
+  assert.equal((await status()).extensionEnabled,false);
   await window.getByRole('button',{name:'More',exact:true}).click();
   await window.getByRole('button',{name:'Back',exact:true}).click();
   await window.reload();
@@ -354,7 +437,11 @@ test('sandboxed frames cannot open windows while an allowed top-level popup stil
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   const board=seed('embed',`http://127.0.0.1:${server.address().port}/page`);Object.assign(board.elements[1],{webAdBlock:false,webPopupBlocker:false});
   const {app,errors}=await launch(t,board);
-  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')?.mainFrame.frames.length||0)).toBe(1);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')?.mainFrame.frames.length||0).catch(error=>{
+    if(String(error).includes('Execution context was destroyed'))return 0;
+    throw error;
+  })).toBe(1);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.frames[0]?.executeJavaScript('Boolean(document.getElementById("open"))').catch(()=>false))).toBe(true);
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.frames[0].executeJavaScript('document.getElementById("open").click()',true));
   assert.equal(await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length),1);
   assert.equal(popupRequests,0);

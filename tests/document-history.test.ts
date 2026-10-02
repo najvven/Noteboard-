@@ -45,3 +45,12 @@ test("document history branches immutably and supports bounded undo and redo", (
   assert.equal(capped.index, 2);
   assert.equal(redoBoardDocumentHistory(undoBoardDocumentHistory(capped)).index, 2);
 });
+
+test("identical updates preserve the last meaningful action and the redo branch", () => {
+  const initial=createBoardDocumentHistory(snapshot('one'));
+  const changed=pushBoardDocumentHistory(initial,snapshot('two'));
+  assert.equal(pushBoardDocumentHistory(changed,structuredClone(snapshot('two'))),changed);
+  const undone=undoBoardDocumentHistory(changed);
+  assert.equal(pushBoardDocumentHistory(undone,structuredClone(snapshot('one'))),undone);
+  assert.equal(redoBoardDocumentHistory(undone).entries[1].elements[0].content,'two');
+});

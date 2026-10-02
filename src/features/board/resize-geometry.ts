@@ -40,3 +40,9 @@ export const constrainProportionalSize = ({
   const nextWidth = Math.max(ratioMinWidth, snappedWidth);
   return { width: nextWidth, height: nextWidth / ratio };
 };
+/** Normal handles stay at 10 screen pixels; small visible objects use smaller handles. */
+export function resizeHandleSize(width: number, height: number, zoom: number) {
+  const safeZoom = Math.max(0.01, zoom);
+  const screenSize = Math.max(3, Math.min(10, Math.min(width, height) * safeZoom / 4));
+  return screenSize / safeZoom;
+}

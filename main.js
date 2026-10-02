@@ -1,9 +1,10 @@
-import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net, clipboard } from 'electron';
 import fs from 'fs/promises';
 import { watch as watchDirectory } from 'fs';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
-import { createWebFilterService, adBlockingResponse, addFilterCsp } from './shared/web-filter-engine.js';
+import { createWebFilterService, addFilterCsp } from './shared/web-filter-engine.js';
+import { createAdExtensionManager } from './shared/electron-ad-extension.js';
 import { installAdCosmeticHandlers } from './shared/electron-ad-cosmetics.js';
 import { configureWebViewport } from './shared/electron-web-viewport.js';
 import {
@@ -11,6 +12,7 @@ import {
   MAX_BOARD_FILE_BYTES,
   normalizeBoardId
 } from './shared/board-data.js';
+import { readNativeClipboard, writeNativeBoardClipboard } from './shared/native-clipboard.js';
 import { loadDesktopBoardArchive } from './shared/desktop-board-archive.js';
 import { atomicWriteJson, enqueueWrite, readFileLimited, readJsonWithBackup } from './shared/persistence.js';
 import { mapInBatches } from './shared/batch.js';
@@ -60,11 +62,15 @@ const getFilterService = () => filterServicePromise ??= createWebFilterService({
   fetchImpl: (url, options) => net.fetch(url, { ...options, credentials: 'omit' }),
   cacheFile: path.join(app.getPath('userData'), 'web-filters-cache.json'),
 }).then(service => {
-  const refresh = () => service.refresh().catch(error => console.warn('Filter update unavailable; keeping verified local lists.', error.message));
+  const refresh = () => service.refresh().then(changed=>changed?adExtensions.refresh():undefined).catch(error => console.warn('Filter update unavailable; keeping verified local lists.', error.message));
   void refresh();
   const timer = setInterval(refresh, 24 * 60 * 60 * 1000);
   timer.unref();
   return service;
+});
+const adExtensions=createAdExtensionManager({
+  webContents,sourceDirectory:path.join(__dirname,'dist','web-adblock-extension'),
+  targetDirectory:path.join(app.getPath('userData'),'web-adblock-extension'),getFilterService,
 });
 const countBlocked = (partition, kind) => {
   const counts = blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 };
@@ -94,6 +100,9 @@ const getPartitionForWebContents = (contents) => {
   }
   return null;
 };
+
+handleTrusted('clipboard:read', () => readNativeClipboard(clipboard));
+handleTrusted('clipboard:write-board', (_event, json) => writeNativeBoardClipboard(clipboard, json));
 
 installAdCosmeticHandlers(ipcMain, contents => webSessionSettings.get(getPartitionForWebContents(contents)), async () => (await getFilterService()).engine);
 ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
@@ -168,6 +177,7 @@ const configureWebSession = async (partition, settings = {}) => {
   const previous = webSessionSettings.get(partition);
   webSessionSettings.set(partition, normalized);
   const webSession = session.fromPartition(partition);
+  await adExtensions.configure(webSession,normalized);
   // Blocking all cookies also removes existing cookies from this isolated field.
   if (normalized.cookieBlocker === 'all' && previous?.cookieBlocker !== 'all') {
     await webSession.clearStorageData({ storages: ['cookies'] });
@@ -198,18 +208,14 @@ const configureWebSession = async (partition, settings = {}) => {
 
   const requestFilter = { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] };
 
-  webSession.webRequest.onBeforeRequest(requestFilter, async (details, callback) => {
-    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
-    try {
-      const result = current.adBlock
-        ? adBlockingResponse((await getFilterService()).engine, details, current.topLevelUrl)
-        : { cancel: false };
-      if (result.cancel || result.redirectURL) countBlocked(partition, 'ads');
-      callback(result);
-    } catch (error) {
-      console.error('Could not enforce Web blocking settings.', error);
-      callback({ cancel: true });
-    }
+  // Chromium does not deliver Chrome extension webRequest events for an
+  // Electron guest view. This bridge asks the loaded extension to decide;
+  // there is no separate request matcher or internal fallback here.
+  webSession.webRequest.onBeforeRequest(requestFilter,async (details,callback)=>{
+    const current=requestPolicy(details,webSessionSettings.get(partition)||normalizeWebSessionSettings());
+    if(!current.adBlock){callback({cancel:false});return;}
+    try {callback(await adExtensions.filterRequest(webSession,details,current.topLevelUrl));}
+    catch(error){console.error('Web ad-block extension could not filter the request.',error);callback({cancel:true});}
   });
 
   webSession.webRequest.onBeforeSendHeaders(requestFilter, (details, callback) => {
@@ -416,8 +422,12 @@ handleTrusted('web-session:status', async (_event, partition) => {
   if (!isAllowedWebPartition(partition)) return null;
   const settings = webSessionSettings.get(partition);
   if (!settings) return null;
-  const filters = settings.adBlock ? (await getFilterService()).manifest : null;
-  return { ...(blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 }), filtersUpdatedAt: filters?.fetchedAt ?? null, filterRules: filters ? filters.networkRules + filters.cosmeticRules : 0 };
+  const extension=await adExtensions.status(configuredWebSessions.get(partition));
+  return { ...(blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 }),
+    ads:extension?.ads??0,filtersUpdatedAt:extension?.filtersUpdatedAt??null,filterRules:extension?.filterRules??0,
+    extensionId:extension?.extensionId??null,extensionName:extension?.extensionName??null,
+    extensionReady:extension?.ready===true,extensionEnabled:extension?.enabled===true,
+  };
 });
 
 function createWindow() {

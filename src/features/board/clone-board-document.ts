@@ -29,6 +29,7 @@ export function cloneBoardDocument(
         ...element,
         id: elementIds.get(element.id)!,
         parentId: element.parentId ? elementIds.get(element.parentId) ?? (options.preserveExternalParents ? element.parentId : undefined) : undefined,
+        groupOriginalParentId:element.groupOriginalParentId?elementIds.get(element.groupOriginalParentId)??(options.preserveExternalParents?element.groupOriginalParentId:undefined):undefined,
         linkToId: element.linkToId ? elementIds.get(element.linkToId) ?? (isHttpBoardLink(element.linkToId) || options.preserveExternalLinks ? element.linkToId : undefined) : undefined,
         content: workbook ? JSON.stringify(workbook) : remapRichTextTargets(element.content, elementIds, options.preserveExternalLinks === true),
         position: { ...element.position },

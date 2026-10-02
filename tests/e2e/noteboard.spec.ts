@@ -937,6 +937,7 @@ test("places a New Board by dragging and accepts objects on it", async ({
     .click();
   await page.mouse.move(secondaryBox!.x + 24, secondaryBox!.y + 24);
   await page.mouse.down();
+  await page.waitForTimeout(300);
   await page.mouse.move(secondaryBox!.x + 124, secondaryBox!.y + 84, {
     steps: 8,
   });

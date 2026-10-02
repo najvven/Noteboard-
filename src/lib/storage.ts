@@ -17,9 +17,15 @@ export interface WebBlockingStatus {
   popups: number;
   filtersUpdatedAt: string | null;
   filterRules: number;
+  extensionId: string | null;
+  extensionName: string | null;
+  extensionReady: boolean;
+  extensionEnabled: boolean;
 }
 
 interface NoteboardDesktopApi {
+  readClipboard: () => Promise<{text:string;html:string;image:string;files:{name:string;type:string;base64:string}[]}>;
+  writeBoardClipboard: (json:string) => Promise<boolean>;
   loadPages: () => Promise<Page[]>;
   savePage: (page: Page) => Promise<boolean>;
   deletePage: (pageId: string) => Promise<boolean>;

@@ -3,6 +3,15 @@ export interface PlacementPoint {
   y: number;
 }
 
+const AREA_TOOLS = new Set([
+  "select", "rectangle", "ellipse", "triangle", "diamond", "hexagon", "line", "arrow",
+  "text", "h1", "h2", "h3", "bullet-list", "numbered-list", "quote", "code", "checklist", "sticky", "blank",
+  "image", "media", "embed", "board", "section", "table",
+]);
+
+/** Area tools share Lock in time. Freehand drawing, filling and erasing do not. */
+export const usesAreaPlacement = (tool: string) => AREA_TOOLS.has(tool);
+
 export interface PlacementBounds {
   minX: number;
   minY: number;

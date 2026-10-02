@@ -13,6 +13,9 @@ Desktop whiteboard and spatial note-taking application built with Electron, Reac
 - Full Web pages in Electron and supported YouTube video embeds in browser previews.
 - Cursor-anchored zoom up to 3200%, including Ctrl+scroll over native Web content; native video fullscreen preserves playback. Main and additional boards share a switch for keeping content fixed during resizing.
 - Optional Text scaling preserves the complete rich-text layout during proportional resizing; switch it off to resume normal frame resizing and wrapping.
+- Selection-area actions copy editable objects, paste the current system clipboard into the chosen area, or merge contents and their source layers into one movable, scalable object. Ungroup restores the original layers; merged content keeps its Web guest and input state. Board format4 retains compatibility with older documents and prevents older builds from silently editing the new group semantics.
+- All area creation tools honor Lock in time. Document Undo/Redo covers crop/transform gestures, clipboard imports, grouping, board names, fill and grid appearance; identical updates do not consume an Undo.
+- Native Web loads a bundled **Noteboard Ad Block** extension using Ghostery2.18.2 and verified maintained filter lists. Electron guest requests are forwarded to that loaded extension for actual request decisions; its status/counts are shown in Web settings. Cosmetic, cookie and popup enforcement remains isolated per Web session. Ordinary browser previews cannot enforce native filtering inside cross-origin frames.
 
 ## Architecture
 

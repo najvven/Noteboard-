@@ -175,3 +175,5 @@
 /* Native guests must not intercept pointer release during editor gestures. */
 [data-board-interacting="true"] :is(iframe, webview),
 html[data-board-pointer-capture] :is(iframe, webview) { pointer-events: none !important; }
+html[data-noteboard-file-drag] :is(iframe, webview) { pointer-events: none !important; }
+[data-merged-group-member], [data-merged-group-member] * { pointer-events: none !important; }

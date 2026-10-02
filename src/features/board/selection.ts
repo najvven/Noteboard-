@@ -71,6 +71,7 @@ export function selectElementsInOutline(
         element.type !== "board" &&
         element.type !== "layer" &&
         !element.isEraser &&
+        !hierarchy.ancestors(element.id).slice(1).some(parent=>parent.type==='group') &&
         !hierarchy.isLocked(element.id) &&
         hierarchy.isVisible(element.id, respectVisibility),
     )

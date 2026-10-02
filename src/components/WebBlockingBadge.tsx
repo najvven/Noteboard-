@@ -19,7 +19,7 @@ export default function WebBlockingBadge({ partition }: { partition: string }) {
   }, [partition]);
   const date = status?.filtersUpdatedAt ? new Date(status.filtersUpdatedAt).toLocaleDateString() : '';
   return <span data-web-blocking-status="true" className="whitespace-nowrap text-[10px] font-semibold normal-case tracking-normal"
-    title={status ? `This Web session: ${status.ads} ad/tracker requests, ${status.cookies} cookie operations, ${status.popups} popups blocked. ${status.filterRules.toLocaleString()} filter rules, updated ${date}.` : 'Reading blocker status…'}>
-    {status ? `${status.ads} blocked` : '…'}
+    title={status ? `${status.extensionReady ? `${status.extensionName}: ${status.extensionEnabled?'enabled':'off'}.` : 'Ad-block extension unavailable.'} This Web session: ${status.ads} ad/tracker requests, ${status.cookies} cookie operations, ${status.popups} popups blocked. ${status.filterRules.toLocaleString()} filter rules, updated ${date}.` : 'Reading blocker status…'}>
+    {status ? status.extensionReady ? `${status.ads} blocked` : 'Unavailable' : '…'}
   </span>;
 }

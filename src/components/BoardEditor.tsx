@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "re
 import { createPortal } from "react-dom";
 import { webWheelClientPoint } from '../features/web/wheel-point';
 import {useOutlineSelection} from '../features/board/use-outline-selection';
-import {selectedBounds} from '../features/board/selection';
+import {selectedBounds, selectElementsInOutline} from '../features/board/selection';
+import {mergeAreaElements,ungroupAreaElements,updateMergedGroup,isMergedGroupMember,localGroupElement} from '../features/board/grouping';
 import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
 import SmartGuidesOverlay,{type SmartGuidesHandle} from './SmartGuidesOverlay';
 import {
@@ -39,7 +40,7 @@ import WebBlockingBadge from "./WebBlockingBadge";
 import NativeWebView from "./NativeWebView";
 import { WEB_DEVICE_PROFILES, normalizeWebDeviceMode } from "../../shared/web-device.js";
 import SegmentedControl from "./SegmentedControl";
-import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget } from "../features/board/clipboard";
+import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget, readCurrentClipboard, copyBoardToSystem, placeClipboardElements, type ClipboardContents, type ClipboardRegion } from "../features/board/clipboard";
 import { boardMemberIds, resizeMainBoard, type MainBoardGeometry } from "../features/board/board-resize";
 import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
 import { elementColors, defaultFillColor } from "../features/board/element-colors";
@@ -58,13 +59,14 @@ import {
 import { downloadBoardArchive, readBoardPackageFile } from "../features/board/board-package";
 import { placeBoardPackage } from "../features/board/board-package-placement";
 import { createElementHierarchy, type ElementHierarchy } from "../features/board/element-hierarchy";
-import { constrainProportionalSize } from "../features/board/resize-geometry";
+import { constrainProportionalSize, resizeHandleSize } from "../features/board/resize-geometry";
 import { getTextScale, isScalableText, isTextScaling, displayedTextFontSize, resizedTextScale } from "../features/board/text-scaling";
 import {
   getMinimumAreaRect,
   hasMeaningfulAreaDrag,
   isBoardPlacementSurface,
   shouldPreservePresetPicking,
+  usesAreaPlacement,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import {
@@ -78,6 +80,8 @@ import {
   pushBoardDocumentHistory,
   redoBoardDocumentHistory,
   undoBoardDocumentHistory,
+  equalDocumentValue,
+  type BoardDocumentPresentation,
 } from "../features/board/document-history";
 import {
   clearWebSession as clearDesktopWebSession,
@@ -322,6 +326,7 @@ type ObjectPreset = {
   id: string;
   name: string;
   element?: BoardElement;
+  elements?: BoardElement[];
   shortcut?: string;
 };
 
@@ -963,16 +968,21 @@ const getClippedRect = (
 export const handleImageUpload = (
   file: File,
   callback: (dataUrl: string, width: number, height: number) => void,
+  onError?: (error: Error) => void,
 ) => {
+  const fail=(error:Error)=>onError?onError(error):alert(error.message);
   try {
     assertFileSize(file.size, MAX_MEDIA_FILE_BYTES, "Media file");
   } catch (error) {
-    alert(error instanceof Error ? error.message : "Media file is too large.");
+    fail(error instanceof Error ? error : new Error("Media file is too large."));
     return;
   }
   const reader = new FileReader();
+  reader.onerror=()=>fail(new Error('Could not read the image file.'));
+  reader.onabort=()=>fail(new Error('Image import was interrupted.'));
   reader.onload = (e) => {
     const img = new Image();
+    img.onerror=()=>fail(new Error('The image could not be opened. Check its file format.'));
     img.onload = () => {
       let w = img.width;
       let h = img.height;
@@ -1059,11 +1069,16 @@ export default function BoardEditor({
   const [sectionSheets, setSectionSheets] =
     useState<SectionSheet[]>(initialSectionSheets);
   const sectionSheetsRef = useRef<SectionSheet[]>(initialSectionSheets);
+  const presentationRef=useRef<BoardDocumentPresentation>({
+    title:page.title,boardColor:page.boardColor??'#ffffff',gridColor:page.gridColor??'#e2e8f0',
+    gridSize:page.gridSize??24,gridThickness:page.gridThickness??1,showGrid:page.showGrid??false,snapToGrid:page.snapToGrid??false,
+  });
   const [documentHistory, setDocumentHistory] = useState(() =>
     createBoardDocumentHistory({
       elements: page.elements,
       sectionSheets: initialSectionSheets,
       boardGeometry: boardGeometryRef.current,
+      presentation:presentationRef.current,
     }),
   );
   const documentHistoryRef = useRef(documentHistory);
@@ -1077,7 +1092,7 @@ export default function BoardEditor({
   ) => {
     const nextHistory = pushBoardDocumentHistory(
       documentHistoryRef.current,
-      { elements: newElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current },
+      { elements: newElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
       50,
     );
     documentHistoryRef.current = nextHistory;
@@ -1100,6 +1115,7 @@ export default function BoardEditor({
   }, [sectionSheets]);
 
   const handleUndo = () => {
+    pushDocument(syncLiveEditableState(elementsRef.current));
     const nextHistory = undoBoardDocumentHistory(documentHistoryRef.current);
     if (nextHistory !== documentHistoryRef.current) {
       documentHistoryRef.current = nextHistory;
@@ -1110,11 +1126,13 @@ export default function BoardEditor({
       setElements(snapshot.elements);
       setSectionSheets(snapshot.sectionSheets);
       if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
+      if(snapshot.presentation) applyPresentation(snapshot.presentation);
       setSelectedId(null);
     }
   };
 
   const handleRedo = () => {
+    pushDocument(syncLiveEditableState(elementsRef.current));
     const nextHistory = redoBoardDocumentHistory(documentHistoryRef.current);
     if (nextHistory !== documentHistoryRef.current) {
       documentHistoryRef.current = nextHistory;
@@ -1125,6 +1143,7 @@ export default function BoardEditor({
       setElements(snapshot.elements);
       setSectionSheets(snapshot.sectionSheets);
       if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
+      if(snapshot.presentation) applyPresentation(snapshot.presentation);
       setSelectedId(null);
     }
   };
@@ -1531,7 +1550,7 @@ export default function BoardEditor({
   ) => {
     const startedAt = Date.now();
     const waitsForSelectionLock =
-      ["select", "media", "embed", "board"].includes(tool) && isSelectionLockEnabled && selectionLockTime > 0;
+      usesAreaPlacement(tool) && isSelectionLockEnabled && selectionLockTime > 0;
     if (holdingTimerRef.current) {
       clearTimeout(holdingTimerRef.current);
       holdingTimerRef.current = null;
@@ -1649,10 +1668,6 @@ export default function BoardEditor({
     x: number;
     y: number;
   } | null>(null);
-  const [clipboard, setClipboard] = useState<BoardElement | null>(null);
-  const [clipboardGroup, setClipboardGroup] = useState<BoardElement[] | null>(
-    null,
-  );
   const [savedRange, setSavedRange] = useState<Range | null>(null);
   const pressedKeysRef = useRef<Set<string>>(new Set());
   const [linkSystemMode, setLinkSystemMode] = useState<
@@ -1759,6 +1774,17 @@ export default function BoardEditor({
   const [workspaceGridColor, setWorkspaceGridColor] = useState(page.workspaceGridColor ?? "#333333");
   const [workspaceGridThickness, setWorkspaceGridThickness] = useState(page.workspaceGridThickness ?? 1);
   const [workspaceGridSize, setWorkspaceGridSize] = useState(page.workspaceGridSize ?? 50);
+  presentationRef.current={title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid};
+  const applyPresentation=(value:BoardDocumentPresentation)=>{
+    presentationRef.current=value;
+    setTitle(value.title);setBoardColor(value.boardColor);setGridColor(value.gridColor);
+    setGridSize(value.gridSize);setGridThickness(value.gridThickness);setShowGrid(value.showGrid);setSnapToGrid(value.snapToGrid);
+  };
+  useEffect(()=>{
+    if(equalDocumentValue(documentHistoryRef.current.entries[documentHistoryRef.current.index].presentation,presentationRef.current))return;
+    const timer=setTimeout(()=>pushDocument(elementsRef.current),250);
+    return()=>clearTimeout(timer);
+  },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid]);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [presetName, setPresetName] = useState(
@@ -1848,6 +1874,7 @@ export default function BoardEditor({
           el.type !== "layer" &&
           el.type !== "board" &&
           !el.isEraser &&
+          !isMergedGroupMember(el,elementHierarchy) &&
           elementHierarchy.isVisible(el.id, respectLayerVisibility) &&
           !elementHierarchy.isLocked(el.id) &&
           (!currentLayerView ||
@@ -1867,6 +1894,7 @@ export default function BoardEditor({
       return;
     }
 
+    if(target.type==='group')return;
     if (target.type === "line" || target.type === "arrow" || target.type === "draw") {
       updateElement(target.id, { borderColor: fillToolColor });
     } else {
@@ -2318,7 +2346,10 @@ export default function BoardEditor({
       }
 
       if (e.ctrlKey || e.metaKey) {
-        if (e.key.toLowerCase() === "z") {
+        if (e.key.toLowerCase() === "v" && window.noteboardAPI?.readClipboard) {
+          e.preventDefault();
+          void pasteSystemClipboard(quickAddRegion ?? undefined);
+        } else if (e.key.toLowerCase() === "z") {
           e.preventDefault();
           if (e.shiftKey) {
             handleRedo();
@@ -2364,8 +2395,6 @@ export default function BoardEditor({
     activeTool,
     history,
     historyIndex,
-    clipboard,
-    clipboardGroup,
     quickAddRegion,
     toolModeShortcut,
     gridToggleShortcut,
@@ -4750,8 +4779,7 @@ export default function BoardEditor({
   ) => {
     const applyElementUpdate = (source: BoardElement[]) => {
       const resizing=secondaryResizeRef.current;
-      return source.map(element=>{
-        if(element.id===id)return {...element,...updates};
+      return updateMergedGroup(source,id,updates).map(element=>{
         if(resizing?.id===id&&!resizing.keepContent&&updates.position&&resizing.members.has(element.id)) {
           const initial=resizing.elements.find(item=>item.id===element.id)!;
           return {...element,position:{x:initial.position.x+updates.position.x-resizing.origin.x,y:initial.position.y+updates.position.y-resizing.origin.y}};
@@ -4771,6 +4799,7 @@ export default function BoardEditor({
   };
 
   const toolForSelectedElement = (element: BoardElement) => {
+    if(element.type==='group')return 'select';
     if (element.type === "image" || element.type === "media") return "media";
     if (element.type === "embed") return "embed";
     if (element.type === "section") return "section";
@@ -4783,36 +4812,39 @@ export default function BoardEditor({
     return activeTool === id;
   });
 
-  const addMediaFileToBoard = (
+  const createMediaFromFile = async (
     file: File,
     position: { x: number; y: number },
-  ) => {
+    region?: ClipboardRegion,
+  ):Promise<BoardElement> => {
     const fileMime = inferFileMime(file);
-    if (!isSupportedMediaMime(fileMime)) return false;
-    try {
-      assertFileSize(file.size, MAX_MEDIA_FILE_BYTES, "Media file");
-    } catch (error) {
-      alert(error instanceof Error ? error.message : "Media file is too large.");
-      return false;
-    }
+    if (!isSupportedMediaMime(fileMime)) throw new Error('Unsupported media file.');
+    assertFileSize(file.size, MAX_MEDIA_FILE_BYTES, "Media file");
 
-    const addMediaElement = (
+    const makeMediaElement = (
       dataUrl: string,
       mediaSize: { width: number; height: number },
     ) => {
       const latestElements = elementsRef.current;
+      if (region) {
+        const scale = Math.min(region.w/mediaSize.width,region.h/mediaSize.height);
+        mediaSize = {width:mediaSize.width*scale,height:mediaSize.height*scale};
+        position = {x:region.x+(region.w-mediaSize.width)/2,y:region.y+(region.h-mediaSize.height)/2};
+      }
+      const bounds = getInteractionBoundsAtPoint(position) ?? {minX:0,minY:0,maxX:pageDimensions.width,maxY:pageDimensions.height};
       const newEl: BoardElement = {
+        ...(objectDefaultsRef.current.media || {}),
         id: generateId(),
         type: "media",
         parentId: targetLayerId ?? undefined,
         position: {
           x: Math.min(
-            Math.max(0, position.x),
-            Math.max(0, pageDimensions.width - mediaSize.width),
+            Math.max(bounds.minX, position.x),
+            Math.max(bounds.minX, bounds.maxX - mediaSize.width),
           ),
           y: Math.min(
-            Math.max(0, position.y),
-            Math.max(0, pageDimensions.height - mediaSize.height),
+            Math.max(bounds.minY, position.y),
+            Math.max(bounds.minY, bounds.maxY - mediaSize.height),
           ),
         },
         size: mediaSize,
@@ -4821,28 +4853,30 @@ export default function BoardEditor({
         mediaMime: inferMediaMime(dataUrl, fileMime),
         keepRatio: !fileMime.startsWith("audio/"),
         color: "#f8fafc",
-        zIndex: latestElements.length + 1,
-        ...(objectDefaultsRef.current.media || {}),
+        zIndex: Math.max(0,...latestElements.map(element=>element.zIndex)) + 1,
       };
-      pushElements([...latestElements, newEl]);
-      setSelectedId(newEl.id);
-      if (activeTool !== "select") setActiveTool("select");
+      return newEl;
     };
+    const decoded=await new Promise<{dataUrl:string;size:{width:number;height:number}}>((resolve,reject)=>{
+      if(fileMime.startsWith('image/')||fileMime==='image/url')handleImageUpload(file,(dataUrl,w,h)=>resolve({dataUrl,size:getScaledMediaSize(w,h)}),reject);
+      else {
+        const reader=new FileReader();
+        reader.onerror=()=>reject(new Error('Could not read the media file.'));
+        reader.onabort=()=>reject(new Error('Media import was interrupted.'));
+        reader.onload=()=>resolve({dataUrl:String(reader.result),size:fileMime.startsWith('audio/')?AUDIO_DEFAULT_SIZE:MEDIA_DEFAULT_SIZE});
+        reader.readAsDataURL(file);
+      }
+    });
+    return makeMediaElement(decoded.dataUrl,decoded.size);
+  };
 
-    if (fileMime.startsWith("image/") || fileMime === "image/url") {
-      handleImageUpload(file, (dataUrl, imgW, imgH) => {
-        addMediaElement(dataUrl, getScaledMediaSize(imgW, imgH));
-      });
-    } else {
-      const reader = new FileReader();
-      reader.onload = (ev) =>
-        addMediaElement(
-          ev.target?.result as string,
-          fileMime.startsWith("audio/") ? AUDIO_DEFAULT_SIZE : MEDIA_DEFAULT_SIZE,
-        );
-      reader.readAsDataURL(file);
-    }
-    return true;
+  const addMediaFilesToBoard=async(files:File[],position:{x:number;y:number},region?:ClipboardRegion)=>{
+    try {
+      const imported=await Promise.all(files.map((file,index)=>createMediaFromFile(file,{x:position.x+index*24,y:position.y+index*24},region)));
+      const topZ=Math.max(0,...elementsRef.current.map(element=>element.zIndex));
+      const placed=imported.map((element,index)=>({...element,zIndex:topZ+index+1}));
+      pushElements([...elementsRef.current,...placed]);setSelectedIds(placed.map(element=>element.id));setActiveTool('select');
+    } catch(error) {alert(error instanceof Error?error.message:'Could not import media.');}
   };
 
   const addBoardPackageToBoard = async (
@@ -4870,54 +4904,124 @@ export default function BoardEditor({
     }
   };
 
+  const handleBoardFileDrop = async (event: React.DragEvent) => {
+    const files=Array.from<File>(event.dataTransfer.files);
+    if (!files.length) return;
+    event.preventDefault();event.stopPropagation();
+    const rect=boardSurfaceRef.current?.getBoundingClientRect();
+    if(!rect)return;
+    const position={x:(event.clientX-rect.left)/zoomRef.current,y:(event.clientY-rect.top)/zoomRef.current};
+    const media=files.filter(file=>isSupportedMediaMime(inferFileMime(file)));
+    if(media.length)await addMediaFilesToBoard(media,position);
+    for (const [index,file] of files.entries()) {
+      const point={x:position.x+index*24,y:position.y+index*24};
+      if (isBoardPackageFile(file)) await addBoardPackageToBoard(file,point);
+    }
+  };
+
   useEffect(() => {
+    const clear = () => {delete document.documentElement.dataset.noteboardFileDrag;};
+    const enter = (event: DragEvent) => {
+      if (Array.from(event.dataTransfer?.types??[]).includes('Files')) document.documentElement.dataset.noteboardFileDrag='true';
+    };
+    const leave = (event: DragEvent) => {
+      if(!event.relatedTarget&&(event.clientX<=0||event.clientY<=0||event.clientX>=innerWidth||event.clientY>=innerHeight))clear();
+    };
+    window.addEventListener('dragenter',enter,true);window.addEventListener('dragleave',leave,true);
+    window.addEventListener('drop',clear,true);window.addEventListener('dragend',clear,true);window.addEventListener('blur',clear);
+    return ()=>{clear();window.removeEventListener('dragenter',enter,true);window.removeEventListener('dragleave',leave,true);window.removeEventListener('drop',clear,true);window.removeEventListener('dragend',clear,true);window.removeEventListener('blur',clear);};
+  },[]);
+
+  const clipboardSelection = (region: ClipboardRegion | undefined = quickAddRegion ?? undefined) => {
+    const latest = syncLiveEditableState(elementsRef.current);
+    const ids = region ? selectElementsInOutline(latest,[
+      {x:region.x,y:region.y},{x:region.x+region.w,y:region.y},
+      {x:region.x+region.w,y:region.y+region.h},{x:region.x,y:region.y+region.h},
+    ], respectLayerVisibility) : selectedIds;
+    const roots = new Set(ids), hierarchy = createElementHierarchy(latest);
+    return latest.filter(element => roots.has(element.id) || ids.some(id => hierarchy.isDescendantOf(element.id,id)));
+  };
+
+  const copySelectionToSystem = async (region?: ClipboardRegion) => {
+    const source = clipboardSelection(region);
+    if (!source.length) return;
+    const copy = cloneBoardDocument(source, sectionSheetsRef.current, generateId);
+    try { await copyBoardToSystem(copy.elements,copy.sheets); }
+    catch { alert('Could not access the clipboard. Try Ctrl+C.'); }
+  };
+
+  const pasteClipboardContents = (contents: ClipboardContents, region?: ClipboardRegion, parentId?: string) => {
+    const boardRect=boardSurfaceRef.current?.getBoundingClientRect(), viewport=containerRef.current?.getBoundingClientRect();
+    if (!boardRect || !viewport) return;
+    const position=region ? {x:region.x,y:region.y} : {x:(viewport.left+viewport.width/2-boardRect.left)/zoomRef.current,y:(viewport.top+viewport.height/2-boardRect.top)/zoomRef.current};
+    const copied=readBoardClipboard({getData:type=>type==='text/html'?contents.html:type==='text/plain'?contents.text:''});
+    if (copied?.elements.length) {
+      const cloned=cloneBoardDocument(copied.elements,copied.sectionSheets,generateId);
+      const topZ=Math.max(0,...elementsRef.current.map(element=>element.zIndex));
+      const lowZ=Math.min(...cloned.elements.map(element=>element.zIndex));
+      const destinationParent=parentId ?? (region ? creationParentId(position) : undefined);
+      const pasted=placeClipboardElements(cloned.elements,region).map(element=>({...element,
+        parentId:element.parentId ?? destinationParent,zIndex:topZ+element.zIndex-lowZ+1,
+      }));
+      pushDocument([...elementsRef.current,...pasted],[...sectionSheetsRef.current,...cloned.sheets]);
+      const pastedHierarchy=createElementHierarchy(pasted);
+      setSelectedIds(pasted.filter(element=>element.type!=='layer'&&element.type!=='board'&&!element.isEraser&&!isMergedGroupMember(element,pastedHierarchy)).map(element=>element.id));
+      setQuickAddRegion(null);
+      return;
+    }
+    const files=contents.files.filter(file=>isSupportedMediaMime(inferFileMime(file)));
+    if (files.length) {
+      void addMediaFilesToBoard(files,position,region);
+      setQuickAddRegion(null); return;
+    }
+    const {text,html}=contents;
+    if (!text && !html) return;
+    const plain=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\r?\n/g,'<br>');
+    const content=sanitizeRichText(html || plain);
+    const element: BoardElement={...objectDefaultsRef.current.text,id:generateId(),type:'text',content,position,
+      parentId:parentId ?? (region?creationParentId(position):targetLayerId??undefined),
+      size:region?{width:region.w,height:region.h}:{width:400,height:240},zIndex:Math.max(0,...elementsRef.current.map(item=>item.zIndex))+1};
+    pushElements([...elementsRef.current,element]);setSelectedId(element.id);setActiveTool('text');setQuickAddRegion(null);
+  };
+
+  const pasteSystemClipboard = async (region?: ClipboardRegion, parentId?: string) => {
+    try { pasteClipboardContents(await readCurrentClipboard(),region,parentId); }
+    catch { alert('Could not access the clipboard. Try Ctrl+V.'); }
+  };
+
+  const mergeSelectionArea=()=>{
+    const latest=syncLiveEditableState(elementsRef.current),source=clipboardSelection();
+    const result=mergeAreaElements(latest,source.map(element=>element.id),generateId());
+    if(!result)return;
+    pushElements(result.elements);setSelectedId(result.group.id);setQuickAddRegion(null);setActiveTool('select');
+    if(currentLayerView&&createElementHierarchy(result.elements).isDescendantOf(currentLayerView,result.group.id))setCurrentLayerView(result.group.parentId??null);
+  };
+  const ungroupSelection=()=>{
+    if(!selectedId)return;
+    const result=ungroupAreaElements(elementsRef.current,selectedId);
+    pushElements(result.elements);setSelectedIds(result.selectedIds);setActiveTool('select');
+  };
+
+  useEffect(() => {
+    const inEditor = (event: ClipboardEvent) => isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement) || Boolean(document.querySelector('dialog[data-spreadsheet-editor][open]'));
     const handleCopyOrCut = (event: ClipboardEvent) => {
-      if (!event.clipboardData || isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement)) return;
-      const latest = syncLiveEditableState(elementsRef.current);
-      const roots = selectedIds.length ? new Set<string>(selectedIds) : new Set<string>(latest.filter(element => {
-        if (!quickAddRegion || element.type === 'layer' || element.isEraser) return false;
-        const {x,y}=element.position;
-        return x <= quickAddRegion.x+quickAddRegion.w && x+(element.size?.width??100) >= quickAddRegion.x && y <= quickAddRegion.y+quickAddRegion.h && y+(element.size?.height??40) >= quickAddRegion.y;
-      }).map(element => element.id));
-      if (!roots.size) return;
-      const hierarchy = createElementHierarchy(latest);
-      const source = latest.filter(element => roots.has(element.id) || [...roots].some(id => hierarchy.isDescendantOf(element.id,id)));
-      const copy = cloneBoardDocument(source, sectionSheetsRef.current, generateId);
-      if (!writeBoardClipboard(event.clipboardData, copy.elements, copy.sheets)) return;
+      if (event.defaultPrevented || !event.clipboardData || inEditor(event)) return;
+      const source=clipboardSelection();
+      if (!source.length) return;
+      const copy=cloneBoardDocument(source,sectionSheetsRef.current,generateId);
+      if (!writeBoardClipboard(event.clipboardData,copy.elements,copy.sheets)) return;
       event.preventDefault();
-      setClipboard(null);setClipboardGroup(copy.elements);
-      if (event.type === 'cut') {
-        const kept = latest.filter(element => !source.some(copied => copied.id===element.id));
-        pushDocument(kept,[]);setSelectedId(null);setQuickAddRegion(null);
+      if (event.type==='cut') {
+        let kept=syncLiveEditableState(elementsRef.current);
+        for (const element of source) kept=removeElementTreeAndReferences(kept,element.id).elements;
+        pushDocument(kept);setSelectedId(null);setQuickAddRegion(null);
       }
     };
     const handlePaste = (event: ClipboardEvent) => {
-      if (event.defaultPrevented || !event.clipboardData || isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement)) return;
-      const boardRect=boardSurfaceRef.current?.getBoundingClientRect(), viewport=containerRef.current?.getBoundingClientRect();
-      if (!boardRect || !viewport) return;
-      const position={x:(viewport.left+viewport.width/2-boardRect.left)/zoomRef.current,y:(viewport.top+viewport.height/2-boardRect.top)/zoomRef.current};
-      const copied=readBoardClipboard(event.clipboardData);
-      if (copied) {
-        event.preventDefault();
-        const cloned=cloneBoardDocument(copied.elements,copied.sectionSheets,generateId);
-        const topZ=Math.max(0,...elementsRef.current.map(element=>element.zIndex));
-        const lowZ=Math.min(...cloned.elements.map(element=>element.zIndex));
-        const pasted=cloned.elements.map(element=>({...element,position:{x:element.position.x+20,y:element.position.y+20},zIndex:topZ+element.zIndex-lowZ+1}));
-        pushDocument([...elementsRef.current,...pasted],[...sectionSheetsRef.current,...cloned.sheets]);
-        setSelectedIds(pasted.filter(element=>element.type!=='layer'&&element.type!=='board'&&!element.isEraser).map(element=>element.id));
-        return;
-      }
-      const files=Array.from(event.clipboardData.files).filter(file=>isSupportedMediaMime(inferFileMime(file)));
-      if (files.length) {
-        event.preventDefault();files.forEach((file,index)=>addMediaFileToBoard(file,{x:position.x+index*24,y:position.y+index*24}));return;
-      }
-      const text=event.clipboardData.getData('text/plain'), html=event.clipboardData.getData('text/html');
-      if (!text && !html) return;
-      event.preventDefault();
-      const plain=()=>text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\r?\n/g,'<br>');
-      const content=sanitizeRichText(html || plain());
-      const element: BoardElement={...objectDefaultsRef.current.text,id:generateId(),type:'text',content,position,size:{width:400,height:240},zIndex:Math.max(0,...elementsRef.current.map(item=>item.zIndex))+1};
-      pushElements([...elementsRef.current,element]);setSelectedId(element.id);setActiveTool('text');
+      if (event.defaultPrevented || !event.clipboardData || inEditor(event)) return;
+      const contents={text:event.clipboardData.getData('text/plain'),html:event.clipboardData.getData('text/html'),files:Array.from(event.clipboardData.files)};
+      if (!contents.text && !contents.html && !contents.files.length) return;
+      event.preventDefault();pasteClipboardContents(contents,quickAddRegion??undefined);
     };
     window.addEventListener('copy',handleCopyOrCut);window.addEventListener('cut',handleCopyOrCut);window.addEventListener('paste',handlePaste);
     return ()=>{window.removeEventListener('copy',handleCopyOrCut);window.removeEventListener('cut',handleCopyOrCut);window.removeEventListener('paste',handlePaste);};
@@ -4940,7 +5044,9 @@ export default function BoardEditor({
   };
 
   const duplicateElement = (id: string) => {
-    const el = elements.find((e) => e.id === id);
+    if(elementsRef.current.find(element=>element.id===id)?.type==='group'){duplicateElementTree(id);return;}
+    const requested = elements.find((e) => e.id === id);
+    const el = requested ? elementHierarchy.ancestors(id).slice().reverse().find(parent=>parent.type==='group') ?? requested : undefined;
     if (el) {
       const newEl = {
         ...el,
@@ -5114,6 +5220,18 @@ export default function BoardEditor({
     const center = getViewportCenterOnBoard();
     const width = preset.element.size?.width || 120;
     const height = preset.element.size?.height || 80;
+    if(preset.element.type==='group'&&preset.elements?.length){
+      const rootIndex=preset.elements.findIndex(element=>element.id===preset.element!.id);
+      if(rootIndex<0)return;
+      const cloned=cloneBoardDocument(preset.elements,[],generateId).elements;
+      const origin=preset.elements[rootIndex].position;
+      const topZ=Math.max(0,...latestElements.map(element=>element.zIndex));
+      const lowZ=Math.min(...cloned.map(element=>element.zIndex));
+      const position={x:Math.max(0,Math.min(pageDimensions.width-width,center.x-width/2)),y:Math.max(0,Math.min(pageDimensions.height-height,center.y-height/2))};
+      const placed=cloned.map(element=>({...element,parentId:element.parentId??targetLayerId??undefined,
+        position:{x:element.position.x-origin.x+position.x,y:element.position.y-origin.y+position.y},zIndex:topZ+element.zIndex-lowZ+1}));
+      pushElements([...latestElements,...placed]);setSelectedId(placed[rootIndex].id);setActiveTool('select');return;
+    }
     const clone: BoardElement = {
       ...preset.element,
       id: generateId(),
@@ -5139,10 +5257,14 @@ export default function BoardEditor({
     if (element.type === "layer" || element.type === "draw" || element.isEraser) {
       return;
     }
+    const hierarchy=createElementHierarchy(elementsRef.current);
+    const source=element.type==='group'?elementsRef.current.filter(item=>item.id===element.id||hierarchy.isDescendantOf(item.id,element.id)):[];
+    const snapshot=source.length?cloneBoardDocument(source,sectionSheetsRef.current,generateId).elements:undefined;
+    const snapshotRoot=snapshot?.[source.findIndex(item=>item.id===element.id)];
     setObjectPresets((prev) =>
       prev.map((preset) =>
         preset.id === presetId
-          ? { ...preset, element: snapshotObjectForPreset(element) }
+          ? { ...preset, element: snapshotRoot??snapshotObjectForPreset(element),elements:snapshot }
           : preset,
       ),
     );
@@ -5519,7 +5641,10 @@ export default function BoardEditor({
       (window as any).justLinkedElement = false;
       return;
     }
-    if (e.button === 0) { e.preventDefault(); setSavedRange(null); window.getSelection()?.removeAllRanges(); }
+    if (e.button === 0) {
+      e.preventDefault();boardSurfaceRef.current?.focus({preventScroll:true});
+      setSavedRange(null);window.getSelection()?.removeAllRanges();
+    }
     pointerDownTime.current = Date.now();
     setContextMenuPos(null);
     setQuickAddRegion(null);
@@ -6132,7 +6257,7 @@ export default function BoardEditor({
 
     if (activeDragStart && activeDragCurrent) {
       if (
-        ["media", "embed", "board"].includes(activeTool) &&
+        activeTool !== "select" && usesAreaPlacement(activeTool) &&
         !hasMeaningfulAreaDrag(activeDragStart, activeDragCurrent)
       ) {
         cancelAreaPlacementDrag();
@@ -6145,7 +6270,7 @@ export default function BoardEditor({
         activeTool !== "draw"
       ) {
         const isWaitingForSelectionLock =
-          ["select", "media", "embed", "board"].includes(activeTool) &&
+          usesAreaPlacement(activeTool) &&
           isSelectionLockEnabled &&
           activeAreaGesture?.activated === false;
         if (isWaitingForSelectionLock) {
@@ -6395,7 +6520,8 @@ export default function BoardEditor({
   const duplicateSelection=()=>{
     const ids=selectionTreeIds(),source=elementsRef.current.filter(element=>ids.has(element.id));
     const cloned=cloneElementsWithOffset(source);
-    pushElements([...elementsRef.current,...cloned]);setSelectedIds(cloned.filter(element=>element.type!=='layer').map(element=>element.id));
+    const hierarchy=createElementHierarchy(cloned);
+    pushElements([...elementsRef.current,...cloned]);setSelectedIds(cloned.filter(element=>element.type!=='layer'&&!isMergedGroupMember(element,hierarchy)).map(element=>element.id));
   };
   const startSelectionMove=(event:React.PointerEvent)=>{
     if(activeTool!=='select'||selectedIds.length<2||event.button!==0)return;
@@ -6570,16 +6696,18 @@ export default function BoardEditor({
           >
             <Redo2 className="w-5 h-5" />
           </button>
-          <div className="relative flex items-center">
+          <div className="relative flex shrink-0 items-center">
             <input
               type="text"
               value={title}
+              aria-label="Board name"
               onChange={(e) => setTitle(e.target.value)}
               className="shrink-0 font-bold text-base min-[900px]:text-lg tracking-tight text-[#1A1A1A] bg-transparent border-none outline-none rounded pl-2 pr-8 py-1 w-36 min-[900px]:w-52 hover:bg-gray-100 transition-all truncate"
             />
             {title !== page.title && (
               <button 
-                className="absolute right-1.5 p-1 text-green-600 hover:bg-green-100 rounded flex items-center justify-center transition-colors bg-white shadow-sm border border-green-200"
+                type="button"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 h-6 w-6 shrink-0 text-green-600 hover:bg-green-100 rounded flex items-center justify-center transition-colors bg-white shadow-sm border border-green-200"
                 title="Save title"
                 onClick={() => {
                   (document.activeElement as HTMLElement)?.blur?.();
@@ -7377,30 +7505,13 @@ export default function BoardEditor({
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        {(clipboardGroup?.length || clipboard) && (
                           <button
-                            onClick={() => {
-                              const source = clipboardGroup?.length
-                                ? clipboardGroup
-                                : clipboard
-                                  ? [clipboard]
-                                  : [];
-                              if (!source.length) return;
-                              const clones = cloneElementsWithOffset(source).map(
-                                (el) => ({
-                                  ...el,
-                                  parentId: currentLayerView || el.parentId,
-                                }),
-                              );
-                              pushElements([...elements, ...clones]);
-                              setSelectedId(clones[clones.length - 1]?.id || null);
-                            }}
+                            onClick={() => void pasteSystemClipboard(undefined,currentLayerView??undefined)}
                             className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors text-gray-500 hover:text-black"
                             title="Paste Layer"
                           >
                             <ClipboardPaste className="w-4 h-4" />
                           </button>
-                        )}
                         <button
                           onClick={() => {
                             const l = {
@@ -7849,8 +7960,10 @@ export default function BoardEditor({
               ) : null}
               <div
                 ref={boardSurfaceRef}
+                tabIndex={-1}
+                aria-label="Board canvas"
                 data-board-root="true"
-                className="absolute top-0 left-0 touch-none select-none"
+                className="absolute top-0 left-0 touch-none select-none outline-none"
                 style={{
                   width: pageDimensions.width,
                   height: pageDimensions.height,
@@ -7870,26 +7983,17 @@ export default function BoardEditor({
                   e.preventDefault();
                   e.stopPropagation();
                 }}
-                onDrop={async (e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const file = e.dataTransfer.files?.[0];
-                  if (!file) return;
-                  const rect =
-                    boardSurfaceRef.current?.getBoundingClientRect();
-                  if (!rect) return;
-                  const dropX = (e.clientX - rect.left) / zoom;
-                  const dropY = (e.clientY - rect.top) / zoom;
-
-                  if (isSupportedMediaMime(inferFileMime(file))) {
-                    addMediaFileToBoard(file, { x: dropX, y: dropY });
-                    return;
-                  }
-
-                  if (isBoardPackageFile(file)) {
-                    await addBoardPackageToBoard(file, { x: dropX, y: dropY });
-                  }
+                onDropCapture={event => {
+                  const files=Array.from<File>(event.dataTransfer.files);
+                  if(!files.length)return;
+                  const target=(event.target as HTMLElement).closest('[data-board-element-id]');
+                  const element=elementsRef.current.find(item=>item.id===target?.getAttribute('data-board-element-id'));
+                  // A single supported file dropped on its media field replaces
+                  // that field. Other targets and multi-file drops use the board.
+                  if(files.length===1 && (element?.type==='media'&&isSupportedMediaMime(inferFileMime(files[0])) || element?.type==='image'&&inferFileMime(files[0]).startsWith('image/')))return;
+                  void handleBoardFileDrop(event);
                 }}
+                onDrop={handleBoardFileDrop}
               >
                 <div
                   className="absolute inset-0 overflow-visible pointer-events-none"
@@ -8170,6 +8274,7 @@ export default function BoardEditor({
                     <MemoizedBoardElementNode
                       key={el.id}
                       element={el}
+                      isGroupMember={isMergedGroupMember(el,elementHierarchy)}
                       renderZIndex={renderIndex + 1}
                       matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
                       matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
@@ -8336,6 +8441,7 @@ export default function BoardEditor({
                     <MemoizedBoardElementNode
                       key={el.id}
                       element={el}
+                      isGroupMember={isMergedGroupMember(el,elementHierarchy)}
                       renderZIndex={-5000 + renderIndex}
                       matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
                       matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
@@ -8504,19 +8610,17 @@ export default function BoardEditor({
                 {/* Quick Add Menu */}
                 <AnimatePresence>
                   {quickAddRegion && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.95 }}
-                      className="absolute bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-2 z-[200] flex gap-2 items-center"
+                    <div className="absolute z-[200]"
                       style={{
                         left: quickAddRegion.x + quickAddRegion.w / 2,
-                        top: quickAddRegion.y + quickAddRegion.h + 20,
+                        top: quickAddRegion.y + quickAddRegion.h + 20 / zoom,
                         transform: `translateX(-50%) scale(${1 / zoom})`,
                         transformOrigin: "top center",
                       }}
-                      onPointerDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => {e.preventDefault();e.stopPropagation();}}
                     >
+                    <motion.div initial={{opacity:0,scale:.95}} animate={{opacity:1,scale:1}} exit={{opacity:0,scale:.95}}
+                      className="bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-2 flex gap-2 items-center">
                       <div className="flex gap-1 items-center">
                         <span className="text-xs font-bold text-gray-500 mr-2 ml-1">
                           Add:
@@ -8543,8 +8647,19 @@ export default function BoardEditor({
                             <tool.icon className="w-5 h-5" />
                           </button>
                         ))}
+                        <div className="mx-1 h-6 w-px bg-gray-300" />
+                        <button type="button" title="Copy area" onClick={() => void copySelectionToSystem(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <Copy className="w-5 h-5" />
+                        </button>
+                        <button type="button" title="Paste into area" onClick={() => void pasteSystemClipboard(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <ClipboardPaste className="w-5 h-5" />
+                        </button>
+                        <button type="button" title="Merge area" onClick={mergeSelectionArea} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <Layers className="w-5 h-5" />
+                        </button>
                       </div>
                     </motion.div>
+                    </div>
                   )}
                 </AnimatePresence>
 
@@ -9266,7 +9381,7 @@ export default function BoardEditor({
             <div className="flex h-12 items-center gap-3 px-2 text-xs font-semibold">
               <span role="status">{selectedIds.length} selected</span>
               <button type="button" title="Move selected objects" onClick={()=>setActiveTool('select')} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Move className="h-4 w-4"/></button>
-              <button type="button" title="Copy selected objects" onClick={()=>document.execCommand('copy')} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Copy className="h-4 w-4"/></button>
+              <button type="button" title="Copy selected objects" onClick={()=>void copySelectionToSystem()} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Copy className="h-4 w-4"/></button>
               <button type="button" title="Duplicate selected objects" onClick={duplicateSelection} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><ClipboardPaste className="h-4 w-4"/></button>
               <button type="button" title="Delete selected objects" onClick={removeSelection} className="rounded-lg border border-red-200 p-2 text-red-400 hover:bg-red-50"><Trash2 className="h-4 w-4"/></button>
               <button type="button" title="Clear selection" onClick={()=>setSelectedIds([])} className="rounded-lg border border-blue-200 p-2 text-blue-500 hover:bg-blue-50"><Check className="h-4 w-4"/></button>
@@ -9664,7 +9779,7 @@ export default function BoardEditor({
                   )}
 
                   {/* Borders & Details */}
-                  {!["embed", "eraser", "media", "image", "fill"].includes(activeType) && !isTextLike && (
+                  {!["embed", "eraser", "media", "image", "fill", "group"].includes(activeType) && !isTextLike && (
                     <div className={bottomToolbarGroupClass}>
                       <div
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
@@ -10132,6 +10247,7 @@ export default function BoardEditor({
                     >
                       {objectDuplicated ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
                     </button>
+                    {selectedElement?.type==='group'&&<button type="button" title="Ungroup" onClick={ungroupSelection} className="p-2 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl border-[3px] border-gray-300 shadow-sm"><Layers className="w-5 h-5"/></button>}
                     <button
                       type="button"
                       title="Delete"
@@ -10146,7 +10262,8 @@ export default function BoardEditor({
                     <button
                       type="button"
                       data-save-object-defaults="true"
-                      title="Save settings for this object type"
+                      disabled={selectedElement?.type==='group'}
+                      title={selectedElement?.type==='group'?'Ungroup to save individual object settings':'Save settings for this object type'}
                       aria-label="Save settings for this object type"
                       onClick={() =>
                         selectedElement
@@ -10157,7 +10274,7 @@ export default function BoardEditor({
                             )
                       }
                       className={cn(
-                        "relative p-2 rounded-xl transition-all border-[3px] flex items-center justify-center shadow-sm",
+                        "relative p-2 rounded-xl transition-all border-[3px] flex items-center justify-center shadow-sm disabled:opacity-40 disabled:cursor-not-allowed",
                         objectDefaultsSaved
                           ? "text-green-700 bg-green-50 border-green-300 scale-110"
                           : "text-blue-700 bg-blue-50 hover:text-blue-800 hover:bg-blue-100 border-blue-200 hover:border-blue-300",
@@ -10186,6 +10303,7 @@ function BoardElementNode({
   activeTool,
   isSelected,
   isGroupSelected = false,
+  isGroupMember = false,
   onSelect,
   onUpdate,
   onJumpToTarget,
@@ -10233,6 +10351,7 @@ function BoardElementNode({
   activeTool?: string;
   isSelected: boolean;
   isGroupSelected?: boolean;
+  isGroupMember?: boolean;
   onSelect: () => void;
   onUpdate: (u: Partial<BoardElement>, skipHistory?: boolean) => void;
   onJumpToTarget?: (id: string) => void;
@@ -10260,6 +10379,7 @@ function BoardElementNode({
   manualLinkSourceId?: string | null;
 }) {
   if (element.type === "layer") return null;
+  isInteractionLocked = isInteractionLocked || isGroupMember;
   const nodeRef = useRef<HTMLDivElement>(null);
   const [boardPortalRoot, setBoardPortalRoot] = useState<HTMLElement | null>(
     null,
@@ -10322,6 +10442,7 @@ function BoardElementNode({
     e.preventDefault();
     e.stopPropagation();
     if (!nodeRef.current || !canResize) return;
+    nodeRef.current.closest<HTMLElement>('[data-board-root]')?.focus({preventScroll:true});
     if(element.type==="board")onBoardResizeStart?.(element.id);
 
     activePointerGestureCleanupRef.current?.();
@@ -10375,7 +10496,7 @@ function BoardElementNode({
         ? (v: number) => v
         : snap;
 
-      if (activeTool==='crop' || (altResizeCrops && (isAltKeyDown || evt.altKey))) {
+      if (activeTool==='crop' || (element.type!=='group' && altResizeCrops && (isAltKeyDown || evt.altKey))) {
         const crop = normalizeCrop(startCrop);
         const visibleWidthPct = Math.max(1, 100 - crop.left - crop.right);
         const visibleHeightPct = Math.max(1, 100 - crop.top - crop.bottom);
@@ -10480,6 +10601,7 @@ function BoardElementNode({
       }
 
       const isProportional =
+        element.type==='group' ||
         isTextScaling(element) ||
         proportionalScale ||
         element.keepRatio === true ||
@@ -10744,6 +10866,8 @@ function BoardElementNode({
       return;
     }
 
+    nodeRef.current?.closest<HTMLElement>('[data-board-root]')?.focus({preventScroll:true});
+
     // Select/Hand should be able to start a reliable drag from the text body.
     // Editing remains available after the element's own tool is active.
     if (isEditableTarget) e.preventDefault();
@@ -10980,12 +11104,14 @@ function BoardElementNode({
   const canInteract = permissions.canSelect || canResize || canMove;
   const isBoardInteraction = element.type === "board" && (canResize || canMove);
   const isRatioLocked =
+    element.type==='group' ||
     isTextScaling(element) ||
     element.keepRatio === true ||
     ((element.type === "image" || element.type === "media") &&
       element.keepRatio !== false);
   const showEdgeResizeHandles =
-    !isRatioLocked || activeTool==='crop' || (altResizeCrops && isAltKeyDown);
+    !isRatioLocked || activeTool==='crop' || (element.type!=='group' && altResizeCrops && isAltKeyDown);
+  const handleSize = resizeHandleSize(element.size?.width ?? 100, element.size?.height ?? 40, zoomRef.current);
   const selfManagedCrop =
     element.type === "media" &&
     inferMediaMime(element.content, element.mediaMime).startsWith("video");
@@ -11098,7 +11224,8 @@ function BoardElementNode({
     <motion.div
       initial={false}
       animate={{
-        opacity: element.opacity !== undefined ? element.opacity / 100 : 1,
+        opacity: (element.opacity !== undefined ? element.opacity / 100 : 1) *
+          (sceneHierarchy?.ancestors(element.id).slice(1).filter(parent=>parent.type==='group').reduce((value,parent)=>value*(parent.opacity??100)/100,1)??1),
       }}
       className={cn(
         "absolute",
@@ -11128,7 +11255,8 @@ function BoardElementNode({
             : "pointer-events-none",
       )}
       data-board-surface={element.type === "board" ? "true" : undefined}
-      data-board-element="true"
+      data-board-element={isGroupMember?"false":"true"}
+      data-merged-group-member={isGroupMember||undefined}
       data-board-element-id={element.id}
       data-board-element-type={element.type}
       style={{
@@ -11217,6 +11345,7 @@ function BoardElementNode({
               >
                 <ElementVisuals
                   element={croppedElement}
+                  renderGroupMembers={false}
                   onUpdate={onUpdate}
                   isSelected={isSelected}
                   allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
@@ -11236,6 +11365,7 @@ function BoardElementNode({
           ) : (
             <ElementVisuals
               element={croppedElement}
+              renderGroupMembers={false}
               onUpdate={onUpdate}
               isSelected={isSelected}
               allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
@@ -11404,44 +11534,18 @@ function BoardElementNode({
               activeTool === "select" ||
               isBoardResizeEnabled) && (
               <>
-                <div
-                  className="absolute top-[-5px] left-[-5px] w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-nw-resize z-50 shadow-sm"
-                  onPointerDown={(e) => handleResizePointerDown(e, "nw")}
-                />
-                <div
-                  className="absolute top-[-5px] right-[-5px] w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-ne-resize z-50 shadow-sm"
-                  onPointerDown={(e) => handleResizePointerDown(e, "ne")}
-                />
-                <div
-                  className="absolute bottom-[-5px] left-[-5px] w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-sw-resize z-50 shadow-sm"
-                  onPointerDown={(e) => handleResizePointerDown(e, "sw")}
-                />
-                <div
-                  className="absolute bottom-[-5px] right-[-5px] w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-se-resize z-50 shadow-sm"
-                  onPointerDown={(e) => handleResizePointerDown(e, "se")}
-                />
-
-                {/* Edges */}
-                {showEdgeResizeHandles && (
-                  <>
-                    <div
-                      className="absolute top-[-5px] left-1/2 -translate-x-1/2 w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-n-resize z-50 shadow-sm"
-                      onPointerDown={(e) => handleResizePointerDown(e, "n")}
-                    />
-                    <div
-                      className="absolute bottom-[-5px] left-1/2 -translate-x-1/2 w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-s-resize z-50 shadow-sm"
-                      onPointerDown={(e) => handleResizePointerDown(e, "s")}
-                    />
-                    <div
-                      className="absolute left-[-5px] top-1/2 -translate-y-1/2 w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-w-resize z-50 shadow-sm"
-                      onPointerDown={(e) => handleResizePointerDown(e, "w")}
-                    />
-                    <div
-                      className="absolute right-[-5px] top-1/2 -translate-y-1/2 w-2.5 h-2.5 touch-none bg-white border border-blue-600 cursor-e-resize z-50 shadow-sm"
-                      onPointerDown={(e) => handleResizePointerDown(e, "e")}
-                    />
-                  </>
-                )}
+                {(["nw","ne","sw","se","n","s","w","e"] as const)
+                  .filter(dir => dir.length === 2 || showEdgeResizeHandles)
+                  .map(dir => <div key={dir} data-resize-handle={dir}
+                    className={`absolute touch-none bg-white border border-blue-600 cursor-${dir}-resize z-50`}
+                    style={{
+                      width:handleSize,height:handleSize,borderWidth:1/Math.max(.01,zoomRef.current),
+                      left:dir.includes('w')?'0%':dir.includes('e')?'100%':'50%',
+                      top:dir.includes('n')?'0%':dir.includes('s')?'100%':'50%',
+                      transform:'translate(-50%, -50%)',cursor:`${dir}-resize`,
+                    }}
+                    onPointerDown={event=>handleResizePointerDown(event,dir)}
+                  />)}
               </>
             )}
           </>
@@ -11924,6 +12028,8 @@ function ElementVisuals({
   onJumpToTarget,
   onLinkEdit,
   onTextSelect,
+  elements=[],
+  renderGroupMembers=true,
 }: {
   element: BoardElement;
   onUpdate: (u: Partial<BoardElement>, skipHistory?: boolean) => void;
@@ -11936,6 +12042,7 @@ function ElementVisuals({
   gridSize?: number;
   gridThickness?: number;
   elements?: BoardElement[];
+  renderGroupMembers?: boolean;
   onJumpToTarget?: (id: string) => void;
   onLinkEdit?: (targetId: string) => void;
   onTextSelect?: (range: Range, elementId: string) => void;
@@ -12356,6 +12463,18 @@ function ElementVisuals({
       );
     case "layer":
       return null;
+    case "group": {
+      if(!renderGroupMembers)return <div style={{width:size?.width??100,height:size?.height??40}} />;
+      const hierarchy=createElementHierarchy(elements);
+      const children=elements.filter(child=>hierarchy.isDescendantOf(child.id,element.id)).map(child=>localGroupElement(child,element));
+      const localHierarchy=createElementHierarchy(children);
+      return <div className="relative pointer-events-none" style={{width:size?.width??100,height:size?.height??40}}>
+        {children.filter(child=>child.type!=='layer'&&!child.isEraser&&localHierarchy.isVisible(child.id,true)).sort(localHierarchy.compare).map((child,index)=><div key={child.id} className="absolute pointer-events-none"
+          style={{left:child.position.x,top:child.position.y,width:child.size?.width,height:child.size?.height,zIndex:index+1,opacity:(child.opacity??100)/100,transform:`rotate(${child.rotation??0}deg)`,clipPath:getSectionClipPath(child,children)}}>
+          <ElementVisuals element={child} elements={children} onUpdate={()=>{}} allowEditing={false}/>
+        </div>)}
+      </div>;
+    }
     case "section": {
       return (
         <div
@@ -12461,11 +12580,10 @@ function ElementVisuals({
             e.stopPropagation();
           }}
           onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
             const file = e.dataTransfer.files?.[0];
             const fileMime = file ? inferFileMime(file) : "";
             if (file && fileMime.startsWith("image/")) {
+              e.preventDefault();e.stopPropagation();
               handleImageUpload(file, (dataUrl, imgW, imgH) => {
                 onUpdate({
                   content: dataUrl,
@@ -12662,13 +12780,12 @@ function ElementVisuals({
             e.stopPropagation();
           }}
           onDrop={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
             const file = e.dataTransfer.files?.[0];
             if (
               file &&
               isSupportedMediaMime(inferFileMime(file))
             ) {
+              e.preventDefault();e.stopPropagation();
               readMediaFile(file);
             }
           }}

@@ -53,6 +53,7 @@ export const removeElementTreeAndReferences = (
         element.linkToId && removedIds.has(element.linkToId)
           ? undefined
           : element.linkToId;
+      const nextOriginalParentId=element.groupOriginalParentId&&removedIds.has(element.groupOriginalParentId)?undefined:element.groupOriginalParentId;
       const nextContent = neutralizeRemovedRichTextTargets(
         element.content ?? "",
         removedIds,
@@ -60,6 +61,7 @@ export const removeElementTreeAndReferences = (
       if (
         nextParentId === element.parentId &&
         nextLinkToId === element.linkToId &&
+        nextOriginalParentId === element.groupOriginalParentId &&
         nextContent === element.content
       ) {
         return element;
@@ -68,6 +70,7 @@ export const removeElementTreeAndReferences = (
         ...element,
         parentId: nextParentId,
         linkToId: nextLinkToId,
+        groupOriginalParentId:nextOriginalParentId,
         content: nextContent,
       };
     });

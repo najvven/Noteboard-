@@ -48,6 +48,7 @@ export type ElementType =
   | 'line'
   | 'blank'
   | 'layer'
+  | 'group'
   | 'arrow';
 
 export interface Position {
@@ -111,6 +112,8 @@ export interface BoardElement {
   sectionCollision?: 'none' | 'block' | 'clip';
   zIndex: number;
   parentId?: string;
+  /** Previous layer/section parent of a merged group's direct member. */
+  groupOriginalParentId?: string;
   isHidden?: boolean;
   isLocked?: boolean;
   isEraser?: boolean;
@@ -168,6 +171,7 @@ export interface BoardEditorSettings {
     id: string;
     name: string;
     element?: BoardElement;
+    elements?: BoardElement[];
     shortcut?: string;
   }>;
   objectDefaults?: Partial<Record<ElementType, Partial<BoardElement>>>;

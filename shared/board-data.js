@@ -1,6 +1,6 @@
 export const MAX_BOARD_ELEMENTS = 100_000;
 export const MAX_BOARD_DIMENSION = 1_000_000;
-export const CURRENT_BOARD_VERSION = 3;
+export const CURRENT_BOARD_VERSION = 4;
 export const MAX_SECTION_SHEETS = 10_000;
 export const MAX_BOARD_FILE_BYTES = 128 * 1024 * 1024;
 export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
@@ -180,6 +180,8 @@ export function assertValidBoard(page) {
     if (element.content !== undefined && typeof element.content !== "string") {
       throw new Error("Board element content is invalid.");
     }
+    if(element.groupOriginalParentId!==undefined&&!isSafeId(element.groupOriginalParentId))throw new Error('Original group parent is invalid.');
+    if(element.type==='group'&&!element.size)throw new Error('Merged group size is invalid.');
     if (element.textScale !== undefined && (!Number.isFinite(element.textScale) || element.textScale <= 0 || element.textScale > MAX_BOARD_DIMENSION)) {
       throw new Error('Board text scale is invalid.');
     }

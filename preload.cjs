@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 contextBridge.exposeInMainWorld("noteboardAPI", {
+  readClipboard: () => ipcRenderer.invoke("clipboard:read"),
+  writeBoardClipboard: (json) => ipcRenderer.invoke("clipboard:write-board", json),
   loadPages: () => ipcRenderer.invoke("storage:get-pages"),
   savePage: (page) => ipcRenderer.invoke("storage:save-page", page),
   deletePage: (pageId) => ipcRenderer.invoke("storage:delete-page", pageId),

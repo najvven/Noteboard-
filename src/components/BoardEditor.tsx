@@ -67,6 +67,8 @@ import {
   isBoardPlacementSurface,
   shouldPreservePresetPicking,
   usesAreaPlacement,
+  resolveAreaDragPoint,
+  getBoardPlacementRect,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import {
@@ -817,6 +819,9 @@ const getClippedRect = (
   pageDimensions: { width: number; height: number },
   bounds?: { minX: number; minY: number; maxX: number; maxY: number },
 ) => {
+  if (activeTool === "board") {
+    return getBoardPlacementRect(dragStart, dragCurrent, gridSize);
+  }
   let cx = dragCurrent.x;
   let cy = dragCurrent.y;
   let sx = dragStart.x;
@@ -956,8 +961,14 @@ const getClippedRect = (
     }
 
     // Final clamp to ensure we didn't push borders out of bounds due to minimum grid size
-    if (minX < clipBounds.minX) minX = clipBounds.minX;
-    if (minY < clipBounds.minY) minY = clipBounds.minY;
+    if (minX < clipBounds.minX) {
+      w -= clipBounds.minX - minX;
+      minX = clipBounds.minX;
+    }
+    if (minY < clipBounds.minY) {
+      h -= clipBounds.minY - minY;
+      minY = clipBounds.minY;
+    }
     if (minX + w > clipBounds.maxX) w = clipBounds.maxX - minX;
     if (minY + h > clipBounds.maxY) h = clipBounds.maxY - minY;
   }
@@ -1163,13 +1174,13 @@ export default function BoardEditor({
   });
   const containerRef = useRef<HTMLDivElement>(null);
   const boardSurfaceRef = useRef<HTMLDivElement>(null);
-  const pointerDownTime = useRef<number>(0);
   const activePointerIdRef = useRef<number | null>(null);
   const pointerCaptureTargetRef = useRef<HTMLElement | null>(null);
   const areaGestureRef = useRef<{
     pointerId: number;
     tool: string;
     start: { x: number; y: number };
+    inputStart: { x: number; y: number };
     current: { x: number; y: number };
     startedAt: number;
     moved: boolean;
@@ -1547,6 +1558,7 @@ export default function BoardEditor({
     point: { x: number; y: number },
     pointerId: number,
     tool: string,
+    inputPoint = point,
   ) => {
     const startedAt = Date.now();
     const waitsForSelectionLock =
@@ -1559,6 +1571,7 @@ export default function BoardEditor({
       pointerId,
       tool,
       start: point,
+      inputStart: inputPoint,
       current: point,
       startedAt,
       moved: false,
@@ -1582,8 +1595,15 @@ export default function BoardEditor({
         // Lock Time delays the beginning of the marquee. Rebase at the live
         // pointer position so the unlock moment always snaps to one board
         // cell instead of revealing movement accumulated during the delay.
-        const activationPoint = { ...gesture.current };
+        const inputPoint = {
+          x: gesture.inputStart.x + gesture.current.x - gesture.start.x,
+          y: gesture.inputStart.y + gesture.current.y - gesture.start.y,
+        };
+        const activationPoint = tool === "select"
+          ? inputPoint
+          : { x: snap(inputPoint.x), y: snap(inputPoint.y) };
         gesture.start = activationPoint;
+        gesture.inputStart = inputPoint;
         gesture.current = activationPoint;
         gesture.moved = false;
         gesture.activated = true;
@@ -1598,11 +1618,16 @@ export default function BoardEditor({
   const updateAreaGesture = (point: { x: number; y: number }) => {
     const gesture = areaGestureRef.current;
     if (!gesture) return;
-    gesture.current = point;
+    // Preserve movement relative to the physical cursor, even when the visible
+    // anchor was snapped to a different position at activation.
+    gesture.current = {
+      x: gesture.start.x + point.x - gesture.inputStart.x,
+      y: gesture.start.y + point.y - gesture.inputStart.y,
+    };
     gesture.moved =
       gesture.moved ||
-      Math.hypot(point.x - gesture.start.x, point.y - gesture.start.y) > 3;
-    setDragCurrent(point);
+      Math.hypot(point.x - gesture.inputStart.x, point.y - gesture.inputStart.y) > 3;
+    setDragCurrent(gesture.current);
   };
   const [toolbarLayout, setToolbarLayout] = useState<ToolbarLayout>(() =>
     normalizeToolbarLayout(
@@ -4612,10 +4637,13 @@ export default function BoardEditor({
     extraProps?: Partial<BoardElement>,
   ) => {
     const latestElements = elementsRef.current;
-    let finalRect =
-      type === "board" && (rect.w < gridSize || rect.h < gridSize)
-        ? { ...rect, w: 360, h: 220 }
-        : { ...rect };
+    let finalRect = type === "board"
+      ? getBoardPlacementRect(
+          { x: rect.x, y: rect.y },
+          { x: rect.x + rect.w, y: rect.y + rect.h },
+          gridSize,
+        )
+      : { ...rect };
 
     if (type === "embed" || type === "media" || type === "table") {
       const minimum = getElementMinSize({
@@ -5645,7 +5673,6 @@ export default function BoardEditor({
       e.preventDefault();boardSurfaceRef.current?.focus({preventScroll:true});
       setSavedRange(null);window.getSelection()?.removeAllRanges();
     }
-    pointerDownTime.current = Date.now();
     setContextMenuPos(null);
     setQuickAddRegion(null);
     if (activeTool === "pan") {
@@ -5788,7 +5815,7 @@ export default function BoardEditor({
     const y = activeTool === "select" ? exactY : snap(exactY);
     const snappedPoint = clampPointToBounds({ x, y }, interactionBounds);
 
-    beginAreaGesture(snappedPoint, e.pointerId, activeTool);
+    beginAreaGesture(snappedPoint, e.pointerId, activeTool, pointerPoint);
     setIsInteracting(true);
   };
 
@@ -5931,24 +5958,9 @@ export default function BoardEditor({
         }
       }
 
-      // Proportional shape (square) if shift logic or toggle is on
-      if (proportionalScale && activeTool !== "select") {
-        const dx = cx - activeAreaGesture.start.x;
-        const dy = cy - activeAreaGesture.start.y;
-        const max = Math.max(Math.abs(dx), Math.abs(dy));
-        cx = activeAreaGesture.start.x + Math.sign(dx) * max;
-        cy = activeAreaGesture.start.y + Math.sign(dy) * max;
-      }
-
-      const nextPoint =
-        activeTool === "select"
-          ? bounds
-            ? clampPointToBounds({ x: cx, y: cy }, bounds)
-            : { x: cx, y: cy }
-          : bounds
-            ? clampPointToBounds({ x: snap(cx), y: snap(cy) }, bounds)
-            : { x: snap(cx), y: snap(cy) };
-      updateAreaGesture(nextPoint);
+      // Keep physical movement until geometry is resolved. Early rounding
+      // erased tiny reverse drags and changed their quadrant.
+      updateAreaGesture({ x: cx, y: cy });
     }
   };
 
@@ -5963,6 +5975,50 @@ export default function BoardEditor({
       window.removeEventListener("beforeunload", flushLatestDocument);
     };
   }, []);
+
+  const getSnapPoint = (px: number, py: number, threshold = 30) => {
+    if (!enableObjectSnapping) return { x: px, y: py };
+    let bestDistance = threshold;
+    let bestPoint = { x: px, y: py };
+    for (const element of elementsRef.current) {
+      if (element.type === "layer" || element.type === "draw") continue;
+      const { x, y } = element.position;
+      const w = element.size?.width ?? 0;
+      const h = element.size?.height ?? 0;
+      const points = [
+        { x, y }, { x: x + w, y }, { x, y: y + h }, { x: x + w, y: y + h },
+        { x: x + w / 2, y }, { x: x + w / 2, y: y + h },
+        { x, y: y + h / 2 }, { x: x + w, y: y + h / 2 },
+        { x: x + w / 2, y: y + h / 2 },
+      ];
+      for (const point of points) {
+        const distance = Math.hypot(point.x - px, point.y - py);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestPoint = point;
+        }
+      }
+    }
+    return bestPoint;
+  };
+  const resolvePlacementPoint = (
+    start: { x: number; y: number },
+    current: { x: number; y: number },
+    tool: string,
+  ) => {
+    if (tool === "select" || (current.x === start.x && current.y === start.y)) return current;
+    const line = tool === "line" || tool === "arrow";
+    if (line && proportionalScale) {
+      const dx = current.x - start.x;
+      const dy = current.y - start.y;
+      const extent = Math.max(Math.abs(dx), Math.abs(dy));
+      current = { x: start.x + Math.sign(dx) * extent, y: start.y + Math.sign(dy) * extent };
+    }
+    return resolveAreaDragPoint(start, current, gridSize, point => {
+      const gridPoint = { x: snap(point.x), y: snap(point.y) };
+      return line && snapToGrid ? gridPoint : getSnapPoint(gridPoint.x, gridPoint.y, line ? 8 : 30);
+    }, proportionalScale && !line);
+  };
 
   const handlePointerUp = (event?: React.PointerEvent | PointerEvent) => {
     const capturedPointerId = activePointerIdRef.current;
@@ -6012,38 +6068,6 @@ export default function BoardEditor({
         : null);
     const activeDragStart = activeAreaGesture?.start ?? dragStart;
     const activeDragCurrent = activeAreaGesture?.current ?? dragCurrent;
-
-    const getSnapPoint = (px: number, py: number, threshold = 30) => {
-      if (!enableObjectSnapping) return { x: px, y: py };
-      let bestDist = threshold;
-      let bestPt = { x: px, y: py };
-      for (const el of latestElements) {
-        if (el.type === "layer" || el.type === "draw") continue;
-        const ex = el.position.x;
-        const ey = el.position.y;
-        const ew = el.size?.width || 0;
-        const eh = el.size?.height || 0;
-        const pts = [
-          { x: ex, y: ey },
-          { x: ex + ew, y: ey },
-          { x: ex, y: ey + eh },
-          { x: ex + ew, y: ey + eh },
-          { x: ex + ew / 2, y: ey },
-          { x: ex + ew / 2, y: ey + eh },
-          { x: ex, y: ey + eh / 2 },
-          { x: ex + ew, y: ey + eh / 2 },
-          { x: ex + ew / 2, y: ey + eh / 2 },
-        ];
-        for (const pt of pts) {
-          const d = Math.hypot(pt.x - px, pt.y - py);
-          if (d < bestDist) {
-            bestDist = d;
-            bestPt = { ...pt }; // copy object
-          }
-        }
-      }
-      return bestPt;
-    };
 
     if (panStart) {
       setPanStart(null);
@@ -6289,32 +6313,8 @@ export default function BoardEditor({
         }
       }
 
-      const snappedStart =
-        activeTool !== "select" &&
-        activeTool !== "pan" &&
-        activeTool !== "eraser" &&
-        activeTool !== "draw"
-          ? snapToGrid && (activeTool === "line" || activeTool === "arrow")
-            ? activeDragStart
-            : getSnapPoint(
-              activeDragStart.x,
-              activeDragStart.y,
-              activeTool === "line" || activeTool === "arrow" ? 8 : 30,
-            )
-          : activeDragStart;
-      const snappedCurrent =
-        activeTool !== "select" &&
-        activeTool !== "pan" &&
-        activeTool !== "eraser" &&
-        activeTool !== "draw"
-          ? snapToGrid && (activeTool === "line" || activeTool === "arrow")
-            ? activeDragCurrent
-            : getSnapPoint(
-              activeDragCurrent.x,
-              activeDragCurrent.y,
-              activeTool === "line" || activeTool === "arrow" ? 8 : 30,
-            )
-          : activeDragCurrent;
+      const snappedStart = activeDragStart;
+      const snappedCurrent = resolvePlacementPoint(activeDragStart, activeDragCurrent, activeTool);
 
       if (activeTool === "arrow" || activeTool === "line") {
         const dx = snappedCurrent.x - snappedStart.x;
@@ -6394,32 +6394,7 @@ export default function BoardEditor({
               gridSize,
               activeBounds ?? undefined,
             );
-            const intersecting = latestElements.filter((el) => {
-              const ew = el.size?.width || 100;
-              const eh = el.size?.height || 40;
-              return !(
-                el.position.x > clipped.x + clipped.w ||
-                el.position.x + ew < clipped.x ||
-                el.position.y > clipped.y + clipped.h ||
-                el.position.y + eh < clipped.y
-              );
-            });
-
-            if (
-              intersecting.length > 0 &&
-              clipped.w < gridSize &&
-              clipped.h < gridSize
-            ) {
-              const topMost = intersecting.sort(
-                (a, b) => b.zIndex - a.zIndex,
-              )[0];
-              setSelectedId(topMost.id);
-            } else if (
-              clipped.w > 5 ||
-              clipped.h > 5 ||
-              !isSelectionLockEnabled ||
-              Date.now() - pointerDownTime.current >= selectionLockTime
-            ) {
+            if (activeAreaGesture?.activated) {
               setQuickAddRegion({
                 x: selectionRect.x,
                 y: selectionRect.y,
@@ -7869,12 +7844,13 @@ export default function BoardEditor({
             if (activeTool === "board" && e.button === 0 && isWorkspaceSurface) {
               const rect = boardSurfaceRef.current?.getBoundingClientRect();
               if (!rect) return;
-              const x = snap((e.clientX - rect.left) / zoom);
-              const y = snap((e.clientY - rect.top) / zoom);
+              const inputPoint = { x: (e.clientX - rect.left) / zoom, y: (e.clientY - rect.top) / zoom };
+              const x = snap(inputPoint.x);
+              const y = snap(inputPoint.y);
               setSelectedId(null);
               setIsMainBoardSelected(false);
               captureSurfacePointer(e);
-              beginAreaGesture({ x, y }, e.pointerId, activeTool);
+              beginAreaGesture({ x, y }, e.pointerId, activeTool, inputPoint);
               setIsInteracting(true);
               return;
             }
@@ -8035,15 +8011,16 @@ export default function BoardEditor({
                       style={{ left: 0, top: 0 }}
                     >
                       {(() => {
-                        let minX = Math.min(dragStart.x, dragCurrent.x);
-                        let minY = Math.min(dragStart.y, dragCurrent.y);
-                        let w = Math.abs(dragCurrent.x - dragStart.x);
-                        let h = Math.abs(dragCurrent.y - dragStart.y);
+                        const previewCurrent = resolvePlacementPoint(dragStart, dragCurrent, activeTool);
+                        let minX = Math.min(dragStart.x, previewCurrent.x);
+                        let minY = Math.min(dragStart.y, previewCurrent.y);
+                        let w = Math.abs(previewCurrent.x - dragStart.x);
+                        let h = Math.abs(previewCurrent.y - dragStart.y);
 
                         if (activeTool === "select") {
                           const selectionRect = getMinimumAreaRect(
                             dragStart,
-                            dragCurrent,
+                            previewCurrent,
                             gridSize,
                             activeSurfaceBoundsRef.current ?? undefined,
                           );
@@ -8057,14 +8034,14 @@ export default function BoardEditor({
                           if (w < gridSize) {
                             w = gridSize;
                             minX =
-                              dragCurrent.x < dragStart.x
+                              previewCurrent.x < dragStart.x
                                 ? dragStart.x - gridSize
                                 : dragStart.x;
                           }
                           if (h < gridSize) {
                             h = gridSize;
                             minY =
-                              dragCurrent.y < dragStart.y
+                              previewCurrent.y < dragStart.y
                                 ? dragStart.y - gridSize
                                 : dragStart.y;
                           }
@@ -8076,23 +8053,23 @@ export default function BoardEditor({
                               <div
                                 className="absolute border-[1.5px] border-blue-500 bg-blue-500/10 pointer-events-none"
                                 style={{
-                                  left: Math.min(dragStart.x, dragCurrent.x),
-                                  top: Math.min(dragStart.y, dragCurrent.y),
+                                  left: Math.min(dragStart.x, previewCurrent.x),
+                                  top: Math.min(dragStart.y, previewCurrent.y),
                                   width: Math.max(
                                     1,
-                                    Math.abs(dragCurrent.x - dragStart.x),
+                                    Math.abs(previewCurrent.x - dragStart.x),
                                   ),
                                   height: Math.max(
                                     1,
-                                    Math.abs(dragCurrent.y - dragStart.y),
+                                    Math.abs(previewCurrent.y - dragStart.y),
                                   ),
                                 }}
                               />
                             );
                           }
 
-                          const dx = dragCurrent.x - dragStart.x;
-                          const dy = dragCurrent.y - dragStart.y;
+                          const dx = previewCurrent.x - dragStart.x;
+                          const dy = previewCurrent.y - dragStart.y;
                           const rawDistance = Math.sqrt(dx * dx + dy * dy);
 
                           let distance = Math.max(rawDistance, gridSize);
@@ -8147,7 +8124,7 @@ export default function BoardEditor({
                             overlapMode,
                             activeTool as string,
                             dragStart,
-                            dragCurrent,
+                            previewCurrent,
                             elements,
                             gridSize,
                             pageDimensions,
@@ -8522,20 +8499,18 @@ export default function BoardEditor({
                     />
                   ))}
 
-                {activeTool === "board" && dragStart && dragCurrent && isHoldingToCreate && (
-                  <div
+                {activeTool === "board" && dragStart && dragCurrent && isHoldingToCreate && (() => {
+                  const rect = getBoardPlacementRect(
+                    dragStart,
+                    resolvePlacementPoint(dragStart, dragCurrent, activeTool),
+                    gridSize,
+                  );
+                  return <div
                     data-new-board-preview="true"
                     className="absolute pointer-events-none border-[1.5px] border-blue-500 bg-blue-500/10 z-[120]"
-                    style={{
-                      left: Math.min(dragStart.x, dragCurrent.x),
-                      top: Math.min(dragStart.y, dragCurrent.y),
-                      width:
-                        Math.abs(dragCurrent.x - dragStart.x) || 360,
-                      height:
-                        Math.abs(dragCurrent.y - dragStart.y) || 220,
-                    }}
-                  />
-                )}
+                    style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
+                  />;
+                })()}
 
                 {/* Resize Handles for Main Board */}
                 {isBoardResizeEnabled &&

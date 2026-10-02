@@ -85,6 +85,41 @@ const guestState = app => app.evaluate(async ({webContents}) => Promise.all(webC
   id:c.id,url:c.getURL(),title:c.getTitle(),body:await c.executeJavaScript('document.body?.innerText || ""').catch(()=>''),
 }))));
 
+test('native held previews keep their anchor across quadrants and commit the visible bounds', {timeout:30000}, async t => {
+  const board = seed('rectangle');
+  Object.assign(board, {width:1100,height:700,workspaceWidth:1500,workspaceHeight:1000,boardX:64,boardY:0,viewportCenterX:640,viewportCenterY:328,zoom:1.5,gridSize:40,snapToGrid:true,elements:[]});
+  Object.assign(board.editorSettings, {selectionLockTime:250,isSelectionLockEnabled:true,previewMode:'box'});
+  const {window,errors} = await launch(t,board);
+  const root = await window.locator('[data-board-root]').boundingBox();
+  const anchor = {x:root.x+400*board.zoom,y:root.y+320*board.zoom};
+  const checkBounds = (actual, expected) => {
+    for (const key of ['x','y','width','height']) assert.ok(Math.abs(actual[key]-expected[key])<1,`${key} must match the shown preview`);
+  };
+  for (const tool of ['rectangle','select']) {
+    if(tool==='select') await window.getByRole('button',{name:'Select Tool',exact:true}).click();
+    await window.mouse.move(anchor.x,anchor.y);await window.mouse.down();await window.waitForTimeout(300);
+    const preview = tool==='select'
+      ? window.locator('[data-selection-region="active"]')
+      : window.locator('[data-board-root] .bg-blue-500\\/10.pointer-events-none').last();
+    await expect(preview).toBeVisible();
+    for (const [dx,dy] of [[8,8],[-8,8],[-8,-8],[8,-8]]) {
+      await window.mouse.move(anchor.x+dx*board.zoom,anchor.y+dy*board.zoom);
+      const bounds = await preview.boundingBox();
+      assert.ok(Math.abs((dx<0?bounds.x+bounds.width:bounds.x)-anchor.x)<1);
+      assert.ok(Math.abs((dy<0?bounds.y+bounds.height:bounds.y)-anchor.y)<1);
+    }
+    const visible = await preview.boundingBox();await window.mouse.up();
+    const committed = tool==='select'
+      ? window.locator('[data-selection-region="committed"]')
+      : window.locator('[data-board-element-type="rectangle"]');
+    await expect(committed).toBeVisible();checkBounds(await committed.boundingBox(),visible);
+    if(tool==='rectangle') {
+      await window.keyboard.press('Control+z');await expect(committed).toHaveCount(0);
+    }
+  }
+  assert.deepEqual(errors,[]);
+});
+
 test('native clipboard follows internal objects, external text and external images in order', {timeout:45000}, async t => {
   const board = seed('select');
   board.elements = [{id:'arrow',type:'arrow',position:{x:100,y:150},size:{width:160,height:70},content:'',zIndex:1}];

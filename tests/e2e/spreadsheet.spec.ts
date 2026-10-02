@@ -68,7 +68,7 @@ test('spreadsheet data tools operate on cell ranges and clipboard without affect
   const number=cells.locator('input:visible').nth(1);await number.click();await number.press('Control+a');await number.pressSequentially('10',{delay:30});await number.press('Tab');await cells.getByRole('button',{name:'Done',exact:true}).click();
   await expect.poll(async()=>JSON.parse((await read()).workbook.resources.find((resource:any)=>resource.name==='SHEET_DATA_VALIDATION_PLUGIN').data)['sheet-1'][0].formula1).toBe('10');
   await cells.getByRole('button',{name:'Close sidebar',exact:true}).click();
-  await page.mouse.move(bounds.x+240,bounds.y+49);
+  await grid.hover({position:{x:240,y:49}});
   await expect(cells.locator('body')).toContainText('Value must be equal to 10');
   await cells.getByRole('button',{name:'Conditional Formatting',exact:true}).click();
   await cells.getByText('Create Conditional Formatting',{exact:true}).click();

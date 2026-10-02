@@ -83,10 +83,52 @@ export const hasMeaningfulAreaDrag = (
   return Number.isFinite(distance) && distance > 0 && distance >= minimumDistance;
 };
 
+/** Snapping cannot reverse a drag or erase a small movement across its anchor. */
+export function resolveAreaDragPoint(
+  start: PlacementPoint,
+  current: PlacementPoint,
+  minimumSize: number,
+  snapPoint: (point: PlacementPoint) => PlacementPoint = point => point,
+  proportional = false,
+): PlacementPoint {
+  const minimum = Number.isFinite(minimumSize) ? Math.max(1, minimumSize) : 1;
+  const snapped = snapPoint(current);
+  const dx = current.x - start.x, dy = current.y - start.y;
+  let x = snapped.x, y = snapped.y;
+  if (dx < 0 && x >= start.x) x = start.x - minimum;
+  if (dx > 0 && x <= start.x) x = start.x + minimum;
+  if (dy < 0 && y >= start.y) y = start.y - minimum;
+  if (dy > 0 && y <= start.y) y = start.y + minimum;
+  if (proportional) {
+    const extent = Math.max(minimum, Math.abs(x - start.x), Math.abs(y - start.y));
+    x = start.x + (dx < 0 ? -1 : 1) * extent;
+    y = start.y + (dy < 0 ? -1 : 1) * extent;
+  }
+  return { x, y };
+}
+
+/** New Board retains its default size, growing outwards from the fixed anchor. */
+export const getBoardPlacementRect = (
+  start: PlacementPoint,
+  current: PlacementPoint,
+  minimumSize: number,
+): PlacementRect => {
+  const width = Math.abs(current.x - start.x);
+  const height = Math.abs(current.y - start.y);
+  const useDefault = width < minimumSize || height < minimumSize;
+  const w = useDefault ? 360 : width;
+  const h = useDefault ? 220 : height;
+  return {
+    x: current.x < start.x ? start.x - w : start.x,
+    y: current.y < start.y ? start.y - h : start.y,
+    w,
+    h,
+  };
+};
+
 /**
- * Builds a direction-aware rectangle that never renders smaller than one
- * logical board cell. Keeping this geometry outside React makes the delayed
- * Select preview and its committed region use the same rule.
+ * Builds a direction-aware rectangle with a one-cell minimum, clipped only
+ * at the board boundary. Preview and committed Select regions share this rule.
  */
 export const getMinimumAreaRect = (
   start: PlacementPoint,
@@ -105,12 +147,11 @@ export const getMinimumAreaRect = (
   let y = current.y < start.y ? start.y - h : start.y;
 
   if (bounds) {
-    const availableWidth = Math.max(0, bounds.maxX - bounds.minX);
-    const availableHeight = Math.max(0, bounds.maxY - bounds.minY);
-    w = Math.min(w, availableWidth);
-    h = Math.min(h, availableHeight);
-    x = Math.min(Math.max(x, bounds.minX), Math.max(bounds.minX, bounds.maxX - w));
-    y = Math.min(Math.max(y, bounds.minY), Math.max(bounds.minY, bounds.maxY - h));
+    // Clip the outer edges instead of translating the rectangle's anchor.
+    const right = Math.min(bounds.maxX, x + w);
+    const bottom = Math.min(bounds.maxY, y + h);
+    x = Math.max(bounds.minX, x); y = Math.max(bounds.minY, y);
+    w = Math.max(0, right - x); h = Math.max(0, bottom - y);
   }
 
   return { x, y, w, h };

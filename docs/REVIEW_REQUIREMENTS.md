@@ -50,6 +50,10 @@ Do not replace product requirements with generic UI preferences.
   with the same editing/placement rules as Main Board; it is not a plain rectangle.
 - Web, Media and New Board use the configured held area-placement gesture. A short
   click must not place an object when Lock time requires a drag/hold.
+- Held area previews keep the same anchor when the pointer crosses either axis,
+  including small snapped drags. Preview and release use identical snapping and
+  geometry; clip at board edges without translating the anchor. A held Select
+  area must not become an accidental click on a nearby object.
 - Sections clip according to placement origin and hierarchy order: elements begun
   inside remain inside; elements begun outside lose the overlapping inside part.
   Recompute clipping after dependent sections/boards move, resize, change order,

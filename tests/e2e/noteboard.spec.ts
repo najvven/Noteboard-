@@ -64,7 +64,9 @@ const moveToolbarToolIntoMore = async (page: BrowserPage, itemId: string) => {
 const returnToolFromMore = async (page: BrowserPage, id: string, label: string, cancel = false) => {
   const row = page.locator(`[data-more-toolbar-item="${id}"]`);
   if (!(await row.isVisible())) await page.getByRole('button', { name: 'More', exact: true }).click();
-  const box = (await row.getByRole('button', { name: `Move ${label} to toolbar` }).boundingBox())!;
+  const handle = row.getByRole('button', { name: `Move ${label} to toolbar` });
+  await handle.scrollIntoViewIfNeeded();
+  const box = (await handle.boundingBox())!;
   const toolbar = (await page.locator('[data-toolbar-surface="true"]').boundingBox())!;
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();

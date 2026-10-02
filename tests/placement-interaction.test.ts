@@ -6,6 +6,8 @@ import {
   hasMeaningfulAreaDrag,
   isBoardPlacementSurface,
   shouldPreservePresetPicking,
+  resolveAreaDragPoint,
+  getBoardPlacementRect,
 } from "../src/features/board/placement-interaction.ts";
 
 test("a delayed selection starts as one board cell in every drag direction", () => {
@@ -19,7 +21,7 @@ test("a delayed selection starts as one board cell in every drag direction", () 
   );
 });
 
-test("selection minimum geometry stays inside its active board", () => {
+test("selection minimum geometry clips at its active board without moving the anchor", () => {
   assert.deepEqual(
     getMinimumAreaRect(
       { x: 198, y: 98 },
@@ -27,7 +29,45 @@ test("selection minimum geometry stays inside its active board", () => {
       40,
       { minX: 0, minY: 0, maxX: 200, maxY: 100 },
     ),
-    { x: 160, y: 60, w: 40, h: 40 },
+    { x: 198, y: 98, w: 2, h: 2 },
+  );
+});
+
+test('grid projection preserves all four drag directions beside a fixed anchor',()=>{
+  const start={x:400,y:320};
+  const snapPoint=(point:{x:number;y:number})=>({x:Math.round(point.x/40)*40,y:Math.round(point.y/40)*40});
+  for(const dx of [-8,8])for(const dy of [-8,8]){
+    const resolved=resolveAreaDragPoint(start,{x:start.x+dx,y:start.y+dy},40,snapPoint);
+    assert.equal(Math.sign(resolved.x-start.x),Math.sign(dx));assert.equal(Math.sign(resolved.y-start.y),Math.sign(dy));
+    const rect=getMinimumAreaRect(start,resolved,40);
+    assert.equal(dx<0?rect.x+rect.w:rect.x,start.x);assert.equal(dy<0?rect.y+rect.h:rect.y,start.y);
+  }
+});
+
+test('proportional preview remains square on either anchor axis and uses identical endpoint geometry',()=>{
+  const start={x:400,y:320};
+  for(const current of [{x:320,y:320},{x:400,y:240},{x:480,y:320},{x:400,y:400}]){
+    const point=resolveAreaDragPoint(start,current,40,undefined,true);
+    const rect=getMinimumAreaRect(start,point,40);assert.equal(rect.w,80);assert.equal(rect.h,80);
+  }
+});
+
+test('small New Board previews keep the default dimensions on every side of their anchor', () => {
+  const start = { x: 400, y: 320 };
+  for (const dx of [-8, 8]) for (const dy of [-8, 8]) {
+    const rect = getBoardPlacementRect(start, { x: start.x + dx, y: start.y + dy }, 40);
+    assert.equal(rect.w, 360);
+    assert.equal(rect.h, 220);
+    assert.equal(dx < 0 ? rect.x + rect.w : rect.x, start.x);
+    assert.equal(dy < 0 ? rect.y + rect.h : rect.y, start.y);
+  }
+  assert.deepEqual(getBoardPlacementRect(start, start, 40), { x: 400, y: 320, w: 360, h: 220 });
+});
+
+test('New Board preserves drawn dimensions once both axes exceed its minimum', () => {
+  assert.deepEqual(
+    getBoardPlacementRect({ x: 400, y: 320 }, { x: 120, y: 100 }, 40),
+    { x: 120, y: 100, w: 280, h: 220 },
   );
 });
 

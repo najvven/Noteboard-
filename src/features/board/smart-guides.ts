@@ -1,13 +1,17 @@
 import type { BoardElement, Position } from "../../types";
 import { elementPolygon } from "./section-clipping";
 
-export interface SmartGuide {
-  kind: "alignment" | "distance";
+export interface GuideSegment {
   x1: number;
   y1: number;
   x2: number;
   y2: number;
+}
+export interface SmartGuide extends GuideSegment {
+  kind: "alignment" | "distance";
   label?: string;
+  extensions?: GuideSegment[];
+  equalSpacing?: boolean;
 }
 type Bounds = { left: number; top: number; right: number; bottom: number };
 const bounds = (
@@ -31,6 +35,7 @@ export function smartGuides(
   zoom: number,
   snap: boolean,
 ) {
+  zoom = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   const threshold = 6 / zoom,
     initial = bounds({ ...moving, position });
   const candidates = others
@@ -40,8 +45,14 @@ export function smartGuides(
         element.type !== "layer" &&
         !element.isEraser,
     )
-    .map((element) => bounds(element));
-  let bestX: { offset: number; at: number; target: Bounds } | undefined,
+    .map((element) => ({...bounds(element), measure: element.type !== "board"}));
+  const separation = (a1: number, a2: number, b1: number, b2: number) =>
+    Math.max(0, b1 - a2, a1 - b2);
+  const proximity = (target: Bounds) => Math.hypot(
+    separation(initial.left,initial.right,target.left,target.right),
+    separation(initial.top,initial.bottom,target.top,target.bottom),
+  );
+  let bestX: { offset: number; at: number; target: Bounds; proximity: number } | undefined,
     bestY: typeof bestX;
   for (const target of candidates) {
     for (const from of [
@@ -57,9 +68,10 @@ export function smartGuides(
         const offset = to - from;
         if (
           Math.abs(offset) <= threshold &&
-          (!bestX || Math.abs(offset) < Math.abs(bestX.offset))
+          (!bestX || Math.abs(offset) < Math.abs(bestX.offset) ||
+            Math.abs(offset) === Math.abs(bestX.offset) && proximity(target) < bestX.proximity)
         )
-          bestX = { offset, at: to, target };
+          bestX = { offset, at: to, target, proximity: proximity(target) };
       }
     for (const from of [
       initial.top,
@@ -74,9 +86,10 @@ export function smartGuides(
         const offset = to - from;
         if (
           Math.abs(offset) <= threshold &&
-          (!bestY || Math.abs(offset) < Math.abs(bestY.offset))
+          (!bestY || Math.abs(offset) < Math.abs(bestY.offset) ||
+            Math.abs(offset) === Math.abs(bestY.offset) && proximity(target) < bestY.proximity)
         )
-          bestY = { offset, at: to, target };
+          bestY = { offset, at: to, target, proximity: proximity(target) };
       }
   }
   const next = {
@@ -101,56 +114,75 @@ export function smartGuides(
       x1: Math.min(box.left, bestY.target.left) - 12 / zoom,
       x2: Math.max(box.right, bestY.target.right) + 12 / zoom,
     });
-  const nearest = new Map<string, { distance: number; guide: SmartGuide }>();
-  const offer = (side: string, distance: number, guide: SmartGuide) => {
+  const nearest = new Map<string, { distance: number; score: number; guide: SmartGuide }>();
+  const offer = (side: string, distance: number, perpendicular: number, guide: SmartGuide) => {
+    const score = Math.hypot(distance, perpendicular);
     if (
       distance > 0 &&
-      distance * zoom < 320 &&
-      distance < (nearest.get(side)?.distance ?? Infinity)
+      score < (nearest.get(side)?.score ?? Infinity)
     )
       nearest.set(side, {
         distance,
+        score,
         guide: { ...guide, label: `${Math.round(distance * 10) / 10} px` },
       });
   };
   for (const target of candidates) {
-    if (intersects(box.top, box.bottom, target.top, target.bottom)) {
-      const y =
+    if (!target.measure) continue;
+    {
+      const overlap = intersects(box.top, box.bottom, target.top, target.bottom);
+      const y = overlap ?
         (Math.max(box.top, target.top) + Math.min(box.bottom, target.bottom)) /
-        2;
-      offer("left", box.left - target.right, {
+        2 : (box.top + box.bottom) / 2;
+      const targetY = Math.max(target.top, Math.min(target.bottom, y));
+      const perpendicular = separation(box.top, box.bottom, target.top, target.bottom);
+      offer("left", box.left - target.right, perpendicular, {
         kind: "distance",
         x1: target.right,
         x2: box.left,
         y1: y,
         y2: y,
+        extensions: overlap ? [] : [{x1:target.right,y1:targetY,x2:target.right,y2:y}],
       });
-      offer("right", target.left - box.right, {
+      offer("right", target.left - box.right, perpendicular, {
         kind: "distance",
         x1: box.right,
         x2: target.left,
         y1: y,
         y2: y,
+        extensions: overlap ? [] : [{x1:target.left,y1:targetY,x2:target.left,y2:y}],
       });
     }
-    if (intersects(box.left, box.right, target.left, target.right)) {
-      const x =
+    {
+      const overlap = intersects(box.left, box.right, target.left, target.right);
+      const x = overlap ?
         (Math.max(box.left, target.left) + Math.min(box.right, target.right)) /
-        2;
-      offer("top", box.top - target.bottom, {
+        2 : (box.left + box.right) / 2;
+      const targetX = Math.max(target.left, Math.min(target.right, x));
+      const perpendicular = separation(box.left, box.right, target.left, target.right);
+      offer("top", box.top - target.bottom, perpendicular, {
         kind: "distance",
         x1: x,
         x2: x,
         y1: target.bottom,
         y2: box.top,
+        extensions: overlap ? [] : [{x1:targetX,y1:target.bottom,x2:x,y2:target.bottom}],
       });
-      offer("bottom", target.top - box.bottom, {
+      offer("bottom", target.top - box.bottom, perpendicular, {
         kind: "distance",
         x1: x,
         x2: x,
         y1: box.bottom,
         y2: target.top,
+        extensions: overlap ? [] : [{x1:targetX,y1:target.top,x2:x,y2:target.top}],
       });
+    }
+  }
+  for (const [a,b] of [["left","right"],["top","bottom"]]) {
+    const first = nearest.get(a), second = nearest.get(b);
+    if (first && second && Math.abs(first.distance - second.distance) < 0.05 &&
+      !first.guide.extensions?.length && !second.guide.extensions?.length) {
+      first.guide.equalSpacing = second.guide.equalSpacing = true;
     }
   }
   return {

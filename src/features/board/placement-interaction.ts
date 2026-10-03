@@ -12,6 +12,12 @@ const AREA_TOOLS = new Set([
 /** Area tools share Lock in time. Freehand drawing, filling and erasing do not. */
 export const usesAreaPlacement = (tool: string) => AREA_TOOLS.has(tool);
 
+/** The same activation delay applies to every Select mode and area tool. */
+export const placementLockDelay = (tool: string, enabled: boolean, milliseconds: number) =>
+  usesAreaPlacement(tool) && enabled && Number.isFinite(milliseconds)
+    ? Math.max(0, milliseconds)
+    : 0;
+
 export interface PlacementBounds {
   minX: number;
   minY: number;

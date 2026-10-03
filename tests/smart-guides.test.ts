@@ -11,3 +11,15 @@ test('Smart Guides show exact gaps and only snap when requested',()=>{
   assert.deepEqual(smartGuides(moving,{x:5,y:98},[other],1,true).position,{x:5,y:100});
   assert.equal(smartGuides(moving,{x:5,y:98},[other],4,true).position.y,98);
 });
+test('distance guides include diagonal neighbors, real board pixels at any zoom and equal spacing',()=>{
+  const moving=box('move',100,100),other=box('other',800,400);
+  for(const zoom of [0.25,1,4]) {
+    const result=smartGuides(moving,moving.position,[other],zoom,false);
+    assert.ok(result.guides.some(guide=>guide.label==='600 px'));
+    assert.ok(result.guides.some(guide=>guide.label==='250 px'&&guide.extensions?.length));
+    assert.deepEqual(result.position,moving.position);
+  }
+  const result=smartGuides(moving,{x:200,y:100},[box('left',0,100),box('right',400,100)],1,false);
+  assert.equal(result.guides.filter(guide=>guide.label==='100 px'&&guide.equalSpacing).length,2);
+  assert.equal(smartGuides(moving,moving.position,[{...other,type:'board'}],1,false).guides.filter(guide=>guide.label).length,0);
+});

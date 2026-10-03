@@ -315,7 +315,7 @@ test('cookie consent popups close without main-process errors and Web fullscreen
   assert.deepEqual(errors,[]);
 });
 
-test('desktop eyedropper reads the rendered pixel and applies it to the selected object', {timeout:30000},async t=>{
+test('desktop color sampling remains available internally without removed More tools', {timeout:30000},async t=>{
   const board=seed('select');board.elements=[
     {id:'target',type:'rectangle',position:{x:100,y:120},size:{width:120,height:90},content:'',color:'#ff0000',zIndex:1},
     {id:'source',type:'rectangle',position:{x:350,y:120},size:{width:120,height:90},content:'',color:'#34a853',zIndex:2},
@@ -324,10 +324,8 @@ test('desktop eyedropper reads the rendered pixel and applies it to the selected
   const source=await window.locator('[data-board-element-id="source"]').boundingBox();
   const point={x:source.x+source.width/2,y:source.y+source.height/2};
   assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),point),'#34a853');
-  await window.locator('[data-board-element-id="target"]').click();
-  await window.getByRole('button',{name:'More',exact:true}).click();await window.locator('[data-more-toolbar-item="eyedropper"]').getByRole('button',{name:'Eyedropper',exact:true}).click();
-  await window.mouse.click(point.x,point.y);
-  await expect.poll(async()=>JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8')).elements.find(element=>element.id==='target').color).toBe('#34a853');
+  await window.getByRole('button',{name:'More',exact:true}).click();
+  await expect(window.locator('[data-more-toolbar-item="eyedropper"],[data-more-toolbar-item="crop"]')).toHaveCount(0);
   await expect(window.getByRole('alert')).toHaveCount(0);
 });
 

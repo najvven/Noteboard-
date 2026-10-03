@@ -285,7 +285,7 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
     "data-general-settings-section",
     "toolbarCustomization",
   );
-  await expect(generalRows).toHaveCount(5);
+  await expect(generalRows).toHaveCount(6);
   await expect(
     generalMenu.getByText("Manage Settings", { exact: true }),
   ).toHaveCount(0);
@@ -353,8 +353,8 @@ test("keeps General Settings fixed and preserves workflow pins", async ({
   const moreMenu = page.locator(
     '[data-toolbar-item="more"] > .toolbar-dropdown',
   );
-  await expect(moreMenu.locator("[data-more-toolbar-item]")).toHaveCount(7);
-  for (const id of ["embed", "board", "link", "object-presets", "table", "crop", "eyedropper"]) {
+  await expect(moreMenu.locator("[data-more-toolbar-item]")).toHaveCount(5);
+  for (const id of ["embed", "board", "link", "object-presets", "table"]) {
     await expect(
       moreMenu.locator(`[data-more-toolbar-item="${id}"]`),
     ).toBeVisible();
@@ -989,7 +989,7 @@ test("shows every moved tool's complete menu inline in More", async ({
         .evaluate(
           (element) =>
             element.previousElementSibling?.getAttribute("data-more-toolbar-item") ===
-            "eyedropper",
+            "table",
         ),
     )
     .toBe(true);

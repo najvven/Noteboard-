@@ -42,7 +42,7 @@ test('spreadsheet editing keeps cell input separate from board gestures and pers
   await expect.poll(async()=>{
     const boards=await (await request.get('/api/pages')).json();
     const content=boards.find((board:any)=>board.id==='spreadsheet-check')?.elements.find((el:any)=>el.id==='sheet')?.content;
-    return content?JSON.parse(content).workbook.sheets['sheet-1'].cellData[0][1].v:null;
+    return content?JSON.parse(content).workbook.sheets['sheet-1'].cellData?.[0]?.[1]?.v??null:null;
   }).toBe(21);
   expect(errors).toEqual([]);
 });

@@ -38,6 +38,9 @@ test("spreadsheet thumbnails refresh the current snapshot without consuming Undo
   };
   const history = createBoardDocumentHistory(initial);
   document.preview = "data:image/png;base64,AAAA";
+  document.previewViewport = {width:648,height:396};
+  document.views = {'sheet-1':{sheetViewStartRow:10,sheetViewStartColumn:2,offsetX:4,offsetY:8}};
+  document.workbook.sheets!['sheet-1'].zoomRatio = 1.25;
   const painted = {
     ...initial,
     elements: [{ ...initial.elements[0], content: JSON.stringify(document) }],

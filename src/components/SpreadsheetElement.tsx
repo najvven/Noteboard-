@@ -11,8 +11,6 @@ import type { BoardElement } from "../types";
 import {
   createWorkbookDocument,
   parseWorkbookDocument,
-  workbookCellSize,
-  activeWorkbookSheet,
 } from "../features/spreadsheet/workbook";
 import {
   spreadsheetBridge,
@@ -41,6 +39,8 @@ export default function SpreadsheetElement({
     [notice, setNotice] = useState("");
   const [selection, setSelection] = useState<SpreadsheetSelection | null>(null);
   const [retry, setRetry] = useState(0);
+  const [visible, setVisible] = useState(false);
+  const object = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null),
     frame = useRef<HTMLIFrameElement>(null),
     importInput = useRef<HTMLInputElement>(null);
@@ -50,15 +50,29 @@ export default function SpreadsheetElement({
     lastEmitted = useRef("");
   const latest = useRef({ element, onUpdate });
   latest.current = { element, onUpdate };
-  const mounted = expanded || Boolean(isSelected && allowEditing);
+  const editing = expanded || Boolean(isSelected && allowEditing);
+  const editingRef = useRef(editing);
+  const sessionInteractive = useRef(editing);
+  editingRef.current = editing;
   const expandedRef = useRef(expanded);
   expandedRef.current = expanded;
   const document = useMemo(
     () => parseWorkbookDocument(element.content),
     [element.content],
   );
-  const previewSheet = activeWorkbookSheet(document);
-  const cellSize = workbookCellSize(document);
+  const width = element.size?.width ?? 720, height = element.size?.height ?? 420;
+  const previewValid = Boolean(document?.preview && document.previewViewport &&
+    Math.abs(document.previewViewport.width - (width - 2)) < 1 &&
+    Math.abs(document.previewViewport.height - (height - 34)) < 1);
+  // Only a visible invalid thumbnail needs a temporary renderer. Selecting an
+  // object uses the same cell renderer and viewport, without a second grid.
+  const mounted = editing || busy || visible && !previewValid;
+  useEffect(() => {
+    if (!object.current) return;
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting));
+    observer.observe(object.current);
+    return () => observer.disconnect();
+  }, []);
   const emit = (content: string, commit = false) => {
     if (!parseWorkbookDocument(content)) return;
     lastEmitted.current = content;
@@ -74,12 +88,14 @@ export default function SpreadsheetElement({
         content: initialContent.current,
         originalContent: originalContent.current,
         expanded: expandedRef.current,
+        interactive: editingRef.current,
       },
       "*",
     );
 
   useLayoutEffect(() => {
     if (!mounted) return;
+    sessionInteractive.current = editingRef.current;
     initialContent.current =
       latest.current.element.content ||
       JSON.stringify(createWorkbookDocument(element.name || "Spreadsheet"));
@@ -135,16 +151,43 @@ export default function SpreadsheetElement({
     };
   }, [mounted, retry]);
 
+  useLayoutEffect(() => {
+    // A thumbnail session has startup focus disabled. Start an input session
+    // when it is selected; inline/expanded editing keeps that same session.
+    if (mounted && editing && !sessionInteractive.current) {
+      sessionInteractive.current = true;
+      setRetry(value => value + 1);
+    }
+  }, [mounted, editing]);
+
   // The same iframe becomes a modal top-layer dialog. Its browsing context,
   // current selection and spreadsheet undo history survive both editing modes.
   useLayoutEffect(() => {
     const target = dialog.current;
     if (!mounted || !target) return;
-    target.close();
-    if (expanded) target.showModal();
-    else target.setAttribute("open", "");
-    if (!loading) void spreadsheetBridge(frame.current)?.setExpanded(expanded);
-  }, [mounted, expanded, loading]);
+    const api = spreadsheetBridge(frame.current);
+    api?.setInteractive(editing, busy);
+    if (expanded && !target.matches(':modal')) {
+      target.close();
+      target.showModal();
+    } else if (!expanded) {
+      if (target.matches(':modal')) target.close();
+      target.setAttribute("open", "");
+    }
+    if (!loading) void api?.setExpanded(expanded);
+    if (!editing && window.document.activeElement === frame.current)
+      object.current?.closest<HTMLElement>('[data-board-root]')?.focus({preventScroll:true});
+  }, [mounted, expanded, loading, editing, busy]);
+
+  useEffect(() => {
+    if (!mounted || loading || expanded || editing || busy || fatal) return;
+    let cancelled = false;
+    const api = spreadsheetBridge(frame.current);
+    void api?.setExpanded(false).then(() => api.capturePreview()).then(content => {
+      if (!cancelled && content) emit(content);
+    }).catch(reason => { if (!cancelled) setError(reason.message); });
+    return () => { cancelled = true; };
+  }, [mounted, loading, expanded, editing, busy, fatal, width, height, retry, element.content]);
 
   useEffect(() => {
     if (
@@ -186,7 +229,8 @@ export default function SpreadsheetElement({
     setBusy(true);
     setError("");
     try {
-      await spreadsheetBridge(frame.current)?.action(action);
+      const content = await spreadsheetBridge(frame.current)?.action(action);
+      if (content) emit(content, true);
     } catch (reason) {
       setError(
         reason instanceof Error ? reason.message : "Could not update cells.",
@@ -210,6 +254,7 @@ export default function SpreadsheetElement({
           file.name,
         );
         setNotice(warnings.join(" "));
+        emit(await api.flush(), true);
       } else if (action !== "import") {
         const bytes = await api.exportFile(action);
         const url = URL.createObjectURL(
@@ -269,6 +314,7 @@ export default function SpreadsheetElement({
   return (
     <>
       <div
+        ref={object}
         data-spreadsheet-object="true"
         className="relative overflow-hidden rounded-lg border border-slate-300 bg-white shadow-sm"
         style={{
@@ -276,88 +322,28 @@ export default function SpreadsheetElement({
           height: element.size?.height ?? 420,
         }}
       >
-        {document?.preview ? (
-          <img
-            src={document.preview}
-            draggable={false}
-            className="pointer-events-none h-full w-full object-fill"
-            alt={document.workbook.name || "Spreadsheet"}
-          />
-        ) : (
-          <div className="h-full w-full overflow-hidden">
-            <div className="flex h-8 items-center gap-2 border-b bg-slate-50 px-3 text-xs font-semibold">
-              <Table2 className="h-4 w-4" />
-              {element.name || "Spreadsheet"}
-            </div>
-            <table
-              aria-hidden="true"
-              className="table-fixed border-collapse text-[11px]"
-              style={{
-                width:
-                  Math.ceil((element.size?.width ?? 720) / cellSize.width) *
-                  cellSize.width,
-              }}
-            >
-              <tbody>
-                {Array.from(
-                  {
-                    length: Math.min(
-                      50,
-                      Math.ceil(
-                        (element.size?.height ?? 420) / cellSize.height,
-                      ),
-                    ),
-                  },
-                  (_, r) => (
-                    <tr key={r} style={{ height: cellSize.height }}>
-                      {Array.from(
-                        {
-                          length: Math.min(
-                            50,
-                            Math.ceil(
-                              (element.size?.width ?? 720) / cellSize.width,
-                            ),
-                          ),
-                        },
-                        (_, c) => {
-                          const cell = previewSheet?.cellData?.[r]?.[c],
-                            style =
-                              (typeof cell?.s === "string"
-                                ? document?.workbook.styles?.[cell.s]
-                                : cell?.s) || {};
-                          return (
-                            <td
-                              key={c}
-                              className="truncate border border-slate-200 px-1.5"
-                              style={{
-                                width: cellSize.width,
-                                backgroundColor: style.bg?.rgb,
-                                color: style.cl?.rgb,
-                                fontWeight: style.bl === 1 ? "bold" : undefined,
-                                fontStyle:
-                                  style.it === 1 ? "italic" : undefined,
-                              }}
-                            >
-                              {String(cell?.v ?? cell?.f ?? "")}
-                            </td>
-                          );
-                        },
-                      )}
-                    </tr>
-                  ),
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <div className="flex h-8 items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 text-xs font-semibold">
+          <Table2 className="h-4 w-4 shrink-0" />{element.name || "Spreadsheet"}
+        </div>
+        {previewValid ? <img
+          data-spreadsheet-preview="true"
+          src={document!.preview}
+          draggable={false}
+          className="pointer-events-none block w-full"
+          style={{height: "calc(100% - 32px)"}}
+          alt={document!.workbook.name || "Spreadsheet"}
+        /> : <div className="flex items-center justify-center text-xs text-slate-500" style={{height:"calc(100% - 32px)"}}>Preparing spreadsheet…</div>}
         {mounted && (
           <dialog
             ref={dialog}
             data-spreadsheet-editor={expanded ? "true" : undefined}
-            data-spreadsheet-inline={!expanded || undefined}
+            data-spreadsheet-inline={editing && !expanded || undefined}
+            data-spreadsheet-preview-renderer={!editing || undefined}
+            inert={!editing}
             aria-label={
-              expanded ? "Spreadsheet editor" : "Spreadsheet on board"
+              expanded ? "Spreadsheet editor" : editing ? "Spreadsheet on board" : "Spreadsheet preview"
             }
+            style={!editing ? {pointerEvents:"none"} : undefined}
             onCancel={(event) => {
               event.preventDefault();
               if (expanded && !loading && !fatal) void finish();
@@ -389,7 +375,7 @@ export default function SpreadsheetElement({
                   event.preventDefault();
                 }}
               >
-                {!expanded ? (
+                {!expanded ? editing && (
                   <button
                     type="button"
                     aria-label="Edit spreadsheet"
@@ -477,7 +463,9 @@ export default function SpreadsheetElement({
               key={retry}
               ref={frame}
               data-spreadsheet-element-id={element.id}
-              title="Spreadsheet cells"
+              data-spreadsheet-readonly={!editing || undefined}
+              title={editing ? "Spreadsheet cells" : "Spreadsheet preview"}
+              tabIndex={editing ? 0 : -1}
               src={new URL("sheet.html", window.location.href).href}
               onLoad={sendInit}
               className="block w-full border-0"
@@ -487,7 +475,7 @@ export default function SpreadsheetElement({
           </dialog>
         )}
       </div>
-      {mounted &&
+      {editing &&
         !expanded &&
         createPortal(
           <SpreadsheetPanel

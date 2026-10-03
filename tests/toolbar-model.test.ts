@@ -22,9 +22,14 @@ const DEFAULT_MORE_TOOL_IDS = [
   "link",
   "object-presets",
   "table",
-  "crop",
-  "eyedropper",
 ] as const;
+
+test('removed Crop and Eyedropper entries cannot reappear from saved layouts',()=>{
+  const layout=normalizeToolbarLayout({order:['crop','select','eyedropper','more'],more:['crop','eyedropper'],slots:{crop:3,eyedropper:7}});
+  for(const id of ['crop','eyedropper']) {
+    assert.ok(!layout.order.includes(id as any));assert.ok(!layout.more.includes(id as any));assert.ok(!Object.hasOwn(layout.slots??{},id));
+  }
+});
 
 test("the default toolbar keeps every composite tool and its controls visible", () => {
   assert.deepEqual(DEFAULT_TOOLBAR_LAYOUT.order, [

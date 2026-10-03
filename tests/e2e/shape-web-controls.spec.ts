@@ -12,11 +12,12 @@ const board = (id: string, tool = 'select', elements: any[] = []) => ({
 async function drawArea(page: Page, tool: string, points: number[][]) {
   const root = (await page.locator('[data-board-root]').boundingBox())!;
   if (tool === 'lasso') {
-    await page.mouse.move(root.x + points[0][0], root.y + points[0][1]); await page.mouse.down();
+    await page.mouse.move(root.x + points[0][0], root.y + points[0][1]); await page.mouse.down(); await page.waitForTimeout(300);
     for (const [x,y] of points.slice(1)) await page.mouse.move(root.x+x, root.y+y, {steps:5});
     await page.mouse.up();
   } else {
-    for (const [x,y] of points) await page.mouse.click(root.x+x, root.y+y);
+    await page.mouse.move(root.x+points[0][0],root.y+points[0][1]);await page.mouse.down();await page.waitForTimeout(300);await page.mouse.up();
+    for (const [x,y] of points.slice(1)) await page.mouse.click(root.x+x, root.y+y);
     await page.keyboard.press('Enter');
   }
 }

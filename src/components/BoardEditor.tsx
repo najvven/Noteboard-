@@ -70,6 +70,7 @@ import {
   isBoardPlacementSurface,
   shouldPreservePresetPicking,
   usesAreaPlacement,
+  placementLockDelay,
   resolveAreaDragPoint,
   getBoardPlacementRect,
   resolveLineDragPoint,
@@ -99,8 +100,7 @@ import {
   Table2,
   Lasso,
   LassoSelect,
-  Crop,
-  Pipette,
+  Ruler,
   ArrowLeft,
   Undo2,
   Redo2,
@@ -429,8 +429,6 @@ const TOOLBAR_ITEMS: {
   { id: "board", label: "New Board", icon: BoardSettingsIcon, slots: 2 },
   { id: "link", label: "Object Links", icon: Link2, slots: 2 },
   { id: "table", label: "Spreadsheet", icon: Table2, slots: 2 },
-  { id: "crop", label: "Crop", icon: Crop, slots: 2 },
-  { id: "eyedropper", label: "Eyedropper", icon: Pipette, slots: 2 },
   {
     id: "object-presets",
     label: "Object Presets",
@@ -481,6 +479,7 @@ const SETTINGS_SECTION_BY_ID = new Map(
 
 type GeneralSettingsAccordionId =
   | "toolbarCustomization"
+  | "alignmentGuides"
   | GeneralSettingsSectionId;
 
 const TOOLBAR_SLOT_WIDTH = 36;
@@ -1409,12 +1408,10 @@ export default function BoardEditor({
     initialEditorSettings.enableObjectSnapping ?? true,
   );
   const [smartGuidesEnabled,setSmartGuidesEnabled]=useState(initialEditorSettings.smartGuidesEnabled??true);
-  const [eyedropperTarget,setEyedropperTarget]=useState<'fill'|'stroke'|'text'>('fill');
-  const [sampledColor,setSampledColor]=useState('#000000'),[samplingError,setSamplingError]=useState('');
   const guidesOverlayRef=useRef<SmartGuidesHandle>(null);
   const setVisibleGuides=(guides:SmartGuide[])=>guidesOverlayRef.current?.setGuides(guides);
   const [activeTool, _setActiveTool] = useState<string>(
-    ["lasso", "polygon-select"].includes(initialEditorSettings.activeTool ?? "") ? "select" : initialEditorSettings.activeTool ?? "select",
+    ["lasso", "polygon-select", "crop", "eyedropper"].includes(initialEditorSettings.activeTool ?? "") ? "select" : initialEditorSettings.activeTool ?? "select",
   );
   const [selectMode, setSelectMode] = useState<SelectMode>(() => initialSelectMode(initialEditorSettings.selectMode, initialEditorSettings.activeTool));
   const SelectIcon = selectMode === "lasso" ? Lasso : selectMode === "polygon" ? LassoSelect : MousePointer2;
@@ -1589,8 +1586,8 @@ export default function BoardEditor({
     inputPoint = point,
   ) => {
     const startedAt = Date.now();
-    const waitsForSelectionLock =
-      usesAreaPlacement(tool) && isSelectionLockEnabled && selectionLockTime > 0;
+    const lockDelay = placementLockDelay(tool, isSelectionLockEnabled, selectionLockTime);
+    const waitsForSelectionLock = lockDelay > 0;
     if (holdingTimerRef.current) {
       clearTimeout(holdingTimerRef.current);
       holdingTimerRef.current = null;
@@ -1639,7 +1636,7 @@ export default function BoardEditor({
         setDragCurrent(activationPoint);
         setIsHoldingToCreate(true);
         holdingTimerRef.current = null;
-      }, Math.max(0, selectionLockTime));
+      }, lockDelay);
     }
   };
 
@@ -2431,6 +2428,7 @@ export default function BoardEditor({
       pressedKeysRef.current.delete(normalizeShortcutKey(e.key));
       setIsAltKeyDown(isShortcutPressed(cropShortcut));
       syncWebZoomState(isShortcutPressed(scrollZoomShortcut,e));
+      if (!e.ctrlKey && !e.metaKey) setVisibleGuides([]);
     };
     const handleBlur = () => {
       pressedKeysRef.current.clear();
@@ -3297,6 +3295,16 @@ export default function BoardEditor({
         Settings2,
         renderToolbarCustomizationSettings(false),
       )}
+      {renderGeneralSettingsAccordion(
+        "alignmentGuides",
+        "Alignment & spacing",
+        Ruler,
+        <button type="button" aria-label="Show alignment and spacing" aria-pressed={smartGuidesEnabled}
+          onClick={() => { setSmartGuidesEnabled(value => !value); setVisibleGuides([]); }}
+          className="flex w-full items-center justify-between gap-2 px-1 py-1 text-left text-xs font-bold text-gray-700">
+          <span>Show guides</span>{renderSwitch(smartGuidesEnabled)}
+        </button>,
+      )}
       {getGeneralSettingsSections(toolbarLayout)
         // Presets are managed by the Object Presets workflow in More; keep
         // legacy placement data readable without rendering a duplicate card.
@@ -3825,10 +3833,6 @@ export default function BoardEditor({
         return renderMenuSettingsBlock("media", true);
       case "table":
         return renderMenuSettingsBlock("table", true);
-      case "crop":
-        return renderMenuSettingsBlock(id,true);
-      case "eyedropper":
-        return <div className="flex flex-col gap-2"><div className="flex items-center justify-between gap-2 text-xs font-semibold text-gray-600"><span>Apply to</span><SegmentedControl label="Apply sampled color to" value={eyedropperTarget} onChange={setEyedropperTarget} options={[{value:'fill',label:'Fill'},{value:'stroke',label:'Stroke'},{value:'text',label:'Text'}]}/></div><div className="flex items-center gap-2 text-xs text-gray-600"><span className="h-5 w-5 rounded border border-gray-300" style={{backgroundColor:sampledColor}}/>{sampledColor.toUpperCase()}</div>{renderMenuSettingsBlock(id,true)}</div>;
       case "draw":
         return (
           <div className="flex flex-col gap-3">
@@ -4541,14 +4545,6 @@ export default function BoardEditor({
         setSelectedId(null);
         setActiveTool("table");
         break;
-      case "crop":
-        setActiveTool(id);
-        break;
-      case "eyedropper": {
-        const source=elements.find(element=>element.id===selectedId)?.type??activeTool;
-        setEyedropperTarget(elementColors(source).strokeOnly?'stroke':isTextToolActive(source)?'text':'fill');
-        setActiveTool(id);break;
-      }
       case "draw":
         setActiveTool("draw");
         break;
@@ -5718,8 +5714,6 @@ export default function BoardEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
-    if(activeTool==='eyedropper'){e.preventDefault();e.stopPropagation();if(e.button===0)void sampleColor(e.clientX,e.clientY);return;}
-    if(activeTool==='crop'){e.preventDefault();return;}
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
       activePointerIdRef.current !== null &&
@@ -6024,6 +6018,21 @@ export default function BoardEditor({
       // Keep physical movement until geometry is resolved. Early rounding
       // erased tiny reverse drags and changed their quadrant.
       updateAreaGesture({ x: cx, y: cy });
+      if (smartGuidesEnabled && activeAreaGesture.activated && SHAPE_TYPES.includes(activeTool)) {
+        const current = resolvePlacementPoint(activeAreaGesture.start, activeAreaGesture.current, activeTool);
+        const rect = activeTool === 'line' || activeTool === 'arrow'
+          ? getLinePlacementRect(activeAreaGesture.start, current, gridSize, snapToGrid).rect
+          : getMinimumAreaRect(activeAreaGesture.start, current, gridSize, bounds ?? undefined);
+        const preview = buildRegionElement(activeTool as ElementType, rect,
+          activeTool === 'line' || activeTool === 'arrow' ? {rotation:getLinePlacementRect(activeAreaGesture.start,current,gridSize,snapToGrid).rotation} : undefined);
+        updateSmartGuides(preview, preview.position, false);
+      }
+    } else if (!isInteracting && smartGuidesEnabled && activeTool === 'select') {
+      const hoveredId = (e.target as HTMLElement).closest?.('[data-board-element-id]')?.getAttribute('data-board-element-id');
+      const selected = elementsRef.current.find(element => element.id === selectedId);
+      const hovered = elementsRef.current.find(element => element.id === hoveredId && element.id !== selectedId && elementHierarchy.isVisible(element.id,respectLayerVisibility));
+      setVisibleGuides((e.ctrlKey || e.metaKey) && selected && hovered
+        ? smartGuides(selected,selected.position,[hovered],zoom,false).guides : []);
     }
   };
 
@@ -6130,6 +6139,7 @@ export default function BoardEditor({
       setIsInteracting(false);setVisibleGuides([]);return;
     }
     if(outlineSelection.end(event))return;
+    setVisibleGuides([]);
     const latestElements = elementsRef.current;
     const activeBounds =
       activeSurfaceBoundsRef.current ??
@@ -6495,27 +6505,6 @@ export default function BoardEditor({
     setIsInteracting(false);
   };
 
-  const sampleColor=async(x:number,y:number)=>{
-    try {
-      setSamplingError('');
-      let color:string;
-      if(window.noteboardAPI?.sampleBoardColor)color=await window.noteboardAPI.sampleBoardColor({x,y});
-      else {
-        const Picker=(window as any).EyeDropper;
-        if(!Picker)throw Error('Color sampling is available in the desktop app and browsers with an eyedropper.');
-        color=(await new Picker().open()).sRGBHex;
-      }
-      if(!/^#[a-f0-9]{6}$/i.test(color))throw Error('Could not read the selected color.');
-      setSampledColor(color);
-      const property=eyedropperTarget==='fill'?'color':eyedropperTarget==='stroke'?'borderColor':'textColor';
-      setPendingProps(current=>({...current,[property]:color}));
-      const selected=elementsRef.current.find(element=>element.id===selectedId);
-      if(selected&&elementColors(selected.type)[eyedropperTarget]){
-        if(eyedropperTarget==='text')changeTextColor(color);else updateElement(selected.id,{[property]:color});
-      }
-      finishToolUse('eyedropper');
-    }catch(error){if((error as any)?.name!=='AbortError')setSamplingError((error as any)?.message||'Could not read the selected color.');}
-  };
   const updateSmartGuides=(element:BoardElement,position:{x:number;y:number},allowSnap=true,excludedIds?:Set<string>)=>{
     if(!smartGuidesEnabled)return position;
     const others=elementsRef.current.filter(other=>!excludedIds?.has(other.id)&&!elementHierarchy.isDescendantOf(other.id,element.id)&&elementHierarchy.isVisible(other.id,respectLayerVisibility));
@@ -6523,6 +6512,7 @@ export default function BoardEditor({
     setVisibleGuides(result.guides);return result.position;
   };
   const outlineSelection=useOutlineSelection({tool:activeTool,mode:selectMode,zoom,surface:boardSurfaceRef,elements,selectedIds,
+    lockDelay:placementLockDelay('select',isSelectionLockEnabled,selectionLockTime),
     onSelect:ids=>{setSelectedIds(ids);finishToolUse(activeTool);},
     onArea:outline=>setQuickAddRegion(outline?createSelectionArea(outline):null),
     respectVisibility:respectLayerVisibility,capture:captureSurfacePointer,onInteraction:setIsInteracting});
@@ -7367,7 +7357,6 @@ export default function BoardEditor({
                   {renderToolMenuTitle("More", "-mx-1 -mt-1 mb-1")}
                   <div className="mx-1 mb-1 rounded-lg border border-gray-200 bg-gray-50 p-1">
                     {renderAlwaysOnTopControl("more")}
-                    <button type="button" aria-pressed={smartGuidesEnabled} onClick={()=>{setSmartGuidesEnabled(value=>!value);setVisibleGuides([]);}} className="flex w-full items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-2 py-2 text-xs font-bold text-gray-700"><span>Smart guides</span>{renderSwitch(smartGuidesEnabled)}</button>
                   </div>
                   {toolbarLayout.more.map((id) => {
                     const item = TOOLBAR_ITEMS.find(
@@ -8021,7 +8010,7 @@ export default function BoardEditor({
                   className="absolute inset-0 overflow-visible pointer-events-none"
                   data-board-surface="true"
                 >
-                {(outlineSelection.enabled||activeTool==='eyedropper')&&<div data-selection-tool={outlineSelection.enabled ? selectMode : activeTool} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
+                {outlineSelection.enabled&&<div data-selection-tool={selectMode} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
                   onDoubleClick={event=>{if(selectMode==='polygon'&&outlineSelection.points.length>=3){event.preventDefault();event.stopPropagation();outlineSelection.finish();}}}/>}
                 {outlineSelection.points.length>0&&<svg className="pointer-events-none absolute inset-0 overflow-visible" data-selection-outline={selectMode} style={{width:pageDimensions.width,height:pageDimensions.height,zIndex:100001}}>
                   <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')}`} fill="none" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} />
@@ -9359,7 +9348,6 @@ export default function BoardEditor({
           </div>
 
           {/* Unified Floating Properties Panel */}
-          {samplingError&&<div role="alert" className="absolute bottom-24 left-1/2 z-50 flex max-w-lg -translate-x-1/2 items-center gap-3 rounded-xl border border-red-200 bg-white p-3 text-sm text-red-700 shadow-lg">{samplingError}<button type="button" title="Dismiss" onClick={()=>setSamplingError('')}><X className="h-4 w-4"/></button></div>}
           {selectedIds.length>1&&!toolbarEditingMode&&<ToolPropertiesBar key="selection-toolbar">
             <div className="flex h-12 items-center gap-3 px-2 text-xs font-semibold">
               <span role="status">{selectedIds.length} selected</span>

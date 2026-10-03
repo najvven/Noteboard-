@@ -42,7 +42,15 @@ export function equalDocumentValue(left: unknown, right: unknown): boolean {
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].every(key => {
     if(key==='content' && a.type==='table' && b.type==='table' && typeof a[key]==='string' && typeof b[key]==='string' && a[key]!==b[key]){
       const leftBook=parseWorkbookDocument(a[key]),rightBook=parseWorkbookDocument(b[key]);
-      if(leftBook&&rightBook){delete leftBook.preview;delete rightBook.preview;return equalDocumentValue(leftBook,rightBook);}
+      if(leftBook&&rightBook){
+        for (const book of [leftBook,rightBook]) {
+          delete book.preview;delete book.previewViewport;delete book.views;delete book.activeSheetId;
+          for (const sheet of Object.values(book.workbook.sheets ?? {})) {
+            delete sheet.zoomRatio;delete sheet.scrollTop;delete sheet.scrollLeft;
+          }
+        }
+        return equalDocumentValue(leftBook,rightBook);
+      }
     }
     return equalDocumentValue(a[key], b[key]);
   });

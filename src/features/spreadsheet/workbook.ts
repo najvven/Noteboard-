@@ -9,6 +9,10 @@ export interface WorkbookDocument {
   workbook: Partial<IWorkbookData>;
   activeSheetId?: string;
   preview?: string;
+  /** Logical on-board viewport; previews are clipped at native cell size. */
+  previewViewport?: { width: number; height: number };
+  /** Univer's live scroll position is not included in workbook.save(). */
+  views?: Record<string, {sheetViewStartRow: number; sheetViewStartColumn: number; offsetX: number; offsetY: number}>;
 }
 
 export function createWorkbookDocument(
@@ -74,11 +78,12 @@ export function withWorkbookCellSize(content: string, width: number, height: num
   const sheet = activeWorkbookSheet(document)!;
   document.activeSheetId=sheet.id;
   const size = normalizeCellSize(width, height);
+  delete document.preview;
+  delete document.previewViewport;
   sheet.defaultColumnWidth = size.width;
   sheet.defaultRowHeight = size.height;
   for (const column of Object.values(sheet.columnData ?? {})) if (column) delete column.w;
   for (const row of Object.values(sheet.rowData ?? {})) if (row) { delete row.h; delete row.ah; row.ia = 0; }
-  delete document.preview;
   return JSON.stringify(document);
 }
 
@@ -137,6 +142,18 @@ export function parseWorkbookDocument(
       !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(value.preview)
     )
       delete value.preview;
+    if (!value.preview || !Number.isFinite(value.previewViewport?.width) ||
+      !Number.isFinite(value.previewViewport?.height) ||
+      value.previewViewport!.width <= 0 || value.previewViewport!.height <= 0)
+      delete value.previewViewport;
+    if (value.views && (typeof value.views !== 'object' || Array.isArray(value.views))) delete value.views;
+    for (const [id,view] of Object.entries(value.views ?? {})) {
+      const sheet = book.sheets[id];
+      if (!Object.hasOwn(book.sheets,id) || !view ||
+        !Number.isInteger(view.sheetViewStartRow) || view.sheetViewStartRow < 0 || view.sheetViewStartRow >= sheet.rowCount ||
+        !Number.isInteger(view.sheetViewStartColumn) || view.sheetViewStartColumn < 0 || view.sheetViewStartColumn >= sheet.columnCount ||
+        !Number.isFinite(view.offsetX) || !Number.isFinite(view.offsetY)) delete value.views![id];
+    }
     return value;
   } catch {
     return null;
@@ -283,6 +300,8 @@ export function readLiveWorkbookSnapshots(elements: readonly BoardElement[],forH
   document
     .querySelectorAll<HTMLIFrameElement>("iframe[data-spreadsheet-element-id]")
     .forEach((frame) => {
+      // A temporary thumbnail renderer owns no user input or document edits.
+      if (frame.dataset.spreadsheetReadonly === "true") return;
       try {
         const api=(frame.contentWindow as any)?.noteboardSheet;
         const value=forHistory ? api?.historySnapshot?.() ?? api?.snapshot?.() : api?.snapshot?.();

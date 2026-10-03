@@ -18,16 +18,14 @@ const SmartGuidesOverlay = forwardRef<
       style={{ width, height, zIndex: 100002 }}
     >
       {guides.map((guide, index) => (
-        <g key={index} stroke="#d946b5" strokeWidth={1 / zoom}>
+        <g key={index} data-guide-kind={guide.kind} data-equal-spacing={guide.equalSpacing || undefined} stroke="#d946b5" strokeWidth={1 / zoom}>
           <line
             x1={guide.x1}
             y1={guide.y1}
             x2={guide.x2}
             y2={guide.y2}
-            strokeDasharray={
-              guide.kind === "alignment" ? `${4 / zoom} ${3 / zoom}` : undefined
-            }
           />
+          {guide.extensions?.map((segment,i) => <line key={`extension-${i}`} {...segment} strokeDasharray={`${3 / zoom} ${3 / zoom}`} />)}
           {guide.kind === "distance" && (
             <>
               {[

@@ -104,10 +104,19 @@ Do not replace product requirements with generic UI preferences.
   area action bar. Copy/Merge use that contour's hits, including concave notches,
   and retain editable whole objects. Pasting fits editable contents to area bounds.
   Shift/Alt retain additive/subtractive object selection behavior.
-- Smart Guides show actual alignment and distances, and snapping uses the existing
-  object-snapping preference. Crop retains the source image/video and resizes its
-  crop independently of ratio. Native Eyedropper samples the actual rendered pixel
-  inside the app and applies the chosen supported color property.
+- Alignment & spacing is a General Settings option. Show alignment, equal gaps and
+  actual pixel distances to nearby objects, including diagonal neighbors and long
+  gaps; snapping uses the existing object-snapping preference. Crop and Eyedropper
+  have no toolbar or More entry, including migrated saved layouts. Alt cropping
+  retains the source image/video, independent of ratio, and remains undoable.
+- Rectangle, Lasso and Polygon share the configured Lock in time. Release before
+  activation cancels; activation anchors at the live pointer. Polygon delays only
+  its initial vertex and subsequent vertices remain clicks on an open chain.
+- Spreadsheet previews and inline editing use the same renderer and viewport.
+  Retain scroll/zoom and active worksheet, restore complete expanded menus, keep
+  pending edits alive after deselection and prevent inactive frames from stealing
+  focus. View-only changes create no canvas Undo; file export retains calculated
+  formula results even when the editor was opened without changing values.
 - The old Section-cell formula engine is replaced by workbook objects. Convert old
   data once on import, preserve cell values/formulas/styles, and discard old computed
   caches. Keep a single workbook snapshot through clone, history, save and export.

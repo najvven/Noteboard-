@@ -34,9 +34,11 @@ export interface SpreadsheetBridge {
   historySnapshot(): string;
   flush(): Promise<string>;
   setExpanded(expanded: boolean): Promise<void>;
+  setInteractive(interactive: boolean, pendingAction?: boolean): void;
+  capturePreview(): Promise<string>;
   replaceContent(content: string): Promise<void>;
   setCellDimensions(width: number, height: number): Promise<string>;
-  action(action: SpreadsheetAction): Promise<void>;
+  action(action: SpreadsheetAction): Promise<string>;
   importSheets(bytes: ArrayBuffer, name: string): Promise<string[]>;
   exportFile(format: "xlsx" | "csv"): Promise<ArrayBuffer>;
 }

@@ -25,6 +25,7 @@ export function useOutlineSelection({
   capture,
   onInteraction,
   onArea,
+  lockDelay,
 }: {
   tool: string;
   mode: SelectMode;
@@ -37,6 +38,7 @@ export function useOutlineSelection({
   capture: (event: PointerEvent) => void;
   onInteraction: (active: boolean) => void;
   onArea?: (outline: Position[] | null) => void;
+  lockDelay: number;
 }) {
   const enabled = tool === "select" && mode !== "rectangle";
   const [points, setPoints] = useState<Position[]>([]),
@@ -46,11 +48,19 @@ export function useOutlineSelection({
     operation = useRef<SelectionOperation>("replace"),
     baseline = useRef<string[]>([]);
   const ownsArea = useRef(false);
+  const pending = useRef<{ pointerId: number; point: Position } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearPending = () => {
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
+    pending.current = null;
+  };
   const replacePath = (value: Position[]) => {
     path.current = value;
     setPoints(value);
   };
   const cancel = () => {
+    clearPending();
     replacePath([]);
     setHover(null);
     pointer.current = null;
@@ -60,7 +70,8 @@ export function useOutlineSelection({
     if (ownsArea.current && tool !== "select" && tool !== "pan") onArea?.(null);
     ownsArea.current = false;
     cancel();
-  }, [tool, mode]);
+    return () => clearPending();
+  }, [tool, mode, lockDelay]);
   const point = (event: { clientX: number; clientY: number }) => {
     const rect = surface.current!.getBoundingClientRect();
     return {
@@ -83,6 +94,7 @@ export function useOutlineSelection({
   };
   const begin = (event: PointerEvent) => {
     if (!enabled) return false;
+    if (pointer.current !== null && pointer.current !== event.pointerId) return true;
     event.preventDefault();
     event.stopPropagation();
     surface.current?.focus({preventScroll:true});
@@ -102,6 +114,23 @@ export function useOutlineSelection({
         : event.shiftKey
           ? "add"
           : "replace";
+      if (lockDelay > 0) {
+        clearPending();
+        pending.current = { pointerId: event.pointerId, point: next };
+        pointer.current = event.pointerId;
+        capture(event);
+        onInteraction(true);
+        timer.current = setTimeout(() => {
+          const activation = pending.current;
+          if (!activation || pointer.current !== activation.pointerId) return;
+          // Match Rectangle: movement before activation is discarded and the
+          // anchor starts at the live cursor. Later Polygon vertices are clicks.
+          replacePath([activation.point]);
+          setHover(mode === "polygon" ? activation.point : null);
+          clearPending();
+        }, lockDelay);
+        return true;
+      }
     }
     if (mode === "polygon") {
       if (
@@ -124,6 +153,10 @@ export function useOutlineSelection({
   const move = (event: PointerEvent) => {
     if (!enabled) return false;
     const next = point(event);
+    if (pending.current) {
+      if (pending.current.pointerId === event.pointerId) pending.current.point = next;
+      return true;
+    }
     if (mode === "polygon") {
       if (path.current.length) setHover(next);
     } else if (pointer.current === event.pointerId) {
@@ -141,16 +174,22 @@ export function useOutlineSelection({
   };
   const end = (event?: { pointerId: number }) => {
     if (!enabled) return false;
+    if (event && pointer.current !== null && event.pointerId !== pointer.current) return true;
+    if (pending.current) { cancel(); return true; }
     if (
       mode === "lasso" &&
       pointer.current !== null &&
       (!event || pointer.current === event.pointerId)
     )
       finish();
+    else if (mode === "polygon" && pointer.current !== null) {
+      pointer.current = null;
+      onInteraction(false);
+    }
     return true;
   };
   const key = (event: KeyboardEvent) => {
-    if (!enabled || !path.current.length) return false;
+    if (!enabled || (!path.current.length && !pending.current)) return false;
     if (event.key === "Escape") cancel();
     else if (event.key === "Enter" && path.current.length >= 3) finish();
     else if (event.key === "Backspace" && mode === "polygon")

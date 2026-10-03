@@ -7,7 +7,8 @@ Desktop whiteboard and spatial note-taking application built with Electron, Reac
 - Spatial boards, nested boards, layers, drawing, media, links, web fields, presets, and package import/export.
 - Spreadsheet objects with a full workbook editor: formulas, multiple sheets, formatting, sorting, filtering, validation and conditional formatting. Cell input is isolated from canvas gestures; formula calculation and file exchange use local workers.
 - XLSX/CSV/TSV import adds sheets without overwriting the current workbook. XLSX export covers values, formulas and basic cell formatting, merges and dimensions; CSV exports the current sheet. Existing Section spreadsheets migrate into the new workbook format.
-- Polygon selection, freehand Lasso, group operations, Smart Guides with distances, lossless image/video cropping and a desktop pixel Eyedropper.
+- Select has exactly three modes: Rectangle, freehand Lasso and Polygon. Polygon previews remain an open point/segment chain until explicitly closed. Editable area actions, groups, Smart Guides, lossless image/video cropping and desktop pixel Eyedropper remain available.
+- Spreadsheets can be edited on the board with a contextual right panel or in the expanded editor. Both modes share one live workbook and cell undo history. Cell dimensions are new-sheet defaults before creation and belong to the selected sheet afterwards; cell selection and object sizing follow its grid.
 - Shared validation and bounded archive/file handling across the browser server and Electron desktop runtime.
 - Save as Template, an independent New Board, or a portable ZIP file with embedded media.
 - Full Web pages in Electron and supported YouTube video embeds in browser previews.
@@ -20,7 +21,7 @@ Desktop whiteboard and spatial note-taking application built with Electron, Reac
 ## Architecture
 
 - `src/features/board/` owns immutable board cloning, package placement, document history, hierarchy indexing, and migration.
-- `src/features/spreadsheet/` owns workbook snapshots, legacy data conversion, the isolated Univer editor and its formula/file workers. `SpreadsheetElement.tsx` coordinates the board preview and editor dialog.
+- `src/features/spreadsheet/` owns workbook snapshots, legacy data conversion, the isolated Univer editor and its formula/file workers. `SpreadsheetElement.tsx` coordinates one inline/expanded session; `SpreadsheetPanel.tsx` supplies contextual cell controls.
 - `src/features/toolbar/`, `src/features/web/`, and `src/features/home/` contain focused UI-domain models.
 - `shared/` contains runtime-neutral validation, persistence, archive streaming, security, and site-boundary adapters used by the server and Electron shell.
 - `src/components/BoardEditor.tsx` remains the interaction coordinator while delegating reusable domain work to those modules.

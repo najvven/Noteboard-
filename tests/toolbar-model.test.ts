@@ -22,8 +22,6 @@ const DEFAULT_MORE_TOOL_IDS = [
   "link",
   "object-presets",
   "table",
-  "polygon-select",
-  "lasso",
   "crop",
   "eyedropper",
 ] as const;

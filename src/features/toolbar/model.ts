@@ -18,8 +18,6 @@ export const TOOLBAR_ITEM_IDS = [
   "link",
   "object-presets",
   "table",
-  "polygon-select",
-  "lasso",
   "crop",
   "eyedropper",
   "more",
@@ -68,8 +66,6 @@ export const BUILT_IN_MORE_TOOL_IDS = [
   "link",
   "object-presets",
   "table",
-  "polygon-select",
-  "lasso",
   "crop",
   "eyedropper",
 ] as const satisfies readonly ToolbarItemId[];

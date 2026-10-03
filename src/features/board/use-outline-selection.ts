@@ -6,6 +6,7 @@ import {
   type RefObject,
 } from "react";
 import type { BoardElement, Position } from "../../types";
+import type { SelectMode } from './select-mode';
 import {
   combineSelection,
   selectElementsInOutline,
@@ -14,6 +15,7 @@ import {
 
 export function useOutlineSelection({
   tool,
+  mode,
   zoom,
   surface,
   elements,
@@ -25,6 +27,7 @@ export function useOutlineSelection({
   onArea,
 }: {
   tool: string;
+  mode: SelectMode;
   zoom: number;
   surface: RefObject<HTMLDivElement>;
   elements: readonly BoardElement[];
@@ -35,7 +38,7 @@ export function useOutlineSelection({
   onInteraction: (active: boolean) => void;
   onArea?: (outline: Position[] | null) => void;
 }) {
-  const enabled = tool === "polygon-select" || tool === "lasso";
+  const enabled = tool === "select" && mode !== "rectangle";
   const [points, setPoints] = useState<Position[]>([]),
     [hover, setHover] = useState<Position | null>(null);
   const path = useRef<Position[]>([]),
@@ -57,7 +60,7 @@ export function useOutlineSelection({
     if (ownsArea.current && tool !== "select" && tool !== "pan") onArea?.(null);
     ownsArea.current = false;
     cancel();
-  }, [tool]);
+  }, [tool, mode]);
   const point = (event: { clientX: number; clientY: number }) => {
     const rect = surface.current!.getBoundingClientRect();
     return {
@@ -66,6 +69,7 @@ export function useOutlineSelection({
     };
   };
   const finish = () => {
+    if (path.current.length < 3) { cancel(); return; }
     ownsArea.current = operation.current === "replace";
     onArea?.(operation.current === "replace" ? [...path.current] : null);
     onSelect(
@@ -81,6 +85,7 @@ export function useOutlineSelection({
     if (!enabled) return false;
     event.preventDefault();
     event.stopPropagation();
+    surface.current?.focus({preventScroll:true});
     window.getSelection()?.removeAllRanges();
     if (event.button !== 0) {
       onArea?.(null);
@@ -98,7 +103,7 @@ export function useOutlineSelection({
           ? "add"
           : "replace";
     }
-    if (tool === "polygon-select") {
+    if (mode === "polygon") {
       if (
         path.current.length >= 3 &&
         Math.hypot(next.x - path.current[0].x, next.y - path.current[0].y) *
@@ -119,7 +124,7 @@ export function useOutlineSelection({
   const move = (event: PointerEvent) => {
     if (!enabled) return false;
     const next = point(event);
-    if (tool === "polygon-select") {
+    if (mode === "polygon") {
       if (path.current.length) setHover(next);
     } else if (pointer.current === event.pointerId) {
       const last = path.current.at(-1)!;
@@ -137,7 +142,7 @@ export function useOutlineSelection({
   const end = (event?: { pointerId: number }) => {
     if (!enabled) return false;
     if (
-      tool === "lasso" &&
+      mode === "lasso" &&
       pointer.current !== null &&
       (!event || pointer.current === event.pointerId)
     )
@@ -148,13 +153,13 @@ export function useOutlineSelection({
     if (!enabled || !path.current.length) return false;
     if (event.key === "Escape") cancel();
     else if (event.key === "Enter" && path.current.length >= 3) finish();
-    else if (event.key === "Backspace" && tool === "polygon-select")
+    else if (event.key === "Backspace" && mode === "polygon")
       replacePath(path.current.slice(0, -1));
     else return false;
     event.preventDefault();
     return true;
   };
   const outline =
-    hover && tool === "polygon-select" ? [...points, hover] : points;
+    hover && mode === "polygon" ? [...points, hover] : points;
   return { enabled, begin, move, end, key, cancel, finish, points, outline };
 }

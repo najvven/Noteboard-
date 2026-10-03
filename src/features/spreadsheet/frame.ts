@@ -19,14 +19,21 @@ import {
   cellFromInput,
   MAX_WORKBOOK_CHARACTERS,
   parseWorkbookDocument,
+  normalizeCellSize,
   type WorkbookDocument,
 } from "./workbook";
+import type { SpreadsheetAction, SpreadsheetSelection } from "./editor-bridge";
 
 let api: ReturnType<typeof createUniver>["univerAPI"] | undefined;
 let token = "",
   timer = 0,
   lastSent = "",
   initialized = false;
+let previewKey = "",
+  cachedPreview: string | undefined;
+let historyBaseline = "",
+  historyDirty = false,
+  ready = false;
 const send = (type: string, payload: Record<string, unknown> = {}) =>
   parent.postMessage(
     { source: "noteboard-sheet", type, token, ...payload },
@@ -83,7 +90,7 @@ function preview() {
   }
 }
 
-function snapshot() {
+function snapshot(includePreview = true) {
   const book = api?.getActiveWorkbook();
   if (!book) return "";
   const value: WorkbookDocument = {
@@ -91,7 +98,6 @@ function snapshot() {
     version: 1,
     workbook: book.isCellEditing() ? structuredClone(book.save()) : book.save(),
     activeSheetId: book.getActiveSheet().getSheetId(),
-    preview: preview(),
   };
   // Include the current draft in autosave without ending the user's cell edit.
   if (book.isCellEditing()) {
@@ -106,6 +112,13 @@ function snapshot() {
       row[c] = { s: row[c]?.s, ...cellFromInput(text) };
     }
   }
+  const key = JSON.stringify(value);
+  if (!includePreview) return key;
+  if (key !== previewKey) {
+    previewKey = key;
+    cachedPreview = preview();
+  }
+  value.preview = cachedPreview;
   return JSON.stringify(value);
 }
 async function flush() {
@@ -114,8 +127,20 @@ async function flush() {
   await api?.getFormula().onCalculationResultApplied(15000);
   await repaint();
   const content = snapshot();
+  if (content && !parseWorkbookDocument(content))
+    throw Error(
+      "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
+    );
   if (content) send("changed", { content });
   return content;
+}
+
+// Workbook initialization, calculated caches and selection thumbnails are
+// derived state. Merely opening another sheet must not consume a canvas Undo.
+function historySnapshot() {
+  return historyDirty || api?.getActiveWorkbook()?.isCellEditing()
+    ? snapshot()
+    : historyBaseline;
 }
 async function exchange(data: Record<string, unknown>) {
   const worker = new Worker(new URL("./exchange.worker.ts", import.meta.url), {
@@ -214,7 +239,159 @@ async function exportFile(format: "xlsx" | "csv") {
     format,
   });
 }
-(window as any).noteboardSheet = { snapshot, flush, importSheets, exportFile };
+function sendSelection() {
+  const sheet = api?.getActiveWorkbook()?.getActiveSheet(),
+    range = sheet?.getActiveRange();
+  if (!sheet || !range) return;
+  const cell =
+    sheet.getActiveCell() ??
+    sheet.getRange(range.getRow(), range.getColumn(), 1, 1);
+  const style = cell.getCellStyleData() ?? {};
+  const selection: SpreadsheetSelection = {
+    sheetId: sheet.getSheetId(),
+    address: range.getA1Notation(),
+    input: cell.getFormula() || String(cell.getValue() ?? ""),
+    bold: style.bl === 1,
+    italic: style.it === 1,
+    fontSize: style.fs ?? 11,
+    color: String((style.cl || {}).rgb || "#000000"),
+    fill: String((style.bg || {}).rgb || "#ffffff"),
+    numberFormat: cell.getNumberFormat(),
+    alignment: cell.getHorizontalAlignment(),
+  };
+  send("selection", { selection });
+}
+
+async function setExpanded(expanded: boolean) {
+  if (!api) return;
+  api
+    .setUIVisible(api.Enum.BuiltInUIPart.HEADER, expanded)
+    .setUIVisible(api.Enum.BuiltInUIPart.TOOLBAR, expanded);
+  await repaint();
+}
+
+async function replaceContent(content: string) {
+  const value = parseWorkbookDocument(content);
+  if (!api || !value) throw Error("Invalid spreadsheet data.");
+  clearTimeout(timer);
+  ready = false;
+  historyBaseline = content;
+  historyDirty = false;
+  const old = api.getActiveWorkbook(),
+    address = old?.getActiveSheet().getActiveRange()?.getA1Notation();
+  if (old) api.disposeUnit(old.getId());
+  const book = api.createWorkbook(value.workbook);
+  if (value.activeSheetId && book.getSheetBySheetId(value.activeSheetId))
+    book.setActiveSheet(value.activeSheetId);
+  if (address) book.getActiveSheet().getRange(address).activate();
+  lastSent = content;
+  api.getFormula().executeCalculation();
+  await repaint();
+  ready = true;
+  sendSelection();
+}
+
+async function setCellDimensions(width: number, height: number) {
+  const book = api?.getActiveWorkbook();
+  if (!book) throw Error("The spreadsheet is not ready.");
+  await book.endEditingAsync(true);
+  const sheet = book.getActiveSheet(),
+    size = normalizeCellSize(width, height);
+  if (sheet.getColumnWidth(0) !== size.width)
+    sheet.setColumnWidths(0, sheet.getSheet().getColumnCount(), size.width);
+  if (sheet.getRowHeight(0) !== size.height)
+    sheet.setRowHeightsForced(0, sheet.getSheet().getRowCount(), size.height);
+  // Capture this property transaction before another cell input can start.
+  // The scheduled mutation snapshot paints its thumbnail after layout settles.
+  const content = snapshot(false);
+  if (!parseWorkbookDocument(content))
+    throw Error(
+      "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
+    );
+  return content;
+}
+
+async function action(action: SpreadsheetAction) {
+  const book = api?.getActiveWorkbook();
+  if (!book || !api) throw Error("The spreadsheet is not ready.");
+  await book.endEditingAsync(true);
+  const sheet = book.getActiveSheet(),
+    range = sheet.getActiveRange();
+  if (action.type === "undo") await api.undo();
+  else if (action.type === "redo") await api.redo();
+  else {
+    if (!range) return;
+    switch (action.type) {
+      case "value":
+        (
+          sheet.getActiveCell() ??
+          sheet.getRange(range.getRow(), range.getColumn(), 1, 1)
+        ).setValue(action.value);
+        break;
+      case "bold":
+        range.setFontWeight(action.value ? "bold" : "normal");
+        break;
+      case "italic":
+        range.setFontStyle(action.value ? "italic" : "normal");
+        break;
+      case "fontSize":
+        range.setFontSize(action.value);
+        break;
+      case "color":
+        range.setFontColor(action.value);
+        break;
+      case "fill":
+        range.setBackgroundColor(action.value);
+        break;
+      case "numberFormat":
+        range.setNumberFormat(action.value);
+        break;
+      case "align":
+        range.setHorizontalAlignment(
+          action.value === "right" ? "normal" : action.value,
+        );
+        break;
+      case "sort":
+        range.sort({ column: 0, ascending: action.ascending });
+        break;
+      case "clear":
+        range.clearContent();
+        break;
+      case "insertRow":
+        sheet.insertRowsBefore(range.getRow(), 1);
+        break;
+      case "insertColumn":
+        sheet.insertColumnsBefore(range.getColumn(), 1);
+        break;
+      case "deleteRows":
+        sheet.deleteRows(
+          range.getRow(),
+          range.getRange().endRow - range.getRange().startRow + 1,
+        );
+        break;
+      case "deleteColumns":
+        sheet.deleteColumns(
+          range.getColumn(),
+          range.getRange().endColumn - range.getRange().startColumn + 1,
+        );
+        break;
+    }
+  }
+  await flush();
+  sendSelection();
+}
+
+(window as any).noteboardSheet = {
+  snapshot,
+  historySnapshot,
+  flush,
+  importSheets,
+  exportFile,
+  setExpanded,
+  replaceContent,
+  setCellDimensions,
+  action,
+};
 
 window.addEventListener("message", async (event) => {
   if (event.source !== parent || event.data?.source !== "noteboard-host")
@@ -222,6 +399,10 @@ window.addEventListener("message", async (event) => {
   const message = event.data;
   if (message.type === "init" && !initialized) {
     token = message.token;
+    historyBaseline =
+      typeof message.originalContent === "string"
+        ? message.originalContent
+        : message.content;
     const document = parseWorkbookDocument(message.content);
     if (!document) {
       send("error", { message: "Invalid spreadsheet data." });
@@ -247,8 +428,8 @@ window.addEventListener("message", async (event) => {
               { type: "module" },
             ),
             container: "sheet-root",
-            header: true,
-            toolbar: true,
+            header: message.expanded === true,
+            toolbar: message.expanded === true,
             formulaBar: true,
             footer: {},
           }),
@@ -266,6 +447,14 @@ window.addEventListener("message", async (event) => {
       )
         book.setActiveSheet(document.activeSheetId);
       api.addEvent(api.Event.CommandExecuted, (event) => {
+        if (
+          ready &&
+          ((event.type === CommandType.MUTATION &&
+            event.id.startsWith("sheet.") &&
+            !/formula-calculation|row-auto-height/.test(event.id)) ||
+            /rename|freeze/.test(event.id))
+        )
+          historyDirty = true;
         // Univer 1.0.2 clears the filter model without invalidating SUBTOTAL's
         // cached visibility dependencies. Recalculate after the removal syncs.
         if (event.id === "sheet.mutation.remove-filter")
@@ -282,12 +471,16 @@ window.addEventListener("message", async (event) => {
             lastSent = content;
             send("changed", { content });
           }
+          sendSelection();
         }, 250);
       });
+      api.addEvent(api.Event.SelectionChanged, () => sendSelection());
       api.getFormula().executeCalculation();
       await api.getFormula().onCalculationResultApplied(15000);
       await repaint();
+      ready = true;
       send("loaded");
+      sendSelection();
     } catch (error) {
       send("error", {
         message:

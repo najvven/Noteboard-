@@ -128,6 +128,9 @@ export interface BoardElement {
 
 export interface BoardEditorSettings {
   activeTool?: string;
+  selectMode?: import('./features/board/select-mode').SelectMode;
+  spreadsheetCellWidth?: number;
+  spreadsheetCellHeight?: number;
   customColors?: Record<string, string[]>;
   pendingProps?: Partial<BoardElement>;
   alwaysOnTop?: boolean;

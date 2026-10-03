@@ -7,7 +7,7 @@ test('polygon and freehand selection work across objects, support group movement
   await request.post('/api/pages',{data:[{id:'selection-check',title:'Selection check',width:1100,height:700,boardX:64,boardY:0,workspaceWidth:1500,workspaceHeight:1000,viewportCenterX:640,viewportCenterY:328,zoom:1,updatedAt:Date.now(),elements:[box('a',100,160),box('b',260,180),box('c',700,120),box('locked',140,270,{isLocked:true}),box('hidden',100,220,{isHidden:true})],editorSettings:{activeTool:'select',keepToolActive:true,enableObjectSnapping:false}}]});
   await page.goto('/');await page.getByRole('button',{name:'Open Selection check',exact:true}).click();
   const root=page.locator('[data-board-root]');
-  const selectTool=async(id:string,name:string)=>{await page.getByRole('button',{name:'More',exact:true}).click();await page.locator(`[data-more-toolbar-item="${id}"]`).getByRole('button',{name,exact:true}).click();};
+  const selectTool=async(id:string,_name:string)=>{await page.getByRole('button',{name:'Select settings',exact:true}).click();await page.getByRole('group',{name:'Selection mode',exact:true}).getByRole('button',{name:id==='lasso'?'Lasso':'Polygon',exact:true}).click();await page.getByRole('button',{name:'Select settings',exact:true}).click();};
   await selectTool('polygon-select','Polygon selection');
   let board=(await root.boundingBox())!;
   for(const [x,y] of [[70,140],[380,140],[380,350],[70,350]])await page.mouse.click(board.x+x,board.y+y);

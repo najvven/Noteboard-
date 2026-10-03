@@ -14,6 +14,7 @@ export interface WorkbookDocument {
 export function createWorkbookDocument(
   name = "Spreadsheet",
   values: (string | number)[][] = [],
+  cellSize = { width: 100, height: 24 },
 ): WorkbookDocument {
   if (values.length > 1_048_576 || values.some((row) => row.length > 16_384))
     throw Error("The data exceeds the maximum worksheet dimensions.");
@@ -42,13 +43,43 @@ export function createWorkbookDocument(
             (count, row) => Math.max(count, row.length),
             26,
           ),
-          defaultColumnWidth: 100,
-          defaultRowHeight: 24,
+          defaultColumnWidth: cellSize.width,
+          defaultRowHeight: cellSize.height,
           cellData,
         } as any,
       },
     },
   };
+}
+
+export const normalizeCellSize = (width: number, height: number) => ({
+  width: Math.max(20, Math.min(1000, Number.isFinite(width) ? Math.round(width) : 100)),
+  height: Math.max(12, Math.min(400, Number.isFinite(height) ? Math.round(height) : 24)),
+});
+
+export function activeWorkbookSheet(document: WorkbookDocument | null) {
+  return document?.workbook.sheets?.[document.activeSheetId ?? ''] ?? document?.workbook.sheets?.[document.workbook.sheetOrder?.[0] ?? ''];
+}
+
+export function workbookCellSize(document: WorkbookDocument | null) {
+  const sheet = activeWorkbookSheet(document);
+  return normalizeCellSize(sheet?.columnData?.[0]?.w ?? sheet?.defaultColumnWidth ?? 100,
+    sheet?.rowData?.[0]?.h ?? sheet?.defaultRowHeight ?? 24);
+}
+
+/** Change one workbook's active sheet, preserving values, styles and hidden rows. */
+export function withWorkbookCellSize(content: string, width: number, height: number) {
+  const document = content ? parseWorkbookDocument(content) : createWorkbookDocument();
+  if (!document) throw Error('Invalid spreadsheet data.');
+  const sheet = activeWorkbookSheet(document)!;
+  document.activeSheetId=sheet.id;
+  const size = normalizeCellSize(width, height);
+  sheet.defaultColumnWidth = size.width;
+  sheet.defaultRowHeight = size.height;
+  for (const column of Object.values(sheet.columnData ?? {})) if (column) delete column.w;
+  for (const row of Object.values(sheet.rowData ?? {})) if (row) { delete row.h; delete row.ah; row.ia = 0; }
+  delete document.preview;
+  return JSON.stringify(document);
 }
 
 export function cellFromInput(
@@ -247,16 +278,15 @@ export function upgradeLegacyWorkbooks(
   ];
 }
 
-export function readLiveWorkbookSnapshots(elements: readonly BoardElement[]) {
+export function readLiveWorkbookSnapshots(elements: readonly BoardElement[],forHistory=false) {
   const live = new Map<string, string>();
   document
     .querySelectorAll<HTMLIFrameElement>("iframe[data-spreadsheet-element-id]")
     .forEach((frame) => {
       try {
-        const value = (
-          frame.contentWindow as any
-        )?.noteboardSheet?.snapshot?.();
-        if (typeof value === "string" && parseWorkbookDocument(value))
+        const api=(frame.contentWindow as any)?.noteboardSheet;
+        const value=forHistory ? api?.historySnapshot?.() ?? api?.snapshot?.() : api?.snapshot?.();
+        if (typeof value === "string" && ((forHistory && value==='') || parseWorkbookDocument(value)))
           live.set(frame.dataset.spreadsheetElementId!, value);
       } catch {
         /* An attaching frame keeps the saved snapshot. */

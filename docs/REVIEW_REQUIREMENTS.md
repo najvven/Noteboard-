@@ -95,6 +95,7 @@ Do not replace product requirements with generic UI preferences.
   adding/removing space leaves content stationary in the workspace; when disabled,
   that board's contents follow its moved origin. Independent boards stay stationary.
   Undo/redo restores both geometry and content; canceled Main Board resizing rolls back.
+- Select has exactly Rectangle, Polygon and freehand Lasso variations, with no separate Polygon/Lasso toolbar or More entries. Older active tools/layouts migrate to Select while preserving the chosen variation. Polygon previews are open unfilled point/segment chains until explicitly closed.
 - Polygon selection closes with Enter, a double click or the first vertex; Lasso
   follows a freehand gesture. Respect hidden/locked objects and visible Section
   clipping. Shift adds and Alt subtracts. Multi-selection moves, copies, duplicates,
@@ -110,6 +111,7 @@ Do not replace product requirements with generic UI preferences.
 - The old Section-cell formula engine is replaced by workbook objects. Convert old
   data once on import, preserve cell values/formulas/styles, and discard old computed
   caches. Keep a single workbook snapshot through clone, history, save and export.
+- Spreadsheet editing is available directly on the board and in the expanded editor; retain one live session, cell selection and undo history between modes. The right panel edits the active cells. Before creation, bottom cell-width/height controls set defaults; afterwards they edit only the selected workbook's active sheet. Selection uses whole cells, and placement/resize follow its dimensions. Flush drafts when leaving the object; preserve unrelated boards and defaults.
 - Spreadsheet editing has an explicit isolated input context. Cell selection, typing,
   Delete, Undo, range paste, sorting, filtering, validation and conditional formatting
   must not activate canvas gestures. Flush the current draft before Done and wait

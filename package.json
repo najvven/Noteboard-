@@ -3,7 +3,7 @@
   "description": "Desktop whiteboard and spatial note-taking application.",
   "author": "Noteboard+ contributors",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "main": "main.js",
   "scripts": {

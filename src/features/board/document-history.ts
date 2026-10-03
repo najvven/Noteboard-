@@ -1,6 +1,7 @@
 import type { BoardElement } from "../../types";
 import type { SectionSheet } from "../spreadsheet/types";
 import type { MainBoardGeometry } from './board-resize';
+import {parseWorkbookDocument} from '../spreadsheet/workbook';
 
 export interface BoardDocumentSnapshot {
   elements: BoardElement[];
@@ -38,7 +39,13 @@ export function equalDocumentValue(left: unknown, right: unknown): boolean {
       left.every((value, index) => equalDocumentValue(value, right[index]));
   }
   const a = left as Record<string, unknown>, b = right as Record<string, unknown>;
-  return [...new Set([...Object.keys(a), ...Object.keys(b)])].every(key => equalDocumentValue(a[key], b[key]));
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].every(key => {
+    if(key==='content' && a.type==='table' && b.type==='table' && typeof a[key]==='string' && typeof b[key]==='string' && a[key]!==b[key]){
+      const leftBook=parseWorkbookDocument(a[key]),rightBook=parseWorkbookDocument(b[key]);
+      if(leftBook&&rightBook){delete leftBook.preview;delete rightBook.preview;return equalDocumentValue(leftBook,rightBook);}
+    }
+    return equalDocumentValue(a[key], b[key]);
+  });
 }
 
 export const pushBoardDocumentHistory = (
@@ -46,7 +53,14 @@ export const pushBoardDocumentHistory = (
   snapshot: BoardDocumentSnapshot,
   limit = 50,
 ): BoardDocumentHistory => {
-  if (equalDocumentValue(history.entries[history.index], snapshot)) return history;
+  if (equalDocumentValue(history.entries[history.index], snapshot)) {
+    // Refresh derived thumbnails without adding an Undo step.
+    if(history.entries[history.index].elements.some((element,index)=>element.type==='table' && element.content!==snapshot.elements[index]?.content)) {
+      const entries=[...history.entries];entries[history.index]=snapshot;
+      return {...history,entries};
+    }
+    return history;
+  }
   const safeLimit = Math.max(1, Math.floor(limit));
   const branch = [...history.entries.slice(0, history.index + 1), snapshot];
   const entries =

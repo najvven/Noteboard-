@@ -133,7 +133,7 @@ test('several Web fields remain responsive and release their ad-block engines af
   const root=(await window.locator('[data-board-root]').boundingBox());
   await window.mouse.move(root.x+10,root.y+10);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
   await expect(window.getByRole('button',{name:'More',exact:true})).toBeEnabled();
-  await window.getByRole('button',{name:'More',exact:true}).click();await window.locator('[data-more-toolbar-item="lasso"]').getByRole('button',{name:'Lasso',exact:true}).click();
+  await window.getByRole('button',{name:'Select settings',exact:true}).click();await window.getByRole('group',{name:'Selection mode',exact:true}).getByRole('button',{name:'Lasso',exact:true}).click();await window.getByRole('button',{name:'Select settings',exact:true}).click();
   const canvas=await window.locator('[data-board-root]').boundingBox();
   await window.mouse.move(canvas.x+20*.7,canvas.y+60*.7);await window.mouse.down();
   const scale=canvas.width/1200;
@@ -346,6 +346,31 @@ test('desktop spreadsheet edits and imports through the packaged-style file orig
   assert.equal(data.workbook.sheetOrder.length,2);assert.equal(data.workbook.sheets['sheet-1'].cellData[0][0].v,15);
   assert.equal(data.workbook.sheets[data.activeSheetId].cellData[1][0].v,23);
   assert.deepEqual(errors,[]);
+});
+
+test('desktop spreadsheet edits directly and keeps its live session when expanded', {timeout:60000},async t=>{
+  const board=seed('select');board.elements=[{id:'sheet',type:'table',name:'Inline sheet',position:{x:100,y:120},size:{width:700,height:450},content:'',zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  await window.locator('[data-board-element-id="sheet"]').click({position:{x:80,y:15}});
+  const inline=window.locator('[data-spreadsheet-inline]');await expect(inline.getByRole('status')).toHaveCount(0,{timeout:30000});
+  await expect(window.locator('[data-spreadsheet-panel]')).toBeVisible();
+  const iframe=window.locator('iframe[title="Spreadsheet cells"]'),cells=window.frameLocator('iframe[title="Spreadsheet cells"]');
+  await iframe.evaluate(frame=>{frame.contentWindow.name='native-live-session';});
+  const grid=cells.locator('canvas[id^="univer-sheet-main-canvas_"]');await grid.click({position:{x:95,y:32}});await window.keyboard.type('41');await window.keyboard.press('Enter');
+  const read=()=>iframe.evaluate(frame=>JSON.parse(frame.contentWindow.noteboardSheet.snapshot()));
+  await expect.poll(async()=>(await read()).workbook.sheets['sheet-1'].cellData?.[0]?.[0]?.v).toBe(41);
+  await grid.click({position:{x:95,y:32}});
+  await window.getByRole('complementary',{name:'Spreadsheet settings'}).getByLabel('Cell value or formula').fill('=1+2');
+  await window.getByRole('button',{name:'Apply to active cell',exact:true}).click();
+  await expect.poll(async()=>(await read()).workbook.sheets['sheet-1'].cellData[0][0].v).toBe(3);
+  await window.getByRole('button',{name:'Edit spreadsheet',exact:true}).click();
+  const dialog=window.getByRole('dialog',{name:'Spreadsheet editor'});await expect(dialog).toBeVisible();
+  assert.equal(await iframe.evaluate(frame=>frame.contentWindow.name),'native-live-session');
+  await grid.click({position:{x:95,y:32}});await window.keyboard.press('Control+z');
+  await expect.poll(async()=>(await read()).workbook.sheets['sheet-1'].cellData[0][0].v).toBe(41);
+  await dialog.getByRole('button',{name:'Done',exact:true}).click();await expect(inline).toBeVisible();
+  assert.equal(await iframe.evaluate(frame=>frame.contentWindow.name),'native-live-session');
+  await expect(window.locator('[data-board-element-id]')).toHaveCount(1);assert.deepEqual(errors,[]);
 });
 
 test('desktop Web enforces ad, popup and cookie settings from first load and after toggling', {timeout:60000}, async t => {

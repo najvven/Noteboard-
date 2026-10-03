@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from "re
 import { createPortal } from "react-dom";
 import { webWheelClientPoint } from '../features/web/wheel-point';
 import {useOutlineSelection} from '../features/board/use-outline-selection';
+import {initialSelectMode, type SelectMode} from '../features/board/select-mode';
 import {selectedBounds, selectElementsInOutline, selectionOutline, createSelectionArea} from '../features/board/selection';
 import {mergeAreaElements,ungroupAreaElements,updateMergedGroup,isMergedGroupMember,localGroupElement} from '../features/board/grouping';
 import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
@@ -46,7 +47,9 @@ import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
 import { elementColors, defaultFillColor } from "../features/board/element-colors";
 import SaveAsDialog from "./SaveAsDialog";
 import SpreadsheetElement from "./SpreadsheetElement";
-import { createWorkbookDocument, readLiveWorkbookSnapshots } from "../features/spreadsheet/workbook";
+import SpreadsheetCellSizeControls from './SpreadsheetCellSizeControls';
+import {spreadsheetBridge,resizeSpreadsheetCells} from '../features/spreadsheet/editor-bridge';
+import { createWorkbookDocument, readLiveWorkbookSnapshots, normalizeCellSize, workbookCellSize, parseWorkbookDocument, withWorkbookCellSize } from "../features/spreadsheet/workbook";
 import { createSavedBoard, createSavedTemplate, type SaveAsKind } from "../features/board/save-as";
 import MenuSettingsBlock, { type PreviewMode } from "./MenuSettingsBlock";
 import {
@@ -426,8 +429,6 @@ const TOOLBAR_ITEMS: {
   { id: "board", label: "New Board", icon: BoardSettingsIcon, slots: 2 },
   { id: "link", label: "Object Links", icon: Link2, slots: 2 },
   { id: "table", label: "Spreadsheet", icon: Table2, slots: 2 },
-  { id: "polygon-select", label: "Polygon selection", icon: LassoSelect, slots: 2 },
-  { id: "lasso", label: "Lasso", icon: Lasso, slots: 2 },
   { id: "crop", label: "Crop", icon: Crop, slots: 2 },
   { id: "eyedropper", label: "Eyedropper", icon: Pipette, slots: 2 },
   {
@@ -1128,7 +1129,7 @@ export default function BoardEditor({
   }, [sectionSheets]);
 
   const handleUndo = () => {
-    pushDocument(syncLiveEditableState(elementsRef.current));
+    pushDocument(syncLiveEditableState(elementsRef.current,true));
     const nextHistory = undoBoardDocumentHistory(documentHistoryRef.current);
     if (nextHistory !== documentHistoryRef.current) {
       documentHistoryRef.current = nextHistory;
@@ -1140,12 +1141,12 @@ export default function BoardEditor({
       setSectionSheets(snapshot.sectionSheets);
       if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
       if(snapshot.presentation) applyPresentation(snapshot.presentation);
-      setSelectedId(null);
+      setSelectedId(null, false);
     }
   };
 
   const handleRedo = () => {
-    pushDocument(syncLiveEditableState(elementsRef.current));
+    pushDocument(syncLiveEditableState(elementsRef.current,true));
     const nextHistory = redoBoardDocumentHistory(documentHistoryRef.current);
     if (nextHistory !== documentHistoryRef.current) {
       documentHistoryRef.current = nextHistory;
@@ -1157,14 +1158,21 @@ export default function BoardEditor({
       setSectionSheets(snapshot.sectionSheets);
       if(snapshot.boardGeometry) applyMainBoardGeometry(snapshot.boardGeometry);
       if(snapshot.presentation) applyPresentation(snapshot.presentation);
-      setSelectedId(null);
+      setSelectedId(null, false);
     }
   };
 
   const [title, setTitle] = useState(page.title);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectedIds, _setSelectedIds] = useState<string[]>([]);
   const selectedId=selectedIds.length===1?selectedIds[0]:null;
-  const setSelectedId=(id:string|null)=>setSelectedIds(id?[id]:[]);
+  const setSelectedIds=(ids:string[],syncWorkbooks=true)=>{
+    if (syncWorkbooks && elementsRef.current.some(element=>selectedIds.includes(element.id) && !ids.includes(element.id) && element.type==='table')) {
+      const live=readLiveWorkbookSnapshots(elementsRef.current,true);
+      if (live.some((element,index)=>element.content!==elementsRef.current[index]?.content)) pushDocument(live);
+    }
+    _setSelectedIds(ids);
+  };
+  const setSelectedId=(id:string|null,syncWorkbooks=true)=>setSelectedIds(id?[id]:[],syncWorkbooks);
   const groupMoveRef=useRef<{pointerId:number;x:number;y:number;elements:BoardElement[];ids:Set<string>;changed:boolean;preview:'box'|'realistic';latest?:BoardElement[]}|null>(null);
   const selectionOutlineRef=useRef<HTMLDivElement>(null);
   const [customColors, setCustomColors] = useState<Record<string, string[]>>({
@@ -1309,6 +1317,27 @@ export default function BoardEditor({
   const [pendingProps, setPendingProps] = useState<Partial<BoardElement>>(
     initialEditorSettings.pendingProps ?? {},
   );
+  const [spreadsheetCellSize,setSpreadsheetCellSize] = useState(() => normalizeCellSize(initialEditorSettings.spreadsheetCellWidth ?? 100,initialEditorSettings.spreadsheetCellHeight ?? 24));
+  const [spreadsheetSizeError,setSpreadsheetSizeError] = useState('');
+  const spreadsheetSizeTask = useRef(Promise.resolve());
+  const selectedSpreadsheet = elements.find(element => element.id === selectedId && element.type === 'table');
+  const selectedCellSize = useMemo(() => workbookCellSize(parseWorkbookDocument(selectedSpreadsheet?.content ?? '')), [selectedSpreadsheet?.content]);
+  const updateSpreadsheetCellSize = (axis:'width'|'height',value:number) => {
+    setSpreadsheetSizeError('');
+    const id=selectedSpreadsheet?.id;
+    if (!id) {setSpreadsheetCellSize(current=>normalizeCellSize(axis==='width'?value:current.width,axis==='height'?value:current.height));return;}
+    spreadsheetSizeTask.current = spreadsheetSizeTask.current.then(async () => {
+      const element=elementsRef.current.find(element=>element.id===id);
+      if (!element) return;
+      const frame=[...document.querySelectorAll<HTMLIFrameElement>('iframe[data-spreadsheet-element-id]')].find(frame=>frame.dataset.spreadsheetElementId===id);
+      const api=spreadsheetBridge(frame ?? null), content=api?.snapshot() || element.content;
+      const current=workbookCellSize(parseWorkbookDocument(content));
+      const size=normalizeCellSize(axis==='width'?value:current.width,axis==='height'?value:current.height);
+      pushDocument(readLiveWorkbookSnapshots(elementsRef.current,true));
+      if(frame)await resizeSpreadsheetCells(frame,size.width,size.height);
+      else updateElement(id,{content:withWorkbookCellSize(content,size.width,size.height)});
+    }).catch(reason=>setSpreadsheetSizeError(reason instanceof Error?reason.message:'Could not change cell size.'));
+  };
 
   const [keepToolActive, setKeepToolActive] = useState(
     initialEditorSettings.keepToolActive ?? true,
@@ -1385,8 +1414,10 @@ export default function BoardEditor({
   const guidesOverlayRef=useRef<SmartGuidesHandle>(null);
   const setVisibleGuides=(guides:SmartGuide[])=>guidesOverlayRef.current?.setGuides(guides);
   const [activeTool, _setActiveTool] = useState<string>(
-    initialEditorSettings.activeTool ?? "select",
+    ["lasso", "polygon-select"].includes(initialEditorSettings.activeTool ?? "") ? "select" : initialEditorSettings.activeTool ?? "select",
   );
+  const [selectMode, setSelectMode] = useState<SelectMode>(() => initialSelectMode(initialEditorSettings.selectMode, initialEditorSettings.activeTool));
+  const SelectIcon = selectMode === "lasso" ? Lasso : selectMode === "polygon" ? LassoSelect : MousePointer2;
   const setActiveTool = (tool: string) => {
     if (activeTool !== tool) {
       if (
@@ -1952,8 +1983,9 @@ export default function BoardEditor({
     return mergeLiveWebviewUrls(sourceElements, liveWebUrls);
   };
 
-  const syncLiveEditableState = (sourceElements = elementsRef.current) => {
+  const syncLiveEditableState = (sourceElements = elementsRef.current,forHistory=false) => {
     if (typeof document === "undefined") return sourceElements;
+    sourceElements=readLiveWorkbookSnapshots(sourceElements,forHistory);
     const liveContent = new Map<string, string>();
     document
       .querySelectorAll<HTMLElement>("[data-board-element-editor-id]")
@@ -1996,6 +2028,8 @@ export default function BoardEditor({
     workspaceGridThickness,
     workspaceGridSize,
     activeTool,
+    selectMode,
+    spreadsheetCellSize,
     customColors,
     pendingProps,
     keepToolActive,
@@ -2061,10 +2095,10 @@ export default function BoardEditor({
     setCurrentDrawPoints(null);
     setIsHoldingToCreate(false);
     setIsInteracting(false);
-    if (!["select","crop","eyedropper","polygon-select","lasso"].includes(activeTool)) {
+    if (!["select","crop","eyedropper","table"].includes(activeTool)) {
       setSelectedId(null);
     }
-  }, [activeTool]);
+  }, [activeTool, selectMode]);
 
   const getShortcutFromEvent = (e: KeyboardEvent | React.KeyboardEvent) => {
     const key = e.key === " " ? "Space" : e.key;
@@ -2415,6 +2449,7 @@ export default function BoardEditor({
     selectedId,
     selectedIds,
     activeTool,
+    selectMode,
     history,
     historyIndex,
     quickAddRegion,
@@ -3321,6 +3356,11 @@ export default function BoardEditor({
 
   const renderSelectToolSettings = () => (
     <>
+      <div className="mb-2 flex flex-col gap-1.5">
+        <span className="text-xs font-bold text-gray-800">Selection</span>
+        <SegmentedControl label="Selection mode" value={selectMode} onChange={mode => { setSelectMode(mode); setActiveTool("select"); }}
+          options={[{value:"rectangle",label:"Rectangle"},{value:"lasso",label:"Lasso"},{value:"polygon",label:"Polygon"}]} />
+      </div>
       <div className="flex flex-col gap-1.5">
         <button
           type="button"
@@ -3785,8 +3825,6 @@ export default function BoardEditor({
         return renderMenuSettingsBlock("media", true);
       case "table":
         return renderMenuSettingsBlock("table", true);
-      case "polygon-select":
-      case "lasso":
       case "crop":
         return renderMenuSettingsBlock(id,true);
       case "eyedropper":
@@ -4500,10 +4538,9 @@ export default function BoardEditor({
         setActiveTool("media");
         break;
       case "table":
+        setSelectedId(null);
         setActiveTool("table");
         break;
-      case "polygon-select":
-      case "lasso":
       case "crop":
         setActiveTool(id);
         break;
@@ -4670,6 +4707,10 @@ export default function BoardEditor({
       });
       finalRect.w = Math.max(finalRect.w, minimum.width);
       finalRect.h = Math.max(finalRect.h, minimum.height);
+      if (type === 'table') {
+        finalRect.w = Math.ceil(finalRect.w/spreadsheetCellSize.width)*spreadsheetCellSize.width;
+        finalRect.h = Math.ceil(finalRect.h/spreadsheetCellSize.height)*spreadsheetCellSize.height;
+      }
       const bounds = activeSurfaceBoundsRef.current;
       if (bounds) {
         finalRect.w = Math.min(finalRect.w, bounds.maxX - bounds.minX);
@@ -4689,7 +4730,7 @@ export default function BoardEditor({
     let defaultContent = "";
     if (type === "h1" || type === "h2" || type === "h3") defaultContent = "";
     if (type === "text") defaultContent = "";
-    if (type === "table") defaultContent = JSON.stringify(createWorkbookDocument());
+    if (type === "table") defaultContent = JSON.stringify(createWorkbookDocument('Spreadsheet',[],spreadsheetCellSize));
 
     const placementProps = resolveObjectPlacementProps({
       type,
@@ -4842,7 +4883,7 @@ export default function BoardEditor({
       elementsRef.current = next;
       setElements(next);
     } else {
-      pushElements(applyElementUpdate(elementsRef.current));
+      pushElements(applyElementUpdate(readLiveWorkbookSnapshots(elementsRef.current,true)));
       if(secondaryResizeRef.current?.id===id)secondaryResizeRef.current=null;
     }
   };
@@ -5039,13 +5080,13 @@ export default function BoardEditor({
     const latest=syncLiveEditableState(elementsRef.current),source=clipboardSelection();
     const result=mergeAreaElements(latest,source.map(element=>element.id),generateId());
     if(!result)return;
-    pushElements(result.elements);setSelectedId(result.group.id);setQuickAddRegion(null);setActiveTool('select');
+    pushElements(result.elements);setSelectedId(result.group.id);setQuickAddRegion(null);setSelectMode('rectangle');setActiveTool('select');
     if(currentLayerView&&createElementHierarchy(result.elements).isDescendantOf(currentLayerView,result.group.id))setCurrentLayerView(result.group.parentId??null);
   };
   const ungroupSelection=()=>{
     if(!selectedId)return;
     const result=ungroupAreaElements(elementsRef.current,selectedId);
-    pushElements(result.elements);setSelectedIds(result.selectedIds);setActiveTool('select');
+    pushElements(result.elements);setSelectedIds(result.selectedIds);setSelectMode('rectangle');setActiveTool('select');
   };
 
   useEffect(() => {
@@ -5492,6 +5533,9 @@ export default function BoardEditor({
     pendingProps?: Partial<BoardElement>;
   } = {}): BoardEditorSettings => ({
     activeTool,
+    selectMode,
+    spreadsheetCellWidth:spreadsheetCellSize.width,
+    spreadsheetCellHeight:spreadsheetCellSize.height,
     customColors,
     pendingProps: overrides.pendingProps ?? pendingProps,
     alwaysOnTop,
@@ -5538,7 +5582,7 @@ export default function BoardEditor({
     } = {},
   ): Page => {
     const syncedElements = syncLiveEditableState(
-      readLiveWorkbookSnapshots(syncLiveWebviewState(elementsRef.current)),
+      syncLiveWebviewState(elementsRef.current),
     );
     let currentScrollX = containerRef.current?.scrollLeft;
     let currentScrollY = containerRef.current?.scrollTop;
@@ -6026,6 +6070,11 @@ export default function BoardEditor({
     tool: string,
   ) => {
     if (tool === "select" || (current.x === start.x && current.y === start.y)) return current;
+    if (tool === 'table') {
+      const dx=current.x-start.x,dy=current.y-start.y;
+      return {x:start.x+(dx<0?-1:1)*Math.max(spreadsheetCellSize.width,Math.round(Math.abs(dx)/spreadsheetCellSize.width)*spreadsheetCellSize.width),
+        y:start.y+(dy<0?-1:1)*Math.max(spreadsheetCellSize.height,Math.round(Math.abs(dy)/spreadsheetCellSize.height)*spreadsheetCellSize.height)};
+    }
     const line = tool === "line" || tool === "arrow";
     if (line && proportionalScale) {
       const dx = current.x - start.x;
@@ -6473,7 +6522,7 @@ export default function BoardEditor({
     const result=smartGuides(element,position,[mainSurface,...others],zoomRef.current,allowSnap&&enableObjectSnapping);
     setVisibleGuides(result.guides);return result.position;
   };
-  const outlineSelection=useOutlineSelection({tool:activeTool,zoom,surface:boardSurfaceRef,elements,selectedIds,
+  const outlineSelection=useOutlineSelection({tool:activeTool,mode:selectMode,zoom,surface:boardSurfaceRef,elements,selectedIds,
     onSelect:ids=>{setSelectedIds(ids);finishToolUse(activeTool);},
     onArea:outline=>setQuickAddRegion(outline?createSelectionArea(outline):null),
     respectVisibility:respectLayerVisibility,capture:captureSurfacePointer,onInteraction:setIsInteracting});
@@ -6827,7 +6876,7 @@ export default function BoardEditor({
                 )}
                 title="Select Tool"
               >
-                <MousePointer2 className="w-4 h-4" />
+                <SelectIcon className="w-4 h-4" />
               </button>
               <button
                 onClick={() => {
@@ -7972,11 +8021,11 @@ export default function BoardEditor({
                   className="absolute inset-0 overflow-visible pointer-events-none"
                   data-board-surface="true"
                 >
-                {(outlineSelection.enabled||activeTool==='eyedropper')&&<div data-selection-tool={activeTool} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
-                  onDoubleClick={event=>{if(activeTool==='polygon-select'&&outlineSelection.points.length>=3){event.preventDefault();event.stopPropagation();outlineSelection.finish();}}}/>}
-                {outlineSelection.points.length>0&&<svg className="pointer-events-none absolute inset-0 overflow-visible" data-selection-outline={activeTool} style={{width:pageDimensions.width,height:pageDimensions.height,zIndex:100001}}>
-                  <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')} Z`} fill="rgba(59,130,246,.08)" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} fillRule="evenodd"/>
-                  {activeTool==='polygon-select'&&outlineSelection.points.map((point,index)=><circle key={index} cx={point.x} cy={point.y} r={(index===0?4:2.5)/zoom} fill="white" stroke="#3b82f6" strokeWidth={1.5/zoom}/>)}
+                {(outlineSelection.enabled||activeTool==='eyedropper')&&<div data-selection-tool={outlineSelection.enabled ? selectMode : activeTool} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
+                  onDoubleClick={event=>{if(selectMode==='polygon'&&outlineSelection.points.length>=3){event.preventDefault();event.stopPropagation();outlineSelection.finish();}}}/>}
+                {outlineSelection.points.length>0&&<svg className="pointer-events-none absolute inset-0 overflow-visible" data-selection-outline={selectMode} style={{width:pageDimensions.width,height:pageDimensions.height,zIndex:100001}}>
+                  <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')}`} fill="none" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} />
+                  {selectMode==='polygon'&&outlineSelection.points.map((point,index)=><circle key={index} cx={point.x} cy={point.y} r={(index===0?4:2.5)/zoom} fill="white" stroke="#3b82f6" strokeWidth={1.5/zoom}/>)}
                 </svg>}
                 {selectionBounds&&<div ref={selectionOutlineRef} data-multi-selection={selectedIds.length} className={cn("pointer-events-none absolute",!quickAddRegion?.outline&&"border border-dashed border-blue-500")} style={{left:selectionBounds.x,top:selectionBounds.y,width:selectionBounds.width,height:selectionBounds.height,zIndex:100001}}/>}
                 <SmartGuidesOverlay ref={guidesOverlayRef} zoom={zoom} width={pageDimensions.width} height={pageDimensions.height}/>
@@ -9314,7 +9363,7 @@ export default function BoardEditor({
           {selectedIds.length>1&&!toolbarEditingMode&&<ToolPropertiesBar key="selection-toolbar">
             <div className="flex h-12 items-center gap-3 px-2 text-xs font-semibold">
               <span role="status">{selectedIds.length} selected</span>
-              <button type="button" title="Move selected objects" onClick={()=>setActiveTool('select')} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Move className="h-4 w-4"/></button>
+              <button type="button" title="Move selected objects" onClick={()=>{setSelectMode('rectangle');setActiveTool('select');}} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Move className="h-4 w-4"/></button>
               <button type="button" title="Copy selected objects" onClick={()=>void copySelectionToSystem()} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><Copy className="h-4 w-4"/></button>
               <button type="button" title="Duplicate selected objects" onClick={duplicateSelection} className="rounded-lg border border-gray-300 p-2 hover:bg-blue-50"><ClipboardPaste className="h-4 w-4"/></button>
               <button type="button" title="Delete selected objects" onClick={removeSelection} className="rounded-lg border border-red-200 p-2 text-red-400 hover:bg-red-50"><Trash2 className="h-4 w-4"/></button>
@@ -9329,7 +9378,7 @@ export default function BoardEditor({
               !selectedElement &&
               (TEXT_TYPES.includes(activeTool) ||
                 SHAPE_TYPES.includes(activeTool) ||
-                ["sticky", "draw", "arrow", "line", "image", "media", "embed", "fill"].includes(
+                ["sticky", "draw", "arrow", "line", "image", "media", "embed", "fill", "table"].includes(
                   activeTool,
                 ));
             const globalSettingsMenuOpen =
@@ -9371,6 +9420,10 @@ export default function BoardEditor({
             return (
               <AnimatePresence>
                 <ToolPropertiesBar key="bottom-toolbar">
+                  {activeType === 'table' && <div className={bottomToolbarGroupClass}>
+                    <SpreadsheetCellSizeControls key={selectedElement?.id ?? 'new-spreadsheet'} width={selectedElement?selectedCellSize.width:spreadsheetCellSize.width} height={selectedElement?selectedCellSize.height:spreadsheetCellSize.height} onCommit={updateSpreadsheetCellSize}/>
+                    {spreadsheetSizeError && <span role="alert" className="max-w-48 text-xs text-red-600">{spreadsheetSizeError}</span>}
+                  </div>}
                   {activeTool === 'eraser' && !selectedElement && (
                     <div className={bottomToolbarGroupClass}>
                       <SegmentedControl label="Eraser mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
@@ -9713,7 +9766,7 @@ export default function BoardEditor({
                   )}
 
                   {/* Borders & Details */}
-                  {!["embed", "eraser", "media", "image", "fill", "group"].includes(activeType) && !isTextLike && (
+                  {!["embed", "eraser", "media", "image", "fill", "group", "table"].includes(activeType) && !isTextLike && (
                     <div className={bottomToolbarGroupClass}>
                       <div
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
@@ -10638,6 +10691,12 @@ function BoardElementNode({
       } else {
         finalW = Math.max(minSize.width, localSnap(Math.abs(signedW)));
         finalH = Math.max(minSize.height, localSnap(Math.abs(signedH)));
+      }
+
+      if (element.type === 'table' && !isProportional) {
+        const cell=workbookCellSize(parseWorkbookDocument(element.content));
+        if (dir.includes('e') || dir.includes('w')) finalW=Math.max(Math.ceil(minSize.width/cell.width)*cell.width,Math.round(finalW/cell.width)*cell.width);
+        if (dir.includes('n') || dir.includes('s')) finalH=Math.max(Math.ceil(minSize.height/cell.height)*cell.height,Math.round(finalH/cell.height)*cell.height);
       }
 
       signedW = signedW < 0 ? -finalW : finalW;

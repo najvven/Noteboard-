@@ -34,7 +34,9 @@ for (const tool of ['polygon-select','lasso']) test(`${tool} keeps its shaped ar
   await page.screenshot({path:`.tmp/task14-area-${tool}.png`});
   const actions = page.locator('[data-selection-area-toolbar]'); await expect(actions).toBeVisible();
   for (const label of ['Copy area','Paste into area','Merge area']) await expect(actions.getByRole('button',{name:label,exact:true})).toBeVisible();
+  await page.evaluate(()=>navigator.clipboard.writeText('before-area-copy'));
   await actions.getByRole('button',{name:'Copy area',exact:true}).click();
+  await expect.poll(async()=>page.evaluate(async()=> (await navigator.clipboard.read()).some(item=>item.types.includes('text/html')))).toBe(true);
   const html = await page.evaluate(async () => {
     const items = await navigator.clipboard.read();
     return (await items.find(item=>item.types.includes('text/html'))!.getType('text/html')).text();
@@ -85,8 +87,8 @@ test('Web Tool settings let Select and Hand operate the page without moving or r
   const row=page.locator('[data-more-toolbar-item="embed"]'); await row.getByRole('button',{name:'Web settings',exact:true}).click();
   await row.getByRole('button',{name:'Tool settings',exact:true}).click();
   await row.getByRole('button',{name:'Use page with Select',exact:true}).click();
-  await page.getByRole('button',{name:'More',exact:true}).click(); await clickPage(); await expect(frame.locator('#count')).toHaveText('1');
-  await page.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click(); await clickPage(); await expect(frame.locator('#count')).toHaveText('2');
+  await page.getByRole('button',{name:'More',exact:true}).click(); await frame.locator('#count').click(); await expect(frame.locator('#count')).toHaveText('1');
+  await page.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click(); await frame.locator('#count').click(); await expect(frame.locator('#count')).toHaveText('2');
   const actual=(await page.locator('[data-board-element-id="web"]').boundingBox())!;
   expect(actual.x).toBeCloseTo(original.x,0); expect(actual.y).toBeCloseTo(original.y,0);
 });

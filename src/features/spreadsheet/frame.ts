@@ -1,6 +1,10 @@
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
 import { UniverSheetsCorePreset, ScrollCommand, SetWorksheetActiveOperation, SetScrollOperation, SetZoomRatioOperation } from "@univerjs/preset-sheets-core";
-import { CommandType } from "@univerjs/core";
+import { CommandType, Injector } from "@univerjs/core";
+import {ISidebarService, IDialogService, IUIPartsService, UniverUIPlugin, IUIController, DesktopUIController, type IUniverUIConfig} from '@univerjs/ui';
+import {HostedSidebarService,HostedDialogService,setOverlayPresentation} from './sheet-overlays';
+import React from 'react';
+import {SheetRibbon} from './sheet-ribbon';
 import coreEn from "@univerjs/preset-sheets-core/locales/en-US";
 import { UniverSheetsSortPreset } from "@univerjs/preset-sheets-sort";
 import sortEn from "@univerjs/preset-sheets-sort/locales/en-US";
@@ -24,12 +28,33 @@ import {
 } from "./workbook";
 import type { SpreadsheetAction, SpreadsheetSelection } from "./editor-bridge";
 
+function sheetCorePreset(config:Parameters<typeof UniverSheetsCorePreset>[0]) {
+  const preset=UniverSheetsCorePreset(config);
+  // Plugin services require the UI plugin's own override, rather than the
+  // createUniver option that replaces core-only dependencies in this version.
+  preset.plugins=preset.plugins.map(plugin=>{
+    if (!Array.isArray(plugin)||plugin[0]!==UniverUIPlugin) return plugin;
+    const ui=plugin[1] as IUniverUIConfig;
+    return [UniverUIPlugin,{...ui,override:[[ISidebarService,{useClass:HostedSidebarService}],
+      [IDialogService,{useFactory:(injector:Injector,parts:IUIPartsService)=>new HostedDialogService(injector,parts),deps:[Injector,IUIPartsService]}],
+      [IUIController,{useFactory:(injector:Injector)=>{
+        const sidebar=injector.get(ISidebarService) as HostedSidebarService;
+        const view=injector.createChild([[ISidebarService,{useValue:sidebar.nativeFacade()}]]);
+        const controller=view.createInstance(DesktopUIController,ui);
+        controller.disposeWithMe(view);
+        return controller;
+      },deps:[Injector]}]]}];
+  });
+  return preset;
+}
+
 let api: ReturnType<typeof createUniver>["univerAPI"] | undefined;
 let token = "",
   timer = 0,
   lastSent = "",
   initialized = false;
 let expandedMode: boolean | undefined;
+let mode: WorkbookDocument['mode'];
 let interactive = false;
 let cachedPreview: string | undefined;
 let cachedViewport: WorkbookDocument["previewViewport"];
@@ -111,6 +136,7 @@ function snapshot(includePreview = true) {
   const value: WorkbookDocument = {
     format: "noteboard/workbook",
     version: 1,
+    ...(mode==='simple'?{mode}:{}),
     workbook: book.isCellEditing() ? structuredClone(book.save()) : book.save(),
     activeSheetId: book.getActiveSheet().getSheetId(),
   };
@@ -286,12 +312,15 @@ function sendSelection() {
 }
 
 async function setExpanded(expanded: boolean) {
+  if (mode==='simple') expanded=false;
   if (!api || expandedMode === expanded) return;
   expandedMode = expanded;
+  setOverlayPresentation(expanded);
   api
     .setUIVisible(api.Enum.BuiltInUIPart.HEADER, expanded)
     .setUIVisible(api.Enum.BuiltInUIPart.TOOLBAR, expanded)
-    .setUIVisible(api.Enum.BuiltInUIPart.FOOTER, expanded);
+    .setUIVisible(api.Enum.BuiltInUIPart.FOOTER, expanded)
+    .setUIVisible(api.Enum.BuiltInUIPart.CUSTOM_HEADER, interactive && !expanded);
   // Resize after the React dialog and UI parts have reached their new bounds.
   await repaint();
   window.dispatchEvent(new Event("resize"));
@@ -304,6 +333,7 @@ function setInteractive(enabled: boolean, pendingAction = false) {
   interactive = ownsChanges;
   // Inert on the host alone does not prevent focus inside an iframe.
   document.documentElement.inert = !enabled;
+  api?.setUIVisible(api.Enum.BuiltInUIPart.CUSTOM_HEADER, enabled && !expandedMode);
   if (enabled) api?.getActiveWorkbook()?.showSelection();
   if (!enabled && document.activeElement instanceof HTMLElement) document.activeElement.blur();
 }
@@ -351,6 +381,7 @@ async function replaceContent(content: string) {
   cachedPreview = value.preview;
   cachedViewport = value.previewViewport;
   savedViews = value.views ?? {};
+  mode=value.mode;
   restoredViews.clear();
   const old = api.getActiveWorkbook(),
     address = old?.getActiveSheet().getActiveRange()?.getA1Notation();
@@ -502,7 +533,7 @@ window.addEventListener("message", async (event) => {
           ),
         },
         presets: [
-          UniverSheetsCorePreset({
+          sheetCorePreset({
             workerURL: new Worker(
               new URL("./formula.worker.ts", import.meta.url),
               { type: "module" },
@@ -516,6 +547,7 @@ window.addEventListener("message", async (event) => {
             toolbar: true,
             formulaBar: true,
             footer: {},
+            sheets: document.mode==='simple'?{scrollConfig:{enableHorizontal:false,enableVertical:false}}:undefined,
           }),
           UniverSheetsSortPreset(),
           UniverSheetsFilterPreset(),
@@ -524,6 +556,12 @@ window.addEventListener("message", async (event) => {
         ],
       });
       api = created.univerAPI;
+      mode=document.mode;
+      api.updateMenuConfig({'sheet.menu.zoom-ratio':{disabled:mode==='simple'}});
+      api.registerUIPart(api.Enum.BuiltInUIPart.CUSTOM_HEADER, () => React.createElement(SheetRibbon,{targetId:message.ribbonTarget}));
+      api.addEvent(api.Event.BeforeCommandExecute,event=>{
+        if (mode==='simple' && (event.id===ScrollCommand.id || event.id===SetZoomRatioOperation.id || event.id===SetScrollOperation.id)) event.cancel=true;
+      });
       cachedPreview = document.preview;
       cachedViewport = document.previewViewport;
       savedViews = document.views ?? {};

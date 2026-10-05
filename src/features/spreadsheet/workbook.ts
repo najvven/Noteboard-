@@ -1,11 +1,14 @@
 import type { IWorkbookData, ICellData } from "@univerjs/core";
 import type { BoardElement, SectionSheet } from "../../types";
+import {gridObjectSize} from './grid-geometry';
 
 export const MAX_WORKBOOK_CHARACTERS = 32 * 1024 * 1024;
 
 export interface WorkbookDocument {
   format: "noteboard/workbook";
   version: 1;
+  /** Missing in saved workbooks means the existing scrollable editor. */
+  mode?: "advanced" | "simple";
   workbook: Partial<IWorkbookData>;
   activeSheetId?: string;
   preview?: string;
@@ -122,6 +125,7 @@ export function parseWorkbookDocument(
       !book.sheets
     )
       return null;
+    if (value.mode !== undefined && value.mode !== 'simple' && value.mode !== 'advanced') return null;
     for (const id of book.sheetOrder) {
       if (typeof id !== "string" || !Object.hasOwn(book.sheets, id))
         return null;
@@ -313,7 +317,7 @@ export function readLiveWorkbookSnapshots(elements: readonly BoardElement[],forH
     });
   return elements.map((element) =>
     live.has(element.id)
-      ? { ...element, content: live.get(element.id)! }
+      ? { ...element, content: live.get(element.id)!,...(parseWorkbookDocument(live.get(element.id)!)?.mode==='simple'?{size:gridObjectSize(parseWorkbookDocument(live.get(element.id)!))}:{}) }
       : element,
   );
 }

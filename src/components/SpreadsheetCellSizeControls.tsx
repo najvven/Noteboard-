@@ -18,10 +18,10 @@ export default function SpreadsheetCellSizeControls({
     () => setDraft({ width: String(width), height: String(height) }),
     [width, height],
   );
-  const commit = (axis: "width" | "height") => {
-    const value = Number(draft[axis]);
+  const commit = (axis: "width" | "height", raw: string) => {
+    const value = Number(raw);
     if (
-      draft[axis].trim() &&
+      raw.trim() &&
       Number.isFinite(value) &&
       value !== (axis === "width" ? width : height)
     )
@@ -52,7 +52,7 @@ export default function SpreadsheetCellSizeControls({
                 [axis]: event.target.value,
               }))
             }
-            onBlur={() => commit(axis)}
+            onBlur={(event) => commit(axis, event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();

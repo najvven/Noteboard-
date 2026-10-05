@@ -55,7 +55,21 @@ export function spreadsheetBridge(
 
 // Property-bar changes use the mounted editor's owner, so its content echo
 // cannot be mistaken for an external workbook replacement.
-type CellSizer = (width: number, height: number) => Promise<void>;
+type CellSizer = (
+  width: number,
+  height: number,
+  beforeChange: () => void,
+) => Promise<void>;
+const openers = new Map<string, () => void>();
+export function registerSpreadsheetOpener(id: string, open: () => void) {
+  openers.set(id, open);
+  return () => {
+    if (openers.get(id) === open) openers.delete(id);
+  };
+}
+export function openSpreadsheetEditor(id: string) {
+  openers.get(id)?.();
+}
 const cellSizers = new WeakMap<HTMLIFrameElement, CellSizer>();
 export function registerSpreadsheetCellSizer(
   frame: HTMLIFrameElement,
@@ -70,8 +84,9 @@ export function resizeSpreadsheetCells(
   frame: HTMLIFrameElement,
   width: number,
   height: number,
+  beforeChange: () => void,
 ) {
   const size = cellSizers.get(frame);
   if (!size) throw Error("The spreadsheet is not ready.");
-  return size(width, height);
+  return size(width, height, beforeChange);
 }

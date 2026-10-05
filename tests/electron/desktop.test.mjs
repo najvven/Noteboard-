@@ -371,6 +371,31 @@ test('desktop spreadsheet edits directly and keeps its live session when expande
   await expect(window.locator('[data-board-element-id]')).toHaveCount(1);assert.deepEqual(errors,[]);
 });
 
+test('desktop simple spreadsheet shows every cell with headers and hosts real ribbon rules', {timeout:60000},async t=>{
+  const board=seed('select'),document={format:'noteboard/workbook',version:1,mode:'simple',activeSheetId:'sheet-1',workbook:{id:'finite-native',name:'Simple',sheetOrder:['sheet-1'],styles:{},sheets:{'sheet-1':{id:'sheet-1',name:'Sheet 1',rowCount:5,columnCount:3,defaultColumnWidth:100,defaultRowHeight:24,rowHeader:{width:46},columnHeader:{height:20},zoomRatio:1,cellData:{}}}}};
+  board.elements=[{id:'sheet',type:'table',position:{x:100,y:120},size:{width:348,height:142},content:JSON.stringify(document),zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  await window.locator('[data-board-element-id="sheet"]').click({position:{x:80,y:15}});
+  const cells=window.frameLocator('iframe[title="Spreadsheet cells"]'),grid=cells.locator('canvas[id^="univer-sheet-main-canvas_"]');await grid.waitFor();
+  await expect(window.getByRole('button',{name:'Edit spreadsheet',exact:true})).toHaveCount(0);
+  await grid.click({position:{x:290,y:128}});await window.keyboard.type('7');await window.keyboard.press('Enter');
+  const read=()=>window.locator('iframe[title="Spreadsheet cells"]').evaluate(frame=>JSON.parse(frame.contentWindow.noteboardSheet.snapshot()));
+  await expect.poll(async()=>(await read()).workbook.sheets['sheet-1'].cellData?.[4]?.[2]?.v).toBe(7);
+  await window.getByLabel('Cell width',{exact:true}).fill('80');await window.getByLabel('Cell width',{exact:true}).press('Tab');
+  await expect.poll(()=>window.locator('[data-spreadsheet-object]').evaluate(object=>object.style.width)).toBe('288px');
+  await expect.poll(async()=>(await read()).workbook.sheets['sheet-1'].columnData?.[0]?.w).toBe(80);
+  // The desktop's fractional app zoom rounds the two physical border pixels.
+  // Assert the exact object model above and at most one pixel of raster rounding.
+  await expect.poll(()=>window.locator('iframe[title="Spreadsheet cells"]').evaluate(frame=>Math.abs(frame.clientWidth-286))).toBeLessThanOrEqual(1);
+  const panel=window.getByRole('complementary',{name:'Spreadsheet settings'}),ribbon=panel.locator('[data-spreadsheet-ribbon]');
+  await ribbon.getByText('Data',{exact:true}).click();await ribbon.getByRole('button',{name:'Data validation',exact:true}).click();await ribbon.getByText('Data validation management',{exact:true}).click();
+  await panel.getByRole('button',{name:'Add Rule',exact:true}).click();
+  const value=panel.getByRole('textbox',{name:'Please input value or formula',exact:true});await value.click();await value.press('Control+a');await value.pressSequentially('10');await value.press('Tab');
+  await panel.getByRole('button',{name:'Done',exact:true}).click();
+  await expect.poll(async()=>JSON.parse((await read()).workbook.resources.find(resource=>resource.name==='SHEET_DATA_VALIDATION_PLUGIN').data)['sheet-1'][0].formula1).toBe('10');
+  assert.equal((await read()).mode,'simple');assert.equal((await read()).workbook.sheets['sheet-1'].rowCount,5);assert.equal((await read()).workbook.sheets['sheet-1'].columnCount,3);assert.deepEqual(errors,[]);
+});
+
 test('desktop Web enforces ad, popup and cookie settings from first load and after toggling', {timeout:60000}, async t => {
   const progress = label => { if (process.env.NOTEBOARD_PRIVACY_TRACE) console.log(label); };
   let adRequests = 0, pageLoads = 0;

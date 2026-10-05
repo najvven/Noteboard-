@@ -131,6 +131,7 @@ export interface BoardEditorSettings {
   selectMode?: import('./features/board/select-mode').SelectMode;
   spreadsheetCellWidth?: number;
   spreadsheetCellHeight?: number;
+  spreadsheetMode?: 'advanced' | 'simple';
   customColors?: Record<string, string[]>;
   pendingProps?: Partial<BoardElement>;
   alwaysOnTop?: boolean;

@@ -48,7 +48,11 @@ import { elementColors, defaultFillColor } from "../features/board/element-color
 import SaveAsDialog from "./SaveAsDialog";
 import SpreadsheetElement from "./SpreadsheetElement";
 import SpreadsheetCellSizeControls from './SpreadsheetCellSizeControls';
-import {spreadsheetBridge,resizeSpreadsheetCells} from '../features/spreadsheet/editor-bridge';
+import {gridObjectSize, snapGridObjectSize, fitGridObjectSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
+import {createSimpleWorkbook, resizeSimpleWorkbook} from '../features/spreadsheet/simple-workbook';
+
+const isSpreadsheetPanelEvent=(event:Event)=>event.composedPath().some(target=>target instanceof Element && Boolean(target.closest('[data-spreadsheet-panel]')));
+import {spreadsheetBridge,resizeSpreadsheetCells,openSpreadsheetEditor} from '../features/spreadsheet/editor-bridge';
 import { createWorkbookDocument, readLiveWorkbookSnapshots, normalizeCellSize, workbookCellSize, parseWorkbookDocument, withWorkbookCellSize } from "../features/spreadsheet/workbook";
 import { createSavedBoard, createSavedTemplate, type SaveAsKind } from "../features/board/save-as";
 import MenuSettingsBlock, { type PreviewMode } from "./MenuSettingsBlock";
@@ -1317,6 +1321,7 @@ export default function BoardEditor({
     initialEditorSettings.pendingProps ?? {},
   );
   const [spreadsheetCellSize,setSpreadsheetCellSize] = useState(() => normalizeCellSize(initialEditorSettings.spreadsheetCellWidth ?? 100,initialEditorSettings.spreadsheetCellHeight ?? 24));
+  const [spreadsheetMode,setSpreadsheetMode] = useState<SpreadsheetMode>(initialEditorSettings.spreadsheetMode === 'simple' ? 'simple' : 'advanced');
   const [spreadsheetSizeError,setSpreadsheetSizeError] = useState('');
   const spreadsheetSizeTask = useRef(Promise.resolve());
   const selectedSpreadsheet = elements.find(element => element.id === selectedId && element.type === 'table');
@@ -1332,9 +1337,12 @@ export default function BoardEditor({
       const api=spreadsheetBridge(frame ?? null), content=api?.snapshot() || element.content;
       const current=workbookCellSize(parseWorkbookDocument(content));
       const size=normalizeCellSize(axis==='width'?value:current.width,axis==='height'?value:current.height);
-      pushDocument(readLiveWorkbookSnapshots(elementsRef.current,true));
-      if(frame)await resizeSpreadsheetCells(frame,size.width,size.height);
-      else updateElement(id,{content:withWorkbookCellSize(content,size.width,size.height)});
+      if(frame)await resizeSpreadsheetCells(frame,size.width,size.height,()=>pushDocument(readLiveWorkbookSnapshots(elementsRef.current,true)));
+      else {
+        pushDocument(readLiveWorkbookSnapshots(elementsRef.current,true));
+        const next=withWorkbookCellSize(content,size.width,size.height), doc=parseWorkbookDocument(next);
+        updateElement(id,{content:next,...(doc?.mode==='simple'?{size:gridObjectSize(doc)}:{})});
+      }
     }).catch(reason=>setSpreadsheetSizeError(reason instanceof Error?reason.message:'Could not change cell size.'));
   };
 
@@ -2027,6 +2035,7 @@ export default function BoardEditor({
     activeTool,
     selectMode,
     spreadsheetCellSize,
+    spreadsheetMode,
     customColors,
     pendingProps,
     keepToolActive,
@@ -2350,6 +2359,7 @@ export default function BoardEditor({
   // Keyboard Shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isSpreadsheetPanelEvent(e)) return;
       pressedKeysRef.current.add(normalizeShortcutKey(e.key));
       setIsAltKeyDown(isShortcutPressed(cropShortcut, e));
 
@@ -4704,8 +4714,13 @@ export default function BoardEditor({
       finalRect.w = Math.max(finalRect.w, minimum.width);
       finalRect.h = Math.max(finalRect.h, minimum.height);
       if (type === 'table') {
-        finalRect.w = Math.ceil(finalRect.w/spreadsheetCellSize.width)*spreadsheetCellSize.width;
-        finalRect.h = Math.ceil(finalRect.h/spreadsheetCellSize.height)*spreadsheetCellSize.height;
+        if (spreadsheetMode==='simple') {
+          const size=snapGridObjectSize(rect.w,rect.h,spreadsheetCellSize);
+          finalRect.w=size.width;finalRect.h=size.height;
+        } else {
+          finalRect.w = Math.ceil(finalRect.w/spreadsheetCellSize.width)*spreadsheetCellSize.width;
+          finalRect.h = Math.ceil(finalRect.h/spreadsheetCellSize.height)*spreadsheetCellSize.height;
+        }
       }
       const bounds = activeSurfaceBoundsRef.current;
       if (bounds) {
@@ -4726,7 +4741,11 @@ export default function BoardEditor({
     let defaultContent = "";
     if (type === "h1" || type === "h2" || type === "h3") defaultContent = "";
     if (type === "text") defaultContent = "";
-    if (type === "table") defaultContent = JSON.stringify(createWorkbookDocument('Spreadsheet',[],spreadsheetCellSize));
+    if (type === "table") {
+      const doc=spreadsheetMode==='simple'?createSimpleWorkbook(finalRect.w,finalRect.h,spreadsheetCellSize):createWorkbookDocument('Spreadsheet',[],spreadsheetCellSize);
+      if (spreadsheetMode==='simple') {const size=gridObjectSize(doc);finalRect.w=size.width;finalRect.h=size.height;}
+      defaultContent=JSON.stringify(doc);
+    }
 
     const placementProps = resolveObjectPlacementProps({
       type,
@@ -5086,7 +5105,7 @@ export default function BoardEditor({
   };
 
   useEffect(() => {
-    const inEditor = (event: ClipboardEvent) => isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement) || Boolean(document.querySelector('dialog[data-spreadsheet-editor][open]'));
+    const inEditor = (event: ClipboardEvent) => isSpreadsheetPanelEvent(event) || isClipboardTextTarget(event.target) || isClipboardTextTarget(document.activeElement) || Boolean(document.querySelector('dialog[data-spreadsheet-editor][open]'));
     const handleCopyOrCut = (event: ClipboardEvent) => {
       if (event.defaultPrevented || !event.clipboardData || inEditor(event)) return;
       const source=clipboardSelection();
@@ -5532,6 +5551,7 @@ export default function BoardEditor({
     selectMode,
     spreadsheetCellWidth:spreadsheetCellSize.width,
     spreadsheetCellHeight:spreadsheetCellSize.height,
+    spreadsheetMode,
     customColors,
     pendingProps: overrides.pendingProps ?? pendingProps,
     alwaysOnTop,
@@ -6081,6 +6101,10 @@ export default function BoardEditor({
     if (tool === "select" || (current.x === start.x && current.y === start.y)) return current;
     if (tool === 'table') {
       const dx=current.x-start.x,dy=current.y-start.y;
+      if (spreadsheetMode==='simple') {
+        const size=snapGridObjectSize(Math.abs(dx),Math.abs(dy),spreadsheetCellSize);
+        return {x:start.x+(dx<0?-1:1)*size.width,y:start.y+(dy<0?-1:1)*size.height};
+      }
       return {x:start.x+(dx<0?-1:1)*Math.max(spreadsheetCellSize.width,Math.round(Math.abs(dx)/spreadsheetCellSize.width)*spreadsheetCellSize.width),
         y:start.y+(dy<0?-1:1)*Math.max(spreadsheetCellSize.height,Math.round(Math.abs(dy)/spreadsheetCellSize.height)*spreadsheetCellSize.height)};
     }
@@ -9409,7 +9433,9 @@ export default function BoardEditor({
               <AnimatePresence>
                 <ToolPropertiesBar key="bottom-toolbar">
                   {activeType === 'table' && <div className={bottomToolbarGroupClass}>
+                    {!selectedElement ? <SegmentedControl label="Spreadsheet mode" value={spreadsheetMode} onChange={setSpreadsheetMode} options={[{value:'advanced',label:'Advanced'},{value:'simple',label:'Simple'}]}/> : <span className="px-2 text-xs font-semibold text-gray-600">{getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='simple'?'Simple':'Advanced'}</span>}
                     <SpreadsheetCellSizeControls key={selectedElement?.id ?? 'new-spreadsheet'} width={selectedElement?selectedCellSize.width:spreadsheetCellSize.width} height={selectedElement?selectedCellSize.height:spreadsheetCellSize.height} onCommit={updateSpreadsheetCellSize}/>
+                    {selectedElement && getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='advanced' && <button type="button" className="rounded-md border border-gray-300 px-2 py-1.5 text-xs font-semibold" onClick={()=>openSpreadsheetEditor(selectedElement.id)}>Edit spreadsheet</button>}
                     {spreadsheetSizeError && <span role="alert" className="max-w-48 text-xs text-red-600">{spreadsheetSizeError}</span>}
                   </div>}
                   {activeTool === 'eraser' && !selectedElement && (
@@ -10588,7 +10614,7 @@ function BoardElementNode({
       }
 
       const isProportional =
-        element.type==='group' ||
+        element.type==='table' ? false : element.type==='group' ||
         isTextScaling(element) ||
         proportionalScale ||
         element.keepRatio === true ||
@@ -10660,7 +10686,8 @@ function BoardElementNode({
         }, 750);
       }
 
-      const minSize = getElementMinSize(element);
+      const simpleDoc=element.type==='table'?parseWorkbookDocument(element.content):null;
+      const minSize = simpleDoc?.mode==='simple'?fitGridObjectSize(simpleDoc,0,0):getElementMinSize(element);
       let finalW: number;
       let finalH: number;
       if (isProportional) {
@@ -10683,8 +10710,15 @@ function BoardElementNode({
 
       if (element.type === 'table' && !isProportional) {
         const cell=workbookCellSize(parseWorkbookDocument(element.content));
-        if (dir.includes('e') || dir.includes('w')) finalW=Math.max(Math.ceil(minSize.width/cell.width)*cell.width,Math.round(finalW/cell.width)*cell.width);
-        if (dir.includes('n') || dir.includes('s')) finalH=Math.max(Math.ceil(minSize.height/cell.height)*cell.height,Math.round(finalH/cell.height)*cell.height);
+        const doc=parseWorkbookDocument(element.content);
+        if (doc?.mode==='simple') {
+          const size=fitGridObjectSize(doc,finalW,finalH);
+          if (dir.includes('e') || dir.includes('w')) finalW=size.width;
+          if (dir.includes('n') || dir.includes('s')) finalH=size.height;
+        } else {
+          if (dir.includes('e') || dir.includes('w')) finalW=Math.max(Math.ceil(minSize.width/cell.width)*cell.width,Math.round(finalW/cell.width)*cell.width);
+          if (dir.includes('n') || dir.includes('s')) finalH=Math.max(Math.ceil(minSize.height/cell.height)*cell.height,Math.round(finalH/cell.height)*cell.height);
+        }
       }
 
       signedW = signedW < 0 ? -finalW : finalW;
@@ -10758,6 +10792,9 @@ function BoardElementNode({
           y: TEXT_TYPES.includes(element.type) ? newY : localSnap(newY),
         },
       };
+
+      if (element.type==='table' && getSpreadsheetMode(parseWorkbookDocument(element.content))==='simple')
+        updatePayload.content=resizeSimpleWorkbook(element.content,finalW,finalH).content;
 
       if (isTextScaling(element)) {
         updatePayload.textScale = resizedTextScale(element, startWidth, finalW);

@@ -6,7 +6,7 @@ import React, {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Table2, Maximize2, Check, X, Upload, Download } from "lucide-react";
+import { Table2, Check, X, Upload, Download } from "lucide-react";
 import type { BoardElement } from "../types";
 import {
   createWorkbookDocument,
@@ -15,10 +15,12 @@ import {
 import {
   spreadsheetBridge,
   registerSpreadsheetCellSizer,
+  registerSpreadsheetOpener,
   type SpreadsheetAction,
   type SpreadsheetSelection,
 } from "../features/spreadsheet/editor-bridge";
 import SpreadsheetPanel from "./SpreadsheetPanel";
+import {gridObjectSize} from '../features/spreadsheet/grid-geometry';
 
 export default function SpreadsheetElement({
   element,
@@ -61,9 +63,10 @@ export default function SpreadsheetElement({
     [element.content],
   );
   const width = element.size?.width ?? 720, height = element.size?.height ?? 420;
+  const simple=document?.mode==='simple';
   const previewValid = Boolean(document?.preview && document.previewViewport &&
     Math.abs(document.previewViewport.width - (width - 2)) < 1 &&
-    Math.abs(document.previewViewport.height - (height - 34)) < 1);
+    Math.abs(document.previewViewport.height - (height - 2)) < 1);
   // Only a visible invalid thumbnail needs a temporary renderer. Selecting an
   // object uses the same cell renderer and viewport, without a second grid.
   const mounted = editing || busy || visible && !previewValid;
@@ -74,10 +77,11 @@ export default function SpreadsheetElement({
     return () => observer.disconnect();
   }, []);
   const emit = (content: string, commit = false) => {
-    if (!parseWorkbookDocument(content)) return;
+    const doc=parseWorkbookDocument(content);
+    if (!doc) return;
     lastEmitted.current = content;
     if (commit || content !== latest.current.element.content)
-      latest.current.onUpdate({ content }, !commit);
+      latest.current.onUpdate({ content,...(doc.mode==='simple'?{size:gridObjectSize(doc)}:{}) }, !commit);
   };
   const sendInit = () =>
     frame.current?.contentWindow?.postMessage(
@@ -89,6 +93,7 @@ export default function SpreadsheetElement({
         originalContent: originalContent.current,
         expanded: expandedRef.current,
         interactive: editingRef.current,
+        ribbonTarget: `spreadsheet-ribbon-${element.id}`,
       },
       "*",
     );
@@ -138,9 +143,14 @@ export default function SpreadsheetElement({
     const ownedFrame = frame.current!;
     const unregister = registerSpreadsheetCellSizer(
       ownedFrame,
-      async (width, height) => {
+      async (width, height, beforeChange) => {
         const api = spreadsheetBridge(ownedFrame);
         if (!api) throw Error("The spreadsheet is not ready.");
+        // Accept the current draft before capturing canvas history. Otherwise
+        // that history update can echo back as a workbook replacement while
+        // the dimension command is still running.
+        emit(api.historySnapshot() || api.snapshot());
+        beforeChange();
         emit(await api.setCellDimensions(width, height), true);
       },
     );
@@ -204,8 +214,9 @@ export default function SpreadsheetElement({
   }, [element.content, mounted, loading]);
 
   const open = () => {
-    if (allowEditing) setExpanded(true);
+    if (allowEditing && !simple) setExpanded(true);
   };
+  useLayoutEffect(()=>registerSpreadsheetOpener(element.id,open),[element.id,allowEditing,simple]);
   const finish = async () => {
     if (busy) return;
     setBusy(true);
@@ -322,17 +333,14 @@ export default function SpreadsheetElement({
           height: element.size?.height ?? 420,
         }}
       >
-        <div className="flex h-8 items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 text-xs font-semibold">
-          <Table2 className="h-4 w-4 shrink-0" />{element.name || "Spreadsheet"}
-        </div>
         {previewValid ? <img
           data-spreadsheet-preview="true"
           src={document!.preview}
           draggable={false}
           className="pointer-events-none block w-full"
-          style={{height: "calc(100% - 32px)"}}
+          style={{height: "100%"}}
           alt={document!.workbook.name || "Spreadsheet"}
-        /> : <div className="flex items-center justify-center text-xs text-slate-500" style={{height:"calc(100% - 32px)"}}>Preparing spreadsheet…</div>}
+        /> : <div className="flex h-full items-center justify-center text-xs text-slate-500">Preparing spreadsheet…</div>}
         {mounted && (
           <dialog
             ref={dialog}
@@ -361,8 +369,8 @@ export default function SpreadsheetElement({
                 : "absolute inset-0 m-0 h-full max-h-none w-full max-w-none overflow-hidden border-0 bg-white p-0"
             }
           >
-            <div
-              className={`flex ${expanded ? "h-11" : "h-8"} items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3`}
+            {expanded && <div
+              className="flex h-11 items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-3"
             >
               <span className="flex min-w-0 items-center gap-2 truncate text-xs font-semibold">
                 <Table2 className="h-4 w-4 shrink-0" />
@@ -375,17 +383,6 @@ export default function SpreadsheetElement({
                   event.preventDefault();
                 }}
               >
-                {!expanded ? editing && (
-                  <button
-                    type="button"
-                    aria-label="Edit spreadsheet"
-                    onClick={open}
-                    className="flex items-center gap-1 text-xs font-bold text-blue-600"
-                  >
-                    <Maximize2 className="h-3.5 w-3.5" />
-                    Edit spreadsheet
-                  </button>
-                ) : (
                   <>
                     {!loading && !fatal && (
                       <>
@@ -434,9 +431,8 @@ export default function SpreadsheetElement({
                       </button>
                     )}
                   </>
-                )}
               </div>
-            </div>
+            </div>}
             <input
               ref={importInput}
               type="file"
@@ -469,7 +465,7 @@ export default function SpreadsheetElement({
               src={new URL("sheet.html", window.location.href).href}
               onLoad={sendInit}
               className="block w-full border-0"
-              style={{ height: `calc(100% - ${expanded ? 44 : 32}px)` }}
+              style={{ height: expanded ? 'calc(100% - 44px)' : '100%' }}
               sandbox="allow-scripts allow-same-origin allow-downloads"
             />
           </dialog>
@@ -483,7 +479,8 @@ export default function SpreadsheetElement({
             selection={selection}
             disabled={busy || loading || fatal}
             onAction={(action) => void run(action)}
-            onExpand={open}
+            expandable={!simple}
+            ribbonTarget={`spreadsheet-ribbon-${element.id}`}
             onImport={() => importInput.current?.click()}
             onExport={(format) => void exchange(format)}
           >

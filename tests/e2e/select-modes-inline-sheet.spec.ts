@@ -101,7 +101,7 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
     )
     .toBe(90);
   await page
-    .getByRole("button", { name: "Undo spreadsheet change", exact: true })
+    .getByRole("button", { name: "Undo", exact: true })
     .click();
   await expect
     .poll(async () => {
@@ -110,7 +110,7 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
     })
     .toBe(100);
   await page
-    .getByRole("button", { name: "Redo spreadsheet change", exact: true })
+    .getByRole("button", { name: "Redo", exact: true })
     .click();
   await expect
     .poll(
@@ -297,7 +297,7 @@ test("inline spreadsheet edits, selects whole cells and shares its session and u
   await page.mouse.move(bounds.x + 190, bounds.y + 56, { steps: 6 });
   await page.mouse.up();
   await expect(panel).toContainText("A1:B2");
-  await panel.getByRole("button", { name: "Bold cells", exact: true }).click();
+  await panel.getByRole("button", { name: "Bold", exact: true }).click();
   await expect
     .poll(async () => {
       const d = await read(page),

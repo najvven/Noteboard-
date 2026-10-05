@@ -2,12 +2,14 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
+import {univerHostPopovers,univerHostPopoversPrebundle} from './scripts/univer-host-popovers.mjs';
 
 export default defineConfig({
   base: './',
   worker: { format: 'es' },
   build: { rollupOptions: { input: { main: path.resolve(__dirname,'index.html'), sheet: path.resolve(__dirname,'sheet.html') } } },
-  plugins: [react(), tailwindcss()],
+  plugins: [univerHostPopovers(), react(), tailwindcss()],
+  optimizeDeps: {include:['@univerjs/preset-sheets-core/worker','@univerjs/preset-sheets-filter/worker'],esbuildOptions:{plugins:[univerHostPopoversPrebundle()]}},
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),

@@ -75,6 +75,33 @@ test('the selection bar copies editable objects and pastes the current clipboard
   await expect(page.locator('[data-board-element-type="rectangle"]')).toHaveCount(3);
 });
 
+test('an oversized clipboard paste reports its limit and the next ordinary paste remains usable',async({page,request})=>{
+  await request.post('/api/pages',{data:[seed('Clipboard bounds','select',[shape('original',120,160)])]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Clipboard bounds',exact:true}).click();
+  const board=(await page.locator('[data-board-root]').boundingBox())!;
+  await drag(page,{x:board.x+500,y:board.y+320},{x:board.x+800,y:board.y+480});
+  await page.evaluate(()=>{
+    Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:async()=>[{
+      types:['image/png'],getType:async()=>{
+        const blob=new Blob(['small fixture'],{type:'image/png'});
+        Object.defineProperty(blob,'size',{value:64*1024*1024+1});return blob;
+      },
+    }]});
+  });
+  const dialogPromise=page.waitForEvent('dialog');
+  const click=clickAreaAction(page,'Paste into area');
+  const dialog=await dialogPromise;
+  expect(dialog.message()).toContain('Clipboard media file exceeds the size limit');
+  await dialog.dismiss();await click;
+  await expect(page.locator('[data-board-element-type="rectangle"]')).toHaveCount(1);
+  await expect(page.locator('[data-board-element-type="media"]')).toHaveCount(0);
+  await page.evaluate(()=>Object.defineProperty(navigator.clipboard,'read',{configurable:true,value:async()=>[{
+    types:['text/plain'],getType:async()=>new Blob(['Ordinary paste after limit'],{type:'text/plain'}),
+  }]}));
+  await clickAreaAction(page,'Paste into area');
+  await expect(page.locator('[data-board-element-type="text"]')).toContainText('Ordinary paste after limit');
+});
+
 test('repeated external file drops work over text, empty Web fields and multiple-file targets',async({page,request})=>{
   await request.post('/api/pages',{data:[seed('Repeated drops','select',[
     {id:'text',type:'text',position:{x:100,y:120},size:{width:350,height:100},content:'Text target',zIndex:1},

@@ -34,6 +34,16 @@ const argb = (value: unknown) =>
     ? `FF${value.slice(1)}`
     : undefined;
 
+// Univer stores dimensions in CSS pixels. ExcelJS stores row heights in points
+// and column widths in the workbook's character-width unit.
+const POINTS_PER_PIXEL = 0.75;
+const EXCEL_COLUMN_PIXELS_PER_UNIT = 7;
+const EXCEL_COLUMN_PIXEL_PADDING = 5;
+const excelColumnWidthToPixels = (width: number) =>
+  width * EXCEL_COLUMN_PIXELS_PER_UNIT + EXCEL_COLUMN_PIXEL_PADDING;
+const pixelsToExcelColumnWidth = (width: number) =>
+  Math.max(1, (width - EXCEL_COLUMN_PIXEL_PADDING) / EXCEL_COLUMN_PIXELS_PER_UNIT);
+
 function fromStyle(style: Partial<ExcelJS.Style>): IStyleData {
   const result: IStyleData = {};
   if (style.font) {
@@ -224,9 +234,14 @@ export async function importSpreadsheet(
       defaultColumnWidth: 100,
       mergeData: [],
     } as Partial<IWorksheetData>;
+    sheet.defaultRowHeight =
+      worksheet.properties.defaultRowHeight / POINTS_PER_PIXEL;
+    sheet.defaultColumnWidth = worksheet.properties.defaultColWidth
+      ? excelColumnWidthToPixels(worksheet.properties.defaultColWidth)
+      : 100;
     worksheet.eachRow((row, r) => {
       sheet.rowData![r - 1] = {
-        ...(row.height ? { h: (row.height * 4) / 3 } : {}),
+        ...(row.height ? { h: row.height / POINTS_PER_PIXEL } : {}),
         hd: row.hidden ? 1 : 0,
       };
       row.eachCell((cell, c) => {
@@ -247,9 +262,9 @@ export async function importSpreadsheet(
         (sheet.cellData![r - 1] ??= {})[c - 1] = value;
       });
     });
-    worksheet.columns.forEach((column, c) => {
+    (worksheet.columns ?? []).forEach((column, c) => {
       sheet.columnData![c] = {
-        ...(column.width ? { w: column.width * 7 + 5 } : {}),
+        ...(column.width ? { w: excelColumnWidthToPixels(column.width) } : {}),
         hd: column.hidden ? 1 : 0,
       };
     });
@@ -310,6 +325,11 @@ export async function exportSpreadsheet(
   for (const id of document.workbook.sheetOrder!) {
     const sheet = sheets[id],
       target = workbook.addWorksheet(sheet.name);
+    target.properties.defaultRowHeight =
+      (sheet.defaultRowHeight ?? 24) * POINTS_PER_PIXEL;
+    target.properties.defaultColWidth = pixelsToExcelColumnWidth(
+      sheet.defaultColumnWidth ?? 100,
+    );
     for (const [r, row] of Object.entries(sheet.cellData || {}))
       for (const [c, cell] of Object.entries(
         (row || {}) as Record<string, ICellData>,
@@ -334,12 +354,12 @@ export async function exportSpreadsheet(
       }
     for (const [r, data] of Object.entries(sheet.rowData || {})) {
       const row = target.getRow(Number(r) + 1);
-      if (data.h) row.height = data.h * 0.75;
+      if (data.h) row.height = data.h * POINTS_PER_PIXEL;
       row.hidden = data.hd === 1;
     }
     for (const [c, data] of Object.entries(sheet.columnData || {})) {
       const column = target.getColumn(Number(c) + 1);
-      if (data.w) column.width = Math.max(1, (data.w - 5) / 7);
+      if (data.w) column.width = pixelsToExcelColumnWidth(data.w);
       column.hidden = data.hd === 1;
     }
     for (const merge of sheet.mergeData || [])

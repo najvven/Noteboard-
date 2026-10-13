@@ -5,6 +5,7 @@ import JSZip from "jszip";
 
 import {
   BoardPackageCancelledError,
+  createBoardArchive,
   extensionFromMime,
   getBoardPackageElements,
   mimeFromAssetPath,
@@ -75,6 +76,59 @@ test("board archive validation restores packaged assets without mutating parsed 
   assert.equal(imported.id, "page-imported");
   assert.match(imported.elements[0].content, /^data:image\/png;base64,/);
   assert.equal(basePage().elements[0].content, "assets/media-1.png");
+});
+
+test("exported 33 MiB media round-trips through the default archive limits", async () => {
+  const source = { ...basePage(), updatedAt: Date.now(), isPinned: false };
+  const mediaBytes = new Uint8Array(33 * 1024 * 1024);
+  mediaBytes.fill(7);
+  source.elements[0].content = `data:image/png;base64,${Buffer.from(mediaBytes).toString("base64")}`;
+
+  const archive = await createBoardArchive(source);
+  const imported = await readBoardArchive(archive);
+
+  assert.ok(!Array.isArray(imported));
+  const restored = Buffer.from(imported.elements[0].content.split(",")[1], "base64");
+  assert.equal(restored.byteLength, mediaBytes.byteLength);
+  assert.equal(restored[0], 7);
+  assert.equal(restored[restored.byteLength - 1], 7);
+});
+
+test("export rejects an asset larger than the import asset budget", async () => {
+  const source = { ...basePage(), updatedAt: Date.now(), isPinned: false };
+  const oversizedBytes = new Uint8Array(64 * 1024 * 1024 + 1);
+  oversizedBytes.fill(3);
+  source.elements[0].content = `data:image/png;base64,${Buffer.from(oversizedBytes).toString("base64")}`;
+
+  await assert.rejects(() => createBoardArchive(source), /Board asset is too large/);
+});
+
+test("literal assets paths in non-media element content remain text", async () => {
+  const page = {
+    ...basePage(),
+    elements: [
+      {
+        id: "text-1",
+        type: "text" as const,
+        position: { x: 0, y: 0 },
+        content: "assets/missing-note.txt",
+        zIndex: 1,
+      },
+      {
+        id: "spreadsheet-1",
+        type: "spreadsheet" as const,
+        position: { x: 0, y: 100 },
+        content: "assets/media-1.png",
+        zIndex: 2,
+      },
+    ],
+  };
+  const archive = await makeArchive(page);
+
+  const imported = await readBoardArchive(archive);
+  assert.ok(!Array.isArray(imported));
+  assert.equal(imported.elements[0].content, "assets/missing-note.txt");
+  assert.equal(imported.elements[1].content, "assets/media-1.png");
 });
 
 test("board archive rejects malformed boards before exposing their elements", async () => {

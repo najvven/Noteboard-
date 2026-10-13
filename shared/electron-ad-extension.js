@@ -3,7 +3,7 @@ import path from 'node:path';
 
 /** The real extension shares one immutable filter engine; websites keep isolated sessions. */
 export function createAdExtensionManager({webContents,sourceDirectory,targetDirectory,getFilterService,getExtensionSession}) {
-  const profiles=new Map(),watched=new WeakSet();
+  const profiles=new Map(),blockedCounts=new WeakMap(),watched=new WeakSet();
   let preparing,shared;
   const prepare=()=>preparing??=(async()=>{
     await fs.mkdir(targetDirectory,{recursive:true});
@@ -73,7 +73,7 @@ export function createAdExtensionManager({webContents,sourceDirectory,targetDire
       const instance=shared?await shared:null;
       if(!profile||!instance||instance.background.isDestroyed())return null;
       const value=await instance.background.executeJavaScript('globalThis.noteboardAdBlock.status()');
-      return {...value,enabled:profile.settings.adBlock!==false,extensionId:instance.id,extensionName:'Noteboard Ad Block'};
+      return {...value,ads:blockedCounts.get(webSession)??0,enabled:profile.settings.adBlock!==false,extensionId:instance.id,extensionName:'Noteboard Ad Block'};
     },
     async filterRequest(webSession,details,topLevelUrl){
       const profile=profiles.get(webSession);
@@ -86,6 +86,7 @@ export function createAdExtensionManager({webContents,sourceDirectory,targetDire
         requestId:String(details.id),tabId:details.webContentsId,
         initiator:details.referrer||frameUrl||topLevelUrl||profile.settings.topLevelUrl};
       const result=await instance.background.executeJavaScript(`globalThis.noteboardAdBlock.filterRequest(${JSON.stringify(request)})`);
+      if(result.redirectUrl||result.cancel===true)blockedCounts.set(webSession,(blockedCounts.get(webSession)??0)+1);
       return result.redirectUrl?{redirectURL:result.redirectUrl}:{cancel:result.cancel===true};
     },
     async refresh(){if(shared)await configureShared(await shared);},

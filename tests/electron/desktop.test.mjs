@@ -22,7 +22,7 @@ const seed = (activeTool = 'text', url = '') => ({
   ],
 });
 
-async function launch(t, board = seed(), { hostRules } = {}) {
+async function launch(t, board = seed(), { hostRules, expectClosed = false } = {}) {
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'noteboard-desktop-'));
   await fs.mkdir(path.join(profile,'data','boards'),{recursive:true});
   await fs.mkdir(artifacts,{recursive:true});
@@ -33,12 +33,14 @@ async function launch(t, board = seed(), { hostRules } = {}) {
     app.__qaMainErrors=[];
     process.on('uncaughtException',error=>app.__qaMainErrors.push(error.stack||error.message));
     process.on('unhandledRejection',error=>app.__qaMainErrors.push(String(error)));
+    app.on('will-quit',()=>require('node:fs').writeFileSync(require('node:path').join(process.env.NOTEBOARD_QA_PROFILE,'main-errors.json'),JSON.stringify(app.__qaMainErrors)));
     app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();});
     app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
     import(${JSON.stringify(pathToFileURL(process.env.NOTEBOARD_TEST_APP_ENTRY || path.join(root,'main.js')).href)});`);
   const env={...process.env,NODE_ENV:'production',NOTEBOARD_QA_PROFILE:profile};
   delete env.ELECTRON_RUN_AS_NODE;
   const app=await _electron.launch({args:[bootstrap, ...(hostRules ? [`--host-resolver-rules=${hostRules}`] : [])],env,timeout:30000});
+  const child = app.process();
   if (process.env.NOTEBOARD_PRIVACY_TRACE) app.process().stderr.on('data', chunk => console.error(chunk.toString()));
   const window=await app.firstWindow();
   const errors=[];
@@ -47,6 +49,10 @@ async function launch(t, board = seed(), { hostRules } = {}) {
   assert.equal(await app.evaluate(({app})=>app.getPath('userData')),profile);
   t.after(async()=>{
     try {
+      if (expectClosed && child.exitCode !== null) {
+        assert.deepEqual(JSON.parse(await fs.readFile(path.join(profile,'main-errors.json'),'utf8')),[], 'Closing must not throw in Electron main');
+        return;
+      }
       const screenshot=path.join(artifacts,`${t.name.replace(/[^a-z0-9]+/gi,'-')}.png`);
       await nativeScreenshot(app,path.basename(screenshot)).catch(()=>undefined);
       if(process.env.NOTEBOARD_PRIVACY_TRACE) {
@@ -56,7 +62,7 @@ async function launch(t, board = seed(), { hostRules } = {}) {
       if(errors.length) t.diagnostic(JSON.stringify(errors));
       assert.deepEqual(await app.evaluate(({app})=>app.__qaMainErrors),[], 'Electron main process must not throw');
     } finally {
-      await app.close();
+      if (!expectClosed || child.exitCode === null) await app.close();
       const resolved=path.resolve(profile), temp=path.resolve(os.tmpdir())+path.sep;
       assert.ok(resolved.startsWith(temp) && path.basename(resolved).startsWith('noteboard-desktop-'));
       await fs.rm(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:150});
@@ -64,7 +70,7 @@ async function launch(t, board = seed(), { hostRules } = {}) {
   });
   await window.getByRole('button',{name:'Open Native source',exact:true}).click();
   await expect(window.locator('[data-board-root]')).toBeVisible();
-  return {app,window,profile,errors};
+  return {app,window,profile,errors,child};
 }
 
 async function fixtureServer(t) {
@@ -84,6 +90,50 @@ async function fixtureServer(t) {
 const guestState = app => app.evaluate(async ({webContents}) => Promise.all(webContents.getAllWebContents().filter(c=>c.getType()==='webview').map(async c=>({
   id:c.id,url:c.getURL(),title:c.getTitle(),body:await c.executeJavaScript('document.body?.innerText || ""').catch(()=>''),
 }))));
+
+test('native close persists the latest large edit before the window exits', {timeout:45000}, async t => {
+  const board = seed('text');
+  board.elements = [board.elements[0]];
+  board.elements[0].content = 'Initial content';
+  const { app, window, profile, errors, child } = await launch(t, board, { expectClosed: true });
+  const content = 'Latest native edit ' + 'a'.repeat(90_000);
+  await window.locator('[data-board-element-editor-id="note"]').fill(content);
+  await app.evaluate(({BrowserWindow}) => BrowserWindow.getAllWindows()[0].close());
+  await expect.poll(() => child.exitCode, {timeout:25000}).not.toBeNull();
+  const saved = JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8'));
+  assert.ok(saved.elements[0].content.includes('Latest native edit'));
+  assert.ok(saved.elements[0].content.length >= content.length);
+  assert.deepEqual(errors, []);
+});
+
+test('native conflicts preserve the other editor and allow saving the latest local draft as a new board', {timeout:45000}, async t => {
+  const board = seed('text'); board.elements = [board.elements[0]];
+  const { window, errors } = await launch(t, board);
+  await window.getByRole('button', {name:'Back',exact:true}).click();
+  await window.getByRole('button', {name:'Open Native source',exact:true}).click();
+  assert.equal(await window.evaluate(async () => {
+    const saved = (await window.noteboardAPI.loadPages()).find(page => page.id === 'native-source');
+    const revision = saved.updatedAt;
+    saved.updatedAt = revision + 1; saved.elements[0].content = 'Other editor committed';
+    return window.noteboardAPI.savePage(saved, {baseRevision:revision});
+  }), true);
+  await window.locator('[data-board-element-editor-id="note"]').fill('Latest native local draft');
+  await expect(window.getByRole('alert')).toContainText('Another editor saved a newer version');
+  await window.getByRole('button', {name:'Save',exact:true}).click();
+  const dialog = window.getByRole('dialog', {name:'Save as',exact:true});
+  await dialog.getByLabel('Save as name').fill('Native conflict copy');
+  await dialog.getByRole('button', {name:'Save as New Board',exact:true}).click();
+  await expect(dialog.getByRole('status')).toContainText('New board saved');
+  const saved = await window.evaluate(() => window.noteboardAPI.loadPages());
+  assert.equal(saved.find(page => page.id === 'native-source').elements[0].content, 'Other editor committed');
+  assert.ok(saved.find(page => page.title === 'Native conflict copy').elements[0].content.includes('Latest native local draft'));
+  await dialog.getByRole('button', {name:'Close save dialog',exact:true}).click();
+  window.once('dialog', dialog => dialog.accept());
+  await window.getByRole('button', {name:'Reload saved version',exact:true}).click();
+  await expect(window.getByRole('button', {name:'Open Native source',exact:true})).toBeVisible();
+  await expect(window.getByRole('alert')).toHaveCount(0);
+  assert.deepEqual(errors, []);
+});
 
 test('native held previews keep their anchor across quadrants and commit the visible bounds', {timeout:30000}, async t => {
   const board = seed('rectangle');
@@ -135,7 +185,7 @@ test('several Web fields remain responsive and release their ad-block engines af
   await expect(window.getByRole('button',{name:'More',exact:true})).toBeEnabled();
   await window.getByRole('button',{name:'Select settings',exact:true}).click();await window.getByRole('group',{name:'Selection mode',exact:true}).getByRole('button',{name:'Lasso',exact:true}).click();await window.getByRole('button',{name:'Select settings',exact:true}).click();
   const canvas=await window.locator('[data-board-root]').boundingBox();
-  await window.mouse.move(canvas.x+20*.7,canvas.y+60*.7);await window.mouse.down();
+  await window.mouse.move(canvas.x+20*.7,canvas.y+60*.7);await window.mouse.down();await window.waitForTimeout(300);
   const scale=canvas.width/1200;
   for(const [x,y] of [[1180,60],[1180,760],[20,760],[20,60]])await window.mouse.move(canvas.x+x*scale,canvas.y+y*scale,{steps:5});
   await window.mouse.up();await expect(window.locator('[data-multi-selection="6"]')).toHaveCount(1);

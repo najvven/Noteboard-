@@ -107,6 +107,137 @@ export function cellFromInput(
   return { v: value, t: 1 };
 }
 
+/** Rename imported sheet references without changing formula string literals. */
+export function renameFormulaSheetReferences(
+  formula: string,
+  replacements: ReadonlyMap<string, string>,
+) {
+  const quotedOrUnquotedSheet =
+    String.raw`(?:'((?:[^']|'')+)'|([^+\-*/^&=<>(),;!:\s'"]+))`;
+  const reference = new RegExp(
+    String.raw`(?<![A-Za-z0-9_.])${quotedOrUnquotedSheet}(?:\s*:\s*${quotedOrUnquotedSheet})?!`,
+    "g",
+  );
+  const escapeSheetName = (name: string) => `'${name.replace(/'/g, "''")}'`;
+  const renameReferences = (part: string) =>
+    part.replace(
+      reference,
+      (match, firstQuoted, firstBare, lastQuoted, lastBare) => {
+        let first = (firstQuoted ?? firstBare).replace(/''/g, "'");
+        let last = lastQuoted ?? lastBare;
+        // Excel also quotes a complete 3D range as 'First:Last'!A1.
+        if (last === undefined && firstQuoted && first.includes(":")) {
+          const separator = first.indexOf(":");
+          last = first.slice(separator + 1);
+          first = first.slice(0, separator);
+        } else if (last !== undefined) {
+          last = last.replace(/''/g, "'");
+        }
+        const renamedFirst = replacements.get(first.toLowerCase()) ?? first;
+        const renamedLast =
+          last === undefined
+            ? undefined
+            : replacements.get(last.toLowerCase()) ?? last;
+        if (renamedFirst === first && renamedLast === last) return match;
+        const range = renamedLast === undefined
+          ? escapeSheetName(renamedFirst)
+          : escapeSheetName(`${renamedFirst}:${renamedLast}`);
+        return `${range}!`;
+      },
+    );
+
+  return formula
+    .split(/("(?:[^"]|"")*")/g)
+    .map((part, index) => (index % 2 ? part : renameReferences(part)))
+    .join("");
+}
+
+/** Assign collision-free imported names using the editor's existing suffix. */
+export function createUniqueSheetNames(
+  importedNames: readonly string[],
+  existingNames: Iterable<string>,
+) {
+  const names = new Set([...existingNames].map((name) => name.toLowerCase()));
+  const replacements = new Map<string, string>();
+  for (const original of importedNames) {
+    let name = original,
+      index = 2;
+    while (names.has(name.toLowerCase()))
+      name = `${original.slice(0, 26)} ${index++}`;
+    names.add(name.toLowerCase());
+    replacements.set(original.toLowerCase(), name);
+  }
+  return replacements;
+}
+
+const isRecord = (value: unknown): value is Record<string, any> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+function isIndexedRecord(value: unknown, limit: number) {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, item]) => {
+    if (!/^(?:0|[1-9]\d*)$/.test(key)) return false;
+    const index = Number(key);
+    return Number.isSafeInteger(index) && index < limit && isRecord(item);
+  });
+}
+
+function isCellDataMatrix(value: unknown, rowCount: number, columnCount: number) {
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([rowKey, row]) => {
+    if (!/^(?:0|[1-9]\d*)$/.test(rowKey)) return false;
+    const rowIndex = Number(rowKey);
+    if (!Number.isSafeInteger(rowIndex) || rowIndex >= rowCount || !isRecord(row))
+      return false;
+    return Object.entries(row).every(([columnKey, cell]) => {
+      if (!/^(?:0|[1-9]\d*)$/.test(columnKey)) return false;
+      const columnIndex = Number(columnKey);
+      if (
+        !Number.isSafeInteger(columnIndex) ||
+        columnIndex >= columnCount ||
+        !isRecord(cell)
+      )
+        return false;
+      if (cell.f !== undefined && typeof cell.f !== "string") return false;
+      if (
+        cell.v !== undefined &&
+        cell.v !== null &&
+        typeof cell.v !== "string" &&
+        typeof cell.v !== "number" &&
+        typeof cell.v !== "boolean"
+      )
+        return false;
+      if (cell.s !== undefined && cell.s !== null && typeof cell.s !== "string" && !isRecord(cell.s))
+        return false;
+      if (cell.p !== undefined && cell.p !== null) {
+        if (!isRecord(cell.p)) return false;
+        if (cell.p.body !== undefined) {
+          if (!isRecord(cell.p.body)) return false;
+          if (
+            cell.p.body.dataStream !== undefined &&
+            typeof cell.p.body.dataStream !== "string"
+          )
+            return false;
+        }
+      }
+      return true;
+    });
+  });
+}
+
+function hasValidDimensionOverrides(value: unknown, dimension: "h" | "w", limit: number) {
+  return (
+    value === undefined ||
+    (isIndexedRecord(value, limit) &&
+      Object.values(value).every((item) =>
+        item[dimension] === undefined ||
+        (typeof item[dimension] === "number" &&
+          Number.isFinite(item[dimension]) &&
+          item[dimension] > 0),
+      ))
+  );
+}
+
 export function parseWorkbookDocument(
   content: string,
 ): WorkbookDocument | null {
@@ -117,13 +248,18 @@ export function parseWorkbookDocument(
     if (
       value.format !== "noteboard/workbook" ||
       value.version !== 1 ||
-      !book ||
+      !isRecord(book) ||
       typeof book.id !== "string" ||
+      typeof book.name !== "string" ||
       !Array.isArray(book.sheetOrder) ||
       !book.sheetOrder.length ||
       book.sheetOrder.length > 256 ||
-      !book.sheets
+      !isRecord(book.sheets) ||
+      (book.styles !== undefined && !isRecord(book.styles)) ||
+      new Set(book.sheetOrder).size !== book.sheetOrder.length
     )
+      return null;
+    if (Object.keys(book.sheets).some((id) => !book.sheetOrder.includes(id)))
       return null;
     if (value.mode !== undefined && value.mode !== 'simple' && value.mode !== 'advanced') return null;
     for (const id of book.sheetOrder) {
@@ -131,13 +267,44 @@ export function parseWorkbookDocument(
         return null;
       const sheet = book.sheets[id];
       if (
-        !sheet ||
+        !isRecord(sheet) ||
+        sheet.id !== id ||
+        typeof sheet.id !== "string" ||
+        typeof sheet.name !== "string" ||
         !Number.isInteger(sheet.rowCount) ||
         sheet.rowCount < 1 ||
         sheet.rowCount > 1048576 ||
         !Number.isInteger(sheet.columnCount) ||
         sheet.columnCount < 1 ||
-        sheet.columnCount > 16384
+        sheet.columnCount > 16384 ||
+        (sheet.defaultRowHeight !== undefined &&
+          (typeof sheet.defaultRowHeight !== "number" ||
+            !Number.isFinite(sheet.defaultRowHeight) ||
+            sheet.defaultRowHeight <= 0)) ||
+        (sheet.defaultColumnWidth !== undefined &&
+          (typeof sheet.defaultColumnWidth !== "number" ||
+            !Number.isFinite(sheet.defaultColumnWidth) ||
+            sheet.defaultColumnWidth <= 0)) ||
+        (sheet.cellData !== undefined &&
+          !isCellDataMatrix(sheet.cellData, sheet.rowCount, sheet.columnCount)) ||
+        !hasValidDimensionOverrides(sheet.rowData, "h", sheet.rowCount) ||
+        !hasValidDimensionOverrides(sheet.columnData, "w", sheet.columnCount) ||
+        (sheet.mergeData !== undefined &&
+          (!Array.isArray(sheet.mergeData) ||
+            sheet.mergeData.some(
+              (range: any) =>
+                !isRecord(range) ||
+                !Number.isInteger(range.startRow) ||
+                !Number.isInteger(range.endRow) ||
+                !Number.isInteger(range.startColumn) ||
+                !Number.isInteger(range.endColumn) ||
+                range.startRow < 0 ||
+                range.startRow > range.endRow ||
+                range.endRow >= sheet.rowCount ||
+                range.startColumn < 0 ||
+                range.startColumn > range.endColumn ||
+                range.endColumn >= sheet.columnCount,
+            )))
       )
         return null;
     }

@@ -22,9 +22,10 @@ import {
 } from "../shared/persistence.js";
 import { mapInBatches } from "../shared/batch.js";
 
-test("board ids are normalized and empty ids are rejected", () => {
+test("board ids keep their identity and unsafe ids are rejected", () => {
   assert.equal(normalizeBoardId("page-1_bad"), "page-1_bad");
-  assert.equal(normalizeBoardId("../page-2"), "page-2");
+  assert.throws(() => normalizeBoardId("../page-2"));
+  assert.throws(() => normalizeBoardId("page/2"));
   assert.throws(() => normalizeBoardId("../"));
 });
 

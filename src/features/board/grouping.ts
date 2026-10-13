@@ -2,6 +2,7 @@ import type { BoardElement, Position, Size } from '../../types';
 import {createElementHierarchy,type ElementHierarchy} from './element-hierarchy';
 import {selectedBounds} from './selection';
 import {getTextScale,isScalableText} from './text-scaling';
+import {removeElementTreeAndReferences} from './element-removal';
 
 export const isMergedGroupMember=(element:BoardElement,hierarchy:ElementHierarchy)=>hierarchy.ancestors(element.id).slice(1).some(parent=>parent.type==='group');
 
@@ -88,5 +89,6 @@ export function ungroupAreaElements(elements:BoardElement[],id:string) {
       ...(applyOpacity&&group.opacity!==undefined?{opacity:(element.opacity??100)*group.opacity/100}:{}),
     };
   });
-  return {elements:next,selectedIds:elements.filter(element=>element.type!=='layer'&&hierarchy.isDescendantOf(element.id,id)&&hierarchy.ancestors(element.id).slice(1).find(parent=>parent.type==='group')?.id===id).map(element=>element.id)};
+  const elementsWithoutGroup = removeElementTreeAndReferences([...next, group], id).elements;
+  return {elements:elementsWithoutGroup,selectedIds:elements.filter(element=>element.type!=='layer'&&hierarchy.isDescendantOf(element.id,id)&&hierarchy.ancestors(element.id).slice(1).find(parent=>parent.type==='group')?.id===id).map(element=>element.id)};
 }

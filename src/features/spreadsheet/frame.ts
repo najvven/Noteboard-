@@ -21,9 +21,11 @@ import "@univerjs/preset-sheets-data-validation/lib/index.css";
 import "@univerjs/preset-sheets-conditional-formatting/lib/index.css";
 import {
   cellFromInput,
+  createUniqueSheetNames,
   MAX_WORKBOOK_CHARACTERS,
   parseWorkbookDocument,
   normalizeCellSize,
+  renameFormulaSheetReferences,
   type WorkbookDocument,
 } from "./workbook";
 import type { SpreadsheetAction, SpreadsheetSelection } from "./editor-bridge";
@@ -159,6 +161,7 @@ function snapshot(includePreview = true) {
   value.previewViewport = cachedViewport;
   return JSON.stringify(value);
 }
+
 async function flush() {
   clearTimeout(timer);
   await api?.getActiveWorkbook()?.endEditingAsync(true);
@@ -224,20 +227,11 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
     throw Error(
       "These sheets would exceed the workbook size limit. Import them into a separate spreadsheet.",
     );
-  const book = api!.getActiveWorkbook()!,
-    names = new Set(
-      book.getSheets().map((sheet) => sheet.getSheetName().toLowerCase()),
-    );
-  const replacements = new Map<string, string>();
-  for (const id of document.workbook.sheetOrder) {
-    const original = document.workbook.sheets[id].name;
-    let name = original,
-      index = 2;
-    while (names.has(name.toLowerCase()))
-      name = `${original.slice(0, 26)} ${index++}`;
-    names.add(name.toLowerCase());
-    replacements.set(original.toLowerCase(), name);
-  }
+  const book = api!.getActiveWorkbook()!;
+  const replacements = createUniqueSheetNames(
+    document.workbook.sheetOrder.map((id) => document.workbook.sheets[id].name),
+    book.getSheets().map((sheet) => sheet.getSheetName()),
+  );
   const inserted: string[] = [];
   try {
     for (const id of document.workbook.sheetOrder) {
@@ -245,24 +239,7 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
       for (const row of Object.values(sheet.cellData) as any[])
         for (const cell of Object.values(row) as any[]) {
           if (!cell?.f) continue;
-          cell.f = cell.f
-            .split(/("(?:[^"]|"")*")/g)
-            .map((part: string, index: number) =>
-              index % 2
-                ? part
-                : part.replace(
-                    /(?:'((?:[^']|'')+)'|([^+\-*/^&=<>(),:;\s!]+))!/g,
-                    (match: string, quoted: string, unquoted: string) => {
-                      const replacement = replacements.get(
-                        (quoted?.replace(/''/g, "'") ?? unquoted).toLowerCase(),
-                      );
-                      return replacement
-                        ? `'${replacement.replace(/'/g, "''")}'!`
-                        : match;
-                    },
-                  ),
-            )
-            .join("");
+          cell.f = renameFormulaSheetReferences(cell.f, replacements);
         }
       sheet.name = replacements.get(sheet.name.toLowerCase());
       sheet.id = `sheet-${crypto.randomUUID()}`;

@@ -3,12 +3,12 @@
   "description": "Desktop whiteboard and spatial note-taking application.",
   "author": "Noteboard+ contributors",
   "private": true,
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "main": "main.js",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "node scripts/check-web-filters.mjs && vite build && node scripts/build-web-adblock-extension.mjs && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild web-privacy-preload.cjs --bundle --platform=node --format=cjs --external:electron --outfile=dist/web-privacy-preload.cjs",
+    "build": "node scripts/check-web-filters.mjs && vite build && node scripts/build-native-assets.mjs && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "preview": "cross-env NODE_ENV=production node dist/server.cjs",
     "start": "node dist/server.cjs",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
@@ -18,7 +18,7 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 tests/*.test.mjs tests/*.test.ts tests/*.test.tsx",
     "test:e2e": "npm run build && playwright test",
     "test:stress": "node tests/storage-stress.mjs",
-    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron .\"",
+    "electron:dev": "node scripts/build-native-assets.mjs && concurrently -k \"npm run dev\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron .\"",
     "make": "npm run build && electron-builder",
     "test:desktop": "npm run build && node --test --test-concurrency=1 tests/electron/*.test.mjs",
     "filters:update": "node scripts/update-web-filters.mjs"

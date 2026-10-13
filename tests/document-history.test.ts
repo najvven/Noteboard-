@@ -106,3 +106,37 @@ test("identical updates preserve the last meaningful action and the redo branch"
     "two",
   );
 });
+
+test("workspace background grid presentation is captured, compared, and undoable", () => {
+  const initialPresentation = {
+    title: "Grid history",
+    boardColor: "#ffffff",
+    gridColor: "#e2e8f0",
+    gridSize: 24,
+    gridThickness: 1,
+    showGrid: false,
+    snapToGrid: false,
+    showWorkspaceGrid: true,
+    workspaceGridColor: "#111111",
+    workspaceGridThickness: 2,
+    workspaceGridSize: 40,
+  };
+  const initial = createBoardDocumentHistory({
+    ...snapshot("grid"),
+    presentation: initialPresentation,
+  });
+  const changed = pushBoardDocumentHistory(initial, {
+    ...snapshot("grid"),
+    presentation: { ...initialPresentation, workspaceGridSize: 64 },
+  });
+
+  assert.equal(changed.entries.length, 2);
+  assert.equal(
+    undoBoardDocumentHistory(changed).entries[0].presentation?.workspaceGridSize,
+    40,
+  );
+  assert.equal(
+    redoBoardDocumentHistory(changed).entries[1].presentation?.workspaceGridSize,
+    64,
+  );
+});

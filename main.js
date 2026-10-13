@@ -1,4 +1,5 @@
-import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net, clipboard } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net, clipboard, dialog } from 'electron';
+import { installDocumentCloseGuard } from './shared/electron-document-close.js';
 import fs from 'fs/promises';
 import { watch as watchDirectory } from 'fs';
 import path from 'path';
@@ -7,15 +8,9 @@ import { createWebFilterService, addFilterCsp } from './shared/web-filter-engine
 import { createAdExtensionManager } from './shared/electron-ad-extension.js';
 import { installAdCosmeticHandlers } from './shared/electron-ad-cosmetics.js';
 import { configureWebViewport } from './shared/electron-web-viewport.js';
-import {
-  assertValidBoard,
-  MAX_BOARD_FILE_BYTES,
-  normalizeBoardId
-} from './shared/board-data.js';
 import { readNativeClipboard, writeNativeBoardClipboard } from './shared/native-clipboard.js';
-import { loadDesktopBoardArchive } from './shared/desktop-board-archive.js';
-import { atomicWriteJson, enqueueWrite, readFileLimited, readJsonWithBackup } from './shared/persistence.js';
-import { mapInBatches } from './shared/batch.js';
+import { atomicWriteJson, enqueueWrite, readJsonWithBackup } from './shared/persistence.js';
+import { loadStoredBoards, saveStoredBoard, deleteStoredBoard } from './shared/board-store.js';
 import {
   isAllowedEmbeddedWebUrl,
   isAllowedMainWindowNavigation,
@@ -26,10 +21,12 @@ import {
   filterRequestHeaders,
   filterResponseHeaders,
   normalizeWebSessionSettings,
+  createWebSessionConfigurationQueue,
+  resolveWebRequestPolicy,
+  shouldRememberMainFrameUrl,
   shouldBlockCookies,
   shouldBlockPopup
 } from './shared/electron-web-policy.js';
-import { repairLegacyBoard } from './shared/board-migration.js';
 import { installPermissionDenyHandlers } from './shared/electron-permissions.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,6 +47,7 @@ const presetsFile = () => path.join(dataDir(), 'presets.json');
 const settingsFile = () => path.join(dataDir(), 'settings.json');
 const webSessionSettings = new Map();
 const configuredWebSessions = new Map();
+const configureWebSessionInOrder = createWebSessionConfigurationQueue();
 const webZoomStates = new WeakMap();
 const webPointerPositions = new WeakMap();
 const webNavigationUrls = new WeakMap();
@@ -163,25 +161,23 @@ const updateWebSessionTopLevelUrl = (contents, url) => {
 const cookieUrl = cookie => `${cookie.secure ? 'https' : 'http'}://${cookie.domain.replace(/^\./, '')}${cookie.path || '/'}`;
 
 const requestPolicy = (details, settings) => {
-  const source = typeof details.webContentsId === 'number'
+  const candidate = typeof details.webContentsId === 'number'
     ? webContents.fromId(details.webContentsId)
     : undefined;
-  if (source && details.resourceType === 'mainFrame') webNavigationUrls.set(source, details.url);
+  const source = candidate && !candidate.isDestroyed() ? candidate : undefined;
   const currentUrl = source ? webNavigationUrls.get(source) || source.getURL() : undefined;
-  const topLevelUrl = details.resourceType === 'mainFrame' ? details.url : currentUrl;
-  return /^https?:\/\//i.test(topLevelUrl || '') ? { ...settings, topLevelUrl } : settings;
+  return { ...resolveWebRequestPolicy(details, settings, currentUrl), source };
 };
 
-const configureWebSession = async (partition, settings = {}) => {
+const applyWebSessionConfiguration = async (partition, normalized) => {
   if (!isAllowedWebPartition(partition)) {
     return false;
   }
 
-  const normalized = normalizeWebSessionSettings(settings);
   if (normalized.adBlock) await getFilterService();
   const previous = webSessionSettings.get(partition);
-  webSessionSettings.set(partition, normalized);
   const webSession = session.fromPartition(partition);
+  webSessionSettings.set(partition, normalized);
   await adExtensions.configure(webSession,normalized);
   // Blocking all cookies also removes existing cookies from this isolated field.
   if (normalized.cookieBlocker === 'all' && previous?.cookieBlocker !== 'all') {
@@ -217,14 +213,19 @@ const configureWebSession = async (partition, settings = {}) => {
   // Electron guest view. This bridge asks the loaded extension to decide;
   // there is no separate request matcher or internal fallback here.
   webSession.webRequest.onBeforeRequest(requestFilter,async (details,callback)=>{
-    const current=requestPolicy(details,webSessionSettings.get(partition)||normalizeWebSessionSettings());
-    if(!current.adBlock){callback({cancel:false});return;}
-    try {callback(await adExtensions.filterRequest(webSession,details,current.topLevelUrl));}
+    const policy=requestPolicy(details,webSessionSettings.get(partition)||normalizeWebSessionSettings());
+    const applyDecision=decision=>{
+      if(policy.source&&policy.mainFrameUrl&&shouldRememberMainFrameUrl(details,decision))
+        webNavigationUrls.set(policy.source,policy.mainFrameUrl);
+      callback(decision);
+    };
+    if(!policy.settings.adBlock){applyDecision({cancel:false});return;}
+    try {applyDecision(await adExtensions.filterRequest(webSession,details,policy.settings.topLevelUrl));}
     catch(error){console.error('Web ad-block extension could not filter the request.',error);callback({cancel:true});}
   });
 
   webSession.webRequest.onBeforeSendHeaders(requestFilter, (details, callback) => {
-    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
+    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings()).settings;
     const requestHeaders = filterRequestHeaders(
       details.requestHeaders,
       details.url,
@@ -236,7 +237,7 @@ const configureWebSession = async (partition, settings = {}) => {
   });
 
   webSession.webRequest.onHeadersReceived(requestFilter, async (details, callback) => {
-    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings());
+    const current = requestPolicy(details, webSessionSettings.get(partition) || normalizeWebSessionSettings()).settings;
     let responseHeaders = filterResponseHeaders(
       details.responseHeaders,
       details.url,
@@ -253,82 +254,39 @@ const configureWebSession = async (partition, settings = {}) => {
   return true;
 };
 
+const configureWebSession = (partition, settings = {}) => {
+  if (!isAllowedWebPartition(partition)) return Promise.resolve(false);
+  const normalized = normalizeWebSessionSettings(settings);
+  return configureWebSessionInOrder(partition, () =>
+    applyWebSessionConfiguration(partition, normalized),
+  );
+};
+
 async function ensureDataDirs() {
   await fs.mkdir(boardsDir(), { recursive: true });
 }
 
-function safeBoardFile(id) {
-  const safeId = normalizeBoardId(id);
-  return path.join(boardsDir(), `${safeId}.json`);
-}
-
-async function loadBoardFromZip(filePath) {
-  const buffer = await readFileLimited(
-    filePath,
-    MAX_BOARD_FILE_BYTES,
-    'Board package'
-  );
-  return loadDesktopBoardArchive(buffer, {
-    fallbackId: path.basename(filePath, path.extname(filePath))
-  });
-}
-
 handleTrusted('storage:get-pages', async () => {
   await ensureDataDirs();
-  const files = await fs.readdir(boardsDir());
-  const loadedPages = await mapInBatches(files, 8, async (file) => {
-    try {
-      const filePath = path.join(boardsDir(), file);
-      let page = null;
-      if (file.endsWith('.json')) {
-        page = repairLegacyBoard(await readJsonWithBackup(filePath));
-      } else if (file.endsWith('.zip')) {
-        page = repairLegacyBoard(await loadBoardFromZip(filePath));
-      } else {
-        return null;
-      }
+  return loadStoredBoards(boardsDir());
+});
 
-      if (page && typeof page === 'object' && Array.isArray(page.elements)) {
-        if (!page.id) page.id = file.replace(/\.(json|zip)$/i, '');
-        if (!page.updatedAt) page.updatedAt = 0;
-        assertValidBoard(page);
-        return page;
-      }
-    } catch (error) {
-      console.warn(`Skipping unreadable board file: ${file}`, error);
-    }
-    return null;
-  });
-  const pagesById = new Map();
-  for (const page of loadedPages) {
-    if (page) pagesById.set(page.id, page);
+handleTrusted('storage:save-page', async (_event, page, options) => {
+  await ensureDataDirs();
+  try { return await saveStoredBoard(boardsDir(), page, { baseRevision: options?.baseRevision }); }
+  catch (error) {
+    if (error.code === 'STALE_BOARD_REVISION') return { ok: false, code: error.code, message: error.message };
+    throw error;
   }
-  const pages = Array.from(pagesById.values());
-  return pages.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 });
 
-handleTrusted('storage:save-page', async (_event, page) => {
+handleTrusted('storage:delete-page', async (_event, pageId, options) => {
   await ensureDataDirs();
-  assertValidBoard(page);
-  const filePath = safeBoardFile(page.id);
-  await enqueueWrite(filePath, () => atomicWriteJson(filePath, page));
-  return true;
-});
-
-handleTrusted('storage:delete-page', async (_event, pageId) => {
-  await ensureDataDirs();
-  const filePath = safeBoardFile(pageId);
-  await enqueueWrite(filePath, async () => {
-    await Promise.all([
-      fs.unlink(filePath).catch((error) => {
-        if (error.code !== 'ENOENT') throw error;
-      }),
-      fs.unlink(`${filePath}.bak`).catch((error) => {
-        if (error.code !== 'ENOENT') throw error;
-      })
-    ]);
-  });
-  return true;
+  try { return await deleteStoredBoard(boardsDir(), pageId, { baseRevision: options?.baseRevision }); }
+  catch (error) {
+    if (error.code === 'STALE_BOARD_REVISION') return { ok: false, code: error.code, message: error.message };
+    throw error;
+  }
 });
 
 handleTrusted('storage:get-presets', async () => {
@@ -456,6 +414,7 @@ function createWindow() {
   // Remove the menu entirely to make it look like a modern app
   Menu.setApplicationMenu(null);
 
+  installDocumentCloseGuard(win, { ipcMain, dialog });
   const updateZoomFactor = () => {
     const [width, height] = win.getContentSize();
     const zoomFactor = Math.max(
@@ -553,9 +512,7 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('will-navigate', (navigateEvent, url) => {
     if (!isAllowedEmbeddedWebUrl(url)) {
       navigateEvent.preventDefault();
-      return;
     }
-    if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
   contents.on('will-redirect', (redirectEvent, url) => {
     if (!isAllowedEmbeddedWebUrl(url)) redirectEvent.preventDefault();

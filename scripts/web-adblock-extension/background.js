@@ -3,7 +3,6 @@ import { FiltersEngine, Request } from '@ghostery/adblocker';
 let engine;
 let policy={enabled:false,topLevelUrl:''};
 let manifest;
-let blocked=0;
 const pageUrls=new Map();
 
 // This MV2 extension owns the request decisions. Chrome calls its listener for
@@ -17,7 +16,6 @@ function filterRequest(details) {
     sourceUrl:details.initiator||details.originUrl||details.documentUrl||pageUrls.get(details.tabId)||policy.topLevelUrl,
   });
   const {match,redirect}=engine.match(request);
-  if(redirect||match)blocked++;
   return redirect?{redirectUrl:redirect.dataUrl}:{cancel:match};
 }
 chrome.webRequest.onBeforeRequest.addListener(filterRequest,{urls:['http://*/*','https://*/*','ws://*/*','wss://*/*']},['blocking']);
@@ -32,5 +30,5 @@ globalThis.noteboardAdBlock={
     policy={enabled:next.enabled===true,topLevelUrl:next.topLevelUrl||''};
     return this.status();
   },
-  status(){return {ready:Boolean(engine),enabled:policy.enabled,ads:blocked,filtersUpdatedAt:manifest?.fetchedAt??null,filterRules:manifest?manifest.networkRules+manifest.cosmeticRules:0};},
+  status(){return {ready:Boolean(engine),enabled:policy.enabled,filtersUpdatedAt:manifest?.fetchedAt??null,filterRules:manifest?manifest.networkRules+manifest.cosmeticRules:0};},
 };

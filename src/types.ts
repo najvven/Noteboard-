@@ -235,6 +235,10 @@ export interface Page {
   viewportCenterX?: number;
   viewportCenterY?: number;
   editorSettings?: BoardEditorSettings;
+  recoveryOrigin?: {
+    boardId: string;
+    snapshotHash: string;
+  };
   updatedAt: number;
   isPinned: boolean;
   elements: BoardElement[];

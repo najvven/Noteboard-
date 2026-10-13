@@ -66,3 +66,19 @@ test('merging only part of a layer keeps its unrelated content and restores the 
   assert.equal(merged.elements.find(element=>element.id==='outside-layer')?.parentId,'layer-a');
   assert.equal(ungroupAreaElements(merged.elements,'merged').elements.find(element=>element.id==='a')?.parentId,'layer-a');
 });
+
+test('ungrouping clears direct and rich-text links to the removed group before saving',()=>{
+  const original=source();
+  original.push(
+    {id:'direct-link',type:'rectangle',position:{x:900,y:200},size:{width:20,height:20},content:'',linkToId:'merged',zIndex:5},
+    {id:'rich-link',type:'text',position:{x:900,y:240},size:{width:100,height:30},content:'<a href="#target-merged">Jump</a>',zIndex:6},
+  );
+  const merged=mergeAreaElements(original,['a','b'],'merged')!;
+
+  const ungrouped=ungroupAreaElements(merged.elements,'merged');
+  validate(ungrouped.elements);
+  assert.equal(ungrouped.elements.some(element=>element.id==='merged'),false);
+  assert.equal(ungrouped.elements.find(element=>element.id==='direct-link')?.linkToId,undefined);
+  assert.equal(ungrouped.elements.find(element=>element.id==='rich-link')?.content,'<a href="#">Jump</a>');
+  assert.equal(ungrouped.elements.find(element=>element.id==='a')?.parentId,'layer-a');
+});

@@ -19,6 +19,9 @@ import {
 import { repairLegacyBoard } from "./board-migration.js";
 import { assertSafeZipDirectory } from "./zip-preflight.js";
 
+const isPackagedAssetElement = (element) =>
+  element.type === "image" || element.type === "media";
+
 export const DEFAULT_DESKTOP_ARCHIVE_LIMITS = {
   boardFileBytes: MAX_BOARD_FILE_BYTES,
   expandedArchiveBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
@@ -76,6 +79,7 @@ export async function loadDesktopBoardArchive(input, options = {}) {
   const referencedPaths = [
     ...new Set(
       page.elements
+        .filter(isPackagedAssetElement)
         .map((element) => element.content)
         .filter(
           (content) =>
@@ -104,6 +108,7 @@ export async function loadDesktopBoardArchive(input, options = {}) {
   }
 
   const elements = page.elements.map((element) => {
+    if (!isPackagedAssetElement(element)) return element;
     const assetPath = element.content;
     if (typeof assetPath !== "string" || !assetPath.startsWith("assets/")) {
       return element;

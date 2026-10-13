@@ -1,8 +1,13 @@
 import { Page, Preset } from "../types";
+import { assertFileSize, assertValidBoard, MAX_BOARD_FILE_BYTES } from "../../shared/board-data.js";
+import { enqueueBoardOperation } from "./board-operations";
+import { BoardConflictError, BoardValidationError } from './storage-errors';
 import {
   clearBoardRecovery,
+  clearRecoveryEntry,
+  classifyBoardRecovery,
+  createRecoveredBoard,
   loadBoardRecoveries,
-  mergeBoardRecoveries,
   storeBoardRecovery,
 } from "../features/board/recovery";
 
@@ -10,6 +15,12 @@ type WebSessionPayload = {
   partition: string;
   settings: Record<string, unknown>;
 };
+
+export interface SavePageOptions {
+  keepalive?: boolean;
+  baseRevision?: number | null;
+  recoveryPredecessor?: Page;
+}
 
 export interface WebBlockingStatus {
   ads: number;
@@ -24,11 +35,13 @@ export interface WebBlockingStatus {
 }
 
 interface NoteboardDesktopApi {
+  onCloseRequested?: (callback: (requestId: string) => void) => () => void;
+  respondToClose?: (requestId: string, saved: boolean) => void;
   readClipboard: () => Promise<{text:string;html:string;image:string;files:{name:string;type:string;base64:string}[]}>;
   writeBoardClipboard: (json:string) => Promise<boolean>;
   loadPages: () => Promise<Page[]>;
-  savePage: (page: Page) => Promise<boolean>;
-  deletePage: (pageId: string) => Promise<boolean>;
+  savePage: (page: Page, options?: { baseRevision?: number | null }) => Promise<BoardWriteResult>;
+  deletePage: (pageId: string, options?: { baseRevision?: number | null }) => Promise<BoardWriteResult>;
   loadPresets: () => Promise<Preset[]>;
   savePresets: (presets: Preset[]) => Promise<boolean>;
   loadSettings: () => Promise<{ brightness: number }>;
@@ -46,6 +59,12 @@ interface NoteboardDesktopApi {
   onBoardsChanged: (callback: () => void) => () => void;
 }
 
+type BoardWriteResult = boolean | { ok: false; code: 'STALE_BOARD_REVISION'; message: string };
+const assertAcknowledged = (result: BoardWriteResult, action: string) => {
+  if (typeof result === 'object' && result?.code === 'STALE_BOARD_REVISION') throw new BoardConflictError(result.message);
+  if (result !== true) throw new Error(`The desktop did not acknowledge ${action}.`);
+};
+
 declare global {
   interface Window {
     noteboardAPI?: NoteboardDesktopApi;
@@ -53,38 +72,69 @@ declare global {
 }
 
 const desktopApi = () => window.noteboardAPI ?? null;
+const baseRevisionHeaders = (baseRevision?: number | null): Record<string, string> =>
+  baseRevision === undefined ? {} : baseRevision === null
+    ? { 'If-None-Match': '*' } : { 'If-Match': `"${baseRevision}"` };
 
 async function request(url: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(url, init);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
+    if (response.status === 409) throw new BoardConflictError(body || 'A newer board version is already saved.');
     throw new Error(body || `Request failed with status ${response.status}.`);
   }
   return response;
 }
 
-export async function loadPages(): Promise<Page[]> {
+export async function loadPages(options: { onRecoveryError?: (reason: unknown) => void } = {}): Promise<Page[]> {
   const api = desktopApi();
-  const storedPages = api
+  const readStored = async () => api
     ? await api.loadPages()
     : ((await (await request("/api/pages")).json()) as Page[]);
+  let pages = new Map((await readStored()).map(page => [page.id, page]));
   const recoveryStorage = getRecoveryStorage();
-  if (!recoveryStorage) return storedPages;
-  const merged = mergeBoardRecoveries(
-    storedPages,
-    loadBoardRecoveries(recoveryStorage),
-  );
-  merged.staleRecoveryIds.forEach((pageId) =>
-    clearBoardRecovery(recoveryStorage, pageId),
-  );
-  merged.recoveredPages.forEach((page) => {
-    persistPage(page)
-      .then(() =>
-        clearBoardRecovery(recoveryStorage, page.id, page.updatedAt ?? 0),
-      )
-      .catch(() => undefined);
-  });
-  return merged.pages;
+  if (!recoveryStorage) return [...pages.values()];
+  const recoveries = loadBoardRecoveries(recoveryStorage).sort((left, right) => right.savedAt - left.savedAt);
+  for (const recovery of recoveries) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const classification = classifyBoardRecovery(pages.get(recovery.page.id), recovery);
+        if (classification === 'restore') {
+          await enqueueBoardOperation(recovery.page.id, async () => {
+            let baseRevision = recovery.baseRevision;
+            // The predecessor may have committed without its acknowledgment.
+            // Retrying its exact payload is safe and gives the final draft its base.
+            if (recovery.predecessor) {
+              await persistPage(recovery.predecessor, { baseRevision });
+              baseRevision = recovery.predecessor.updatedAt ?? 0;
+            }
+            await persistPage(recovery.page, { baseRevision });
+          });
+          pages.set(recovery.page.id, recovery.page);
+        } else if (classification === 'conflict') {
+          // Keep both documents visible. A deterministic origin also recognizes
+          // a recovered copy that was saved, then edited, before a lost ACK retry.
+          const copy = await createRecoveredBoard(recovery);
+          const existing = pages.get(copy.id);
+          if (existing?.recoveryOrigin?.boardId !== copy.recoveryOrigin?.boardId ||
+              existing?.recoveryOrigin?.snapshotHash !== copy.recoveryOrigin?.snapshotHash) {
+            await enqueueBoardOperation(copy.id, () => persistPage(copy, { baseRevision: null }));
+            pages.set(copy.id, copy);
+          }
+        }
+        clearRecoveryEntry(recoveryStorage, recovery);
+        break;
+      } catch (error) {
+        // A concurrent writer can change the recovery decision. Reclassify once
+        // against disk; I/O failures keep the exact raw draft for a later retry.
+        try { pages = new Map((await readStored()).map(page => [page.id, page])); } catch { /* Retain the last acknowledged pages. */ }
+        if (attempt === 0 && error instanceof BoardConflictError) continue;
+        options.onRecoveryError?.(error);
+        break;
+      }
+    }
+  }
+  return [...pages.values()];
 }
 
 const getRecoveryStorage = () => {
@@ -95,52 +145,81 @@ const getRecoveryStorage = () => {
   }
 };
 
+/** Call only after the user explicitly discards this local draft. */
+export function discardBoardRecovery(pageId: string) {
+  const storage = getRecoveryStorage();
+  if (storage) clearBoardRecovery(storage, pageId);
+}
+
 const persistPage = async (
   page: Page,
-  options: { keepalive?: boolean; body?: string } = {},
+  options: { keepalive?: boolean; body?: string; baseRevision?: number | null } = {},
 ) => {
   const api = desktopApi();
   if (api) {
-    await api.savePage(page);
+    assertAcknowledged(await api.savePage(page, { baseRevision: options.baseRevision }), 'the saved board');
     return;
   }
   await request(`/api/pages/${encodeURIComponent(page.id)}`, {
     method: "PUT",
     keepalive: options.keepalive,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...baseRevisionHeaders(options.baseRevision) },
     body: options.body ?? JSON.stringify(page),
   });
 };
 
 export async function savePage(
   page: Page,
-  options: { keepalive?: boolean } = {},
-): Promise<void> {
+  options: SavePageOptions = {},
+): Promise<boolean> {
+  let body: string;
+  let bodyBytes: number;
+  try {
+    assertValidBoard(page);
+    body = JSON.stringify(page);
+    bodyBytes = new TextEncoder().encode(body).byteLength;
+    assertFileSize(bodyBytes, MAX_BOARD_FILE_BYTES, "Board");
+  } catch (error) { throw new BoardValidationError(error instanceof Error ? error.message : 'Invalid board data.'); }
+  const snapshot = JSON.parse(body) as Page;
   const recoveryStorage = getRecoveryStorage();
-  if (options.keepalive && recoveryStorage) {
-    storeBoardRecovery(recoveryStorage, page);
-  }
-  const body = JSON.stringify(page);
-  const bodyBytes = new TextEncoder().encode(body).byteLength;
+  const recovered = options.keepalive && recoveryStorage
+    ? storeBoardRecovery(recoveryStorage, snapshot, options.baseRevision, options.recoveryPredecessor) : false;
   // Browsers cap the aggregate keepalive body budget near 64 KiB. The local
   // recovery copy is replayed on the next load instead of issuing a request
   // the browser is guaranteed to reject.
-  if (options.keepalive && bodyBytes > 60 * 1024) return;
-  await persistPage(page, { keepalive: options.keepalive, body });
-  if (recoveryStorage) {
-    clearBoardRecovery(recoveryStorage, page.id, page.updatedAt ?? 0);
+  if (options.keepalive && !desktopApi() && bodyBytes > 60 * 1024) {
+    if (!recovered) throw new Error("The last changes could not be saved for recovery. Keep the board open and export it.");
+    return false;
   }
+  await enqueueBoardOperation(snapshot.id, async () => {
+    await persistPage(snapshot, { keepalive: options.keepalive, body, baseRevision: options.baseRevision });
+    if (recoveryStorage) clearBoardRecovery(recoveryStorage, snapshot.id, snapshot.updatedAt ?? 0);
+  });
+  return true;
 }
 
-export async function deletePage(pageId: string): Promise<void> {
-  const recoveryStorage = getRecoveryStorage();
-  if (recoveryStorage) clearBoardRecovery(recoveryStorage, pageId);
-  const api = desktopApi();
-  if (api) {
-    await api.deletePage(pageId);
-    return;
-  }
-  await request(`/api/pages/${encodeURIComponent(pageId)}`, { method: "DELETE" });
+export function prepareBrowserUnload(page: Page, baseRevision?: number | null, predecessor?: Page) {
+  if (desktopApi()) return true;
+  try {
+    assertValidBoard(page);
+    assertFileSize(new TextEncoder().encode(JSON.stringify(page)).byteLength, MAX_BOARD_FILE_BYTES, "Board");
+  } catch { return false; }
+  const storage = getRecoveryStorage();
+  const recovered = storage ? storeBoardRecovery(storage, page, baseRevision, predecessor) : false;
+  return new TextEncoder().encode(JSON.stringify(page)).byteLength <= 60 * 1024 || recovered;
+}
+
+export async function deletePage(pageId: string, options: { baseRevision?: number | null } = {}): Promise<void> {
+  await enqueueBoardOperation(pageId, async () => {
+    const api = desktopApi();
+    if (api) {
+      assertAcknowledged(await api.deletePage(pageId, options), 'board deletion');
+    } else await request(`/api/pages/${encodeURIComponent(pageId)}`, { method: "DELETE",
+      headers: baseRevisionHeaders(options.baseRevision),
+    });
+    const recoveryStorage = getRecoveryStorage();
+    if (recoveryStorage) clearBoardRecovery(recoveryStorage, pageId);
+  });
 }
 
 export async function loadPresets(): Promise<Preset[]> {
@@ -150,15 +229,18 @@ export async function loadPresets(): Promise<Preset[]> {
 }
 
 export async function savePresets(presets: Preset[]): Promise<void> {
-  const api = desktopApi();
-  if (api) {
-    await api.savePresets(presets);
-    return;
-  }
-  await request("/api/presets", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(presets),
+  const snapshot = JSON.parse(JSON.stringify(presets)) as Preset[];
+  await enqueueBoardOperation("application:presets", async () => {
+    const api = desktopApi();
+    if (api) {
+      if (await api.savePresets(snapshot) === false) throw new Error("The desktop did not acknowledge the saved templates.");
+      return;
+    }
+    await request("/api/presets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot),
+    });
   });
 }
 
@@ -169,15 +251,18 @@ export async function loadSettings(): Promise<{ brightness: number }> {
 }
 
 export async function saveSettings(settings: { brightness: number }): Promise<void> {
-  const api = desktopApi();
-  if (api) {
-    await api.saveSettings(settings);
-    return;
-  }
-  await request("/api/settings", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(settings),
+  const snapshot = { ...settings };
+  await enqueueBoardOperation("application:settings", async () => {
+    const api = desktopApi();
+    if (api) {
+      if (await api.saveSettings(snapshot) === false) throw new Error("The desktop did not acknowledge the saved settings.");
+      return;
+    }
+    await request("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(snapshot),
+    });
   });
 }
 

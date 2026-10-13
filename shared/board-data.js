@@ -7,10 +7,10 @@ export const MAX_ARCHIVE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024;
 // Portable board JSON supports the same documents as normal board storage.
 // Total archive expansion remains bounded before any entry is read.
 export const MAX_BOARD_JSON_BYTES = MAX_BOARD_FILE_BYTES;
-export const MAX_ARCHIVE_ASSET_BYTES = 32 * 1024 * 1024;
 // Media is embedded as base64 in board JSON. Keep one file comfortably below
 // the 128 MB board-read boundary after the roughly 4/3 encoding expansion.
 export const MAX_MEDIA_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_ARCHIVE_ASSET_BYTES = MAX_MEDIA_FILE_BYTES;
 
 const SAFE_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
 const SECTION_SHEET_ACTIONS = new Set(["auto-fit", "fill-down", "fill-right", "series"]);
@@ -80,9 +80,8 @@ export function getArchiveEntryDeclaredSize(entry) {
 }
 
 export function normalizeBoardId(value) {
-  const id = String(value ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
-  if (!id) throw new Error("Board id is missing or invalid.");
-  return id;
+  if (!isSafeId(value)) throw new Error("Board id is missing or invalid.");
+  return value;
 }
 
 export function isSafeBoardWebLink(value) {
@@ -102,6 +101,416 @@ export function isSafeBoardWebLink(value) {
   }
 }
 
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const assertSettingsRecord = (value, label) => {
+  if (!isRecord(value)) throw new Error(`${label} must be an object.`);
+};
+
+const assertOptionalSettingTypes = (settings, fields, label) => {
+  for (const [field, type, maximumLength] of fields) {
+    const value = settings[field];
+    if (value === undefined) continue;
+    if (
+      typeof value !== type ||
+      (type === "string" && value.length > maximumLength) ||
+      (type === "number" && !Number.isFinite(value))
+    ) {
+      throw new Error(`${label}.${field} is invalid.`);
+    }
+  }
+};
+
+const assertSettingEnum = (settings, field, allowed, label) => {
+  const value = settings[field];
+  if (value !== undefined && !allowed.has(value)) {
+    throw new Error(`${label}.${field} is invalid.`);
+  }
+};
+
+const assertFiniteSettingProperties = (value, keys, label) => {
+  for (const key of keys) {
+    if (value[key] !== undefined && !Number.isFinite(value[key])) {
+      throw new Error(`${label}.${key} is invalid.`);
+    }
+  }
+};
+
+const assertSettingsElementShape = (element, label, partial = false) => {
+  assertSettingsRecord(element, label);
+  if (!partial || element.id !== undefined) {
+    if (!isSafeId(element.id)) throw new Error(`${label}.id is invalid.`);
+  }
+  if (!partial || element.type !== undefined) {
+    if (typeof element.type !== "string" || !element.type || element.type.length > 50) {
+      throw new Error(`${label}.type is invalid.`);
+    }
+  }
+  if (!partial || element.position !== undefined) {
+    assertSettingsRecord(element.position, `${label}.position`);
+    if (
+      !Number.isFinite(element.position.x) ||
+      !Number.isFinite(element.position.y) ||
+      Math.abs(element.position.x) > MAX_BOARD_DIMENSION ||
+      Math.abs(element.position.y) > MAX_BOARD_DIMENSION
+    ) {
+      throw new Error(`${label}.position is invalid.`);
+    }
+  }
+  if (element.size !== undefined) {
+    assertSettingsRecord(element.size, `${label}.size`);
+    if (
+      !Number.isFinite(element.size.width) ||
+      !Number.isFinite(element.size.height) ||
+      element.size.width <= 0 ||
+      element.size.height <= 0 ||
+      element.size.width > MAX_BOARD_DIMENSION ||
+      element.size.height > MAX_BOARD_DIMENSION
+    ) {
+      throw new Error(`${label}.size is invalid.`);
+    }
+  }
+  if (element.content !== undefined && typeof element.content !== "string") {
+    throw new Error(`${label}.content is invalid.`);
+  }
+  assertOptionalSettingTypes(
+    element,
+    [
+      ["parentId", "string", 200],
+      ["groupOriginalParentId", "string", 200],
+      ["linkToId", "string", 2_048],
+      ["color", "string", 200],
+      ["borderColor", "string", 200],
+      ["textColor", "string", 200],
+      ["mediaMime", "string", 200],
+      ["webSessionId", "string", 200],
+      ["name", "string", 500],
+      ["linkTargetName", "string", 500],
+      ["zIndex", "number"],
+      ["textScale", "number"],
+      ["fontSize", "number"],
+      ["fontWeight", "number"],
+      ["lineHeight", "number"],
+      ["borderWidth", "number"],
+      ["borderRadius", "number"],
+      ["opacity", "number"],
+      ["rotation", "number"],
+      ["mediaPlaybackRate", "number"],
+      ["mediaVolume", "number"],
+      ["drawingAssistSmoothStrength", "number"],
+      ["drawingAssistStrength", "number"],
+      ["turnSnapDegrees", "number"],
+      ["mediaKind", "string", 20],
+      ["webDeviceMode", "string", 20],
+      ["webCookieBlocker", "string", 30],
+      ["previewMode", "string", 20],
+      ["strokeLinejoin", "string", 20],
+      ["sectionCollision", "string", 20],
+      ["eraserShape", "string", 20],
+      ["textLinesMode", "string", 20],
+    ],
+    label,
+  );
+  if (
+    element.textScale !== undefined &&
+    (element.textScale <= 0 || element.textScale > MAX_BOARD_DIMENSION)
+  ) {
+    throw new Error(`${label}.textScale is invalid.`);
+  }
+  if (
+    element.mediaPlaybackRate !== undefined &&
+    (element.mediaPlaybackRate < 0.1 || element.mediaPlaybackRate > 16)
+  ) {
+    throw new Error(`${label}.mediaPlaybackRate is invalid.`);
+  }
+  if (
+    element.mediaVolume !== undefined &&
+    (element.mediaVolume < 0 || element.mediaVolume > 1)
+  ) {
+    throw new Error(`${label}.mediaVolume is invalid.`);
+  }
+  if (element.parentId !== undefined && !isSafeId(element.parentId)) {
+    throw new Error(`${label}.parentId is invalid.`);
+  }
+  if (
+    element.groupOriginalParentId !== undefined &&
+    !isSafeId(element.groupOriginalParentId)
+  ) {
+    throw new Error(`${label}.groupOriginalParentId is invalid.`);
+  }
+  if (element.points !== undefined) {
+    if (!Array.isArray(element.points) || element.points.length > 1_000_000) {
+      throw new Error(`${label}.points is invalid.`);
+    }
+    for (const point of element.points) {
+      if (
+        !isRecord(point) ||
+        !Number.isFinite(point.x) ||
+        !Number.isFinite(point.y)
+      ) {
+        throw new Error(`${label}.points contains an invalid point.`);
+      }
+    }
+  }
+  for (const field of [
+    "keepRatio",
+    "textScaling",
+    "mediaControlsHidden",
+    "mediaLoop",
+    "webRememberSession",
+    "webAdBlock",
+    "webPopupBlocker",
+    "isSmooth",
+    "drawingAssistSmooth",
+    "drawingAssistGuess",
+    "turnSnap",
+    "flipX",
+    "flipY",
+    "isHidden",
+    "isLocked",
+    "isEraser",
+    "isLinkTarget",
+    "textSnapToGrid",
+  ]) {
+    if (element[field] !== undefined && typeof element[field] !== "boolean") {
+      throw new Error(`${label}.${field} is invalid.`);
+    }
+  }
+  if (
+    element.crop !== undefined &&
+    (!isRecord(element.crop) ||
+      ["left", "top", "right", "bottom"].some(
+        (key) => element.crop[key] !== undefined && !Number.isFinite(element.crop[key]),
+      ))
+  ) {
+    throw new Error(`${label}.crop is invalid.`);
+  }
+  if (element.sheetCell !== undefined) {
+    assertSettingsRecord(element.sheetCell, `${label}.sheetCell`);
+    assertOptionalSettingTypes(
+      element.sheetCell,
+      [
+        ["sheetId", "string", 200],
+        ["rowId", "string", 200],
+        ["columnId", "string", 200],
+        ["address", "string", 100],
+        ["valueType", "string", 20],
+        ["error", "string", 100],
+      ],
+      `${label}.sheetCell`,
+    );
+    assertSettingEnum(
+      element.sheetCell,
+      "valueType",
+      SECTION_SHEET_CELL_VALUE_TYPES,
+      `${label}.sheetCell`,
+    );
+    if (
+      element.sheetCell.computedValue !== undefined &&
+      !(
+        (typeof element.sheetCell.computedValue === "number" &&
+          Number.isFinite(element.sheetCell.computedValue)) ||
+        (typeof element.sheetCell.computedValue === "string" &&
+          element.sheetCell.computedValue.length <= 1_000_000)
+      )
+    ) {
+      throw new Error(`${label}.sheetCell.computedValue is invalid.`);
+    }
+  }
+  assertSettingEnum(element, "mediaKind", MEDIA_KINDS, label);
+  assertSettingEnum(element, "webDeviceMode", WEB_DEVICE_MODES, label);
+  assertSettingEnum(element, "webCookieBlocker", WEB_COOKIE_BLOCKERS, label);
+  assertSettingEnum(element, "previewMode", new Set(["box", "realistic"]), label);
+  assertSettingEnum(element, "strokeLinejoin", new Set(["miter", "round"]), label);
+  assertSettingEnum(element, "sectionCollision", new Set(["none", "block", "clip"]), label);
+  assertSettingEnum(element, "eraserShape", new Set(["round", "square"]), label);
+  assertSettingEnum(element, "textLinesMode", new Set(["everywhere", "text-only"]), label);
+};
+
+const assertEditorSettings = (settings) => {
+  const label = "Board editor settings";
+  assertSettingsRecord(settings, label);
+  assertOptionalSettingTypes(
+    settings,
+    [
+      ["activeTool", "string", 100],
+      ["selectMode", "string", 100],
+      ["keepToolActiveFallback", "string", 20],
+      ["toolModeShortcut", "string", 100],
+      ["gridToggleShortcut", "string", 100],
+      ["overlapShortcut", "string", 100],
+      ["cropShortcut", "string", 100],
+      ["scrollZoomShortcut", "string", 100],
+      ["cutShortcut", "string", 100],
+      ["fillToolColor", "string", 200],
+      ["eraserMode", "string", 20],
+      ["eraserShape", "string", 20],
+      ["spreadsheetMode", "string", 20],
+      ["previewMode", "string", 20],
+      ["overlapMode", "string", 20],
+      ["spreadsheetCellWidth", "number"],
+      ["spreadsheetCellHeight", "number"],
+      ["selectionLockTime", "number"],
+      ["spinSnapDegrees", "number"],
+      ["eraserSize", "number"],
+      ["scrollZoomSensitivity", "number"],
+      ["clickZoomSensitivity", "number"],
+    ],
+    label,
+  );
+  for (const field of [
+    "alwaysOnTop",
+    "keepToolActive",
+    "zoomToCursor",
+    "keepBoardContentPosition",
+    "proportionalScale",
+    "altResizeCrops",
+    "isSelectionLockEnabled",
+    "enableObjectSnapping",
+    "smartGuidesEnabled",
+    "autoSelectOnPlace",
+    "autoToolOnSelect",
+    "spinSnapEnabled",
+    "allowEditing",
+    "allowMovingElementsInPan",
+  ]) {
+    if (settings[field] !== undefined && typeof settings[field] !== "boolean") {
+      throw new Error(`${label}.${field} is invalid.`);
+    }
+  }
+  assertSettingEnum(settings, "spreadsheetMode", new Set(["advanced", "simple"]), label);
+  assertSettingEnum(settings, "keepToolActiveFallback", new Set(["select", "pan"]), label);
+  assertSettingEnum(settings, "previewMode", new Set(["box", "realistic"]), label);
+  assertSettingEnum(settings, "eraserMode", new Set(["element", "partial"]), label);
+  assertSettingEnum(settings, "eraserShape", new Set(["round", "square"]), label);
+  assertSettingEnum(settings, "overlapMode", new Set(["none", "partial", "full"]), label);
+
+  if (settings.toolbarLayout !== undefined) {
+    const layout = settings.toolbarLayout;
+    assertSettingsRecord(layout, `${label}.toolbarLayout`);
+    for (const field of ["order", "more"]) {
+      if (layout[field] === undefined) continue;
+      if (
+        !Array.isArray(layout[field]) ||
+        layout[field].length > 500 ||
+        layout[field].some((id) => typeof id !== "string" || id.length > 100)
+      ) {
+        throw new Error(`${label}.toolbarLayout.${field} is invalid.`);
+      }
+    }
+    if (
+      layout.general !== undefined &&
+      (!Array.isArray(layout.general) ||
+        layout.general.length > 500 ||
+        layout.general.some((id) => typeof id !== "string" || id.length > 100))
+    ) {
+      throw new Error(`${label}.toolbarLayout.general is invalid.`);
+    }
+    if (layout.slots !== undefined) {
+      assertSettingsRecord(layout.slots, `${label}.toolbarLayout.slots`);
+      if (
+        Object.entries(layout.slots).some(
+          ([id, slot]) => id.length > 100 || !Number.isFinite(slot),
+        )
+      ) {
+        throw new Error(`${label}.toolbarLayout.slots contains an invalid slot.`);
+      }
+    }
+  }
+
+  if (settings.customColors !== undefined) {
+    assertSettingsRecord(settings.customColors, `${label}.customColors`);
+    const entries = Object.entries(settings.customColors);
+    if (
+      entries.length > 100 ||
+      entries.some(
+        ([key, colors]) =>
+          key.length > 100 ||
+          !Array.isArray(colors) ||
+          colors.length > 100 ||
+          colors.some((color) => typeof color !== "string" || color.length > 200),
+      )
+    ) {
+      throw new Error(`${label}.customColors is invalid.`);
+    }
+  }
+
+  if (settings.pendingProps !== undefined) {
+    assertSettingsElementShape(settings.pendingProps, `${label}.pendingProps`, true);
+  }
+
+  if (settings.toolMenuSettingsOverrides !== undefined) {
+    const overrides = settings.toolMenuSettingsOverrides;
+    assertSettingsRecord(overrides, `${label}.toolMenuSettingsOverrides`);
+    for (const [toolId, override] of Object.entries(overrides)) {
+      if (!toolId || toolId.length > 100) {
+        throw new Error(`${label}.toolMenuSettingsOverrides has an invalid tool id.`);
+      }
+      assertSettingsRecord(override, `${label}.toolMenuSettingsOverrides.${toolId}`);
+      for (const field of [
+        "alwaysOnTop",
+        "keepToolActive",
+        "allowEditing",
+        "allowMoving",
+        "pageInteractionWithSelect",
+        "pageInteractionWithHand",
+      ]) {
+        if (override[field] !== undefined && typeof override[field] !== "boolean") {
+          throw new Error(`${label}.toolMenuSettingsOverrides.${toolId}.${field} is invalid.`);
+        }
+      }
+      assertSettingEnum(
+        override,
+        "previewMode",
+        new Set(["box", "realistic"]),
+        `${label}.toolMenuSettingsOverrides.${toolId}`,
+      );
+    }
+  }
+
+  if (settings.objectPresets !== undefined) {
+    if (!Array.isArray(settings.objectPresets) || settings.objectPresets.length > 10_000) {
+      throw new Error(`${label}.objectPresets is invalid.`);
+    }
+    for (const [index, preset] of settings.objectPresets.entries()) {
+      const presetLabel = `${label}.objectPresets[${index}]`;
+      assertSettingsRecord(preset, presetLabel);
+      if (
+        typeof preset.id !== "string" ||
+        !preset.id ||
+        preset.id.length > 200 ||
+        typeof preset.name !== "string" ||
+        preset.name.length > 500
+      ) {
+        throw new Error(`${presetLabel} identity is invalid.`);
+      }
+      if (preset.shortcut !== undefined && (typeof preset.shortcut !== "string" || preset.shortcut.length > 100)) {
+        throw new Error(`${presetLabel}.shortcut is invalid.`);
+      }
+      if (preset.element !== undefined) {
+        assertSettingsElementShape(preset.element, `${presetLabel}.element`);
+      }
+      if (preset.elements !== undefined) {
+        if (!Array.isArray(preset.elements) || preset.elements.length > MAX_BOARD_ELEMENTS) {
+          throw new Error(`${presetLabel}.elements is invalid.`);
+        }
+        preset.elements.forEach((element, elementIndex) =>
+          assertSettingsElementShape(element, `${presetLabel}.elements[${elementIndex}]`),
+        );
+      }
+    }
+  }
+
+  if (settings.objectDefaults !== undefined) {
+    assertSettingsRecord(settings.objectDefaults, `${label}.objectDefaults`);
+    for (const [type, defaults] of Object.entries(settings.objectDefaults)) {
+      if (!type || type.length > 50) throw new Error(`${label}.objectDefaults has an invalid element type.`);
+      assertSettingsElementShape(defaults, `${label}.objectDefaults.${type}`, true);
+    }
+  }
+};
+
 export function assertValidBoard(page) {
   if (!page || typeof page !== "object" || Array.isArray(page)) {
     throw new Error("Board must be an object.");
@@ -114,6 +523,20 @@ export function assertValidBoard(page) {
     throw new Error("Board title is invalid.");
   }
   if (!Array.isArray(page.elements)) throw new Error("Board elements are invalid.");
+  if (page.updatedAt !== undefined && (!Number.isSafeInteger(page.updatedAt) || page.updatedAt < 0))
+    throw new Error("Board revision is invalid.");
+  if (page.editorSettings !== undefined) assertEditorSettings(page.editorSettings);
+  if (page.recoveryOrigin !== undefined) {
+    if (!page.recoveryOrigin || typeof page.recoveryOrigin !== "object" ||
+        Array.isArray(page.recoveryOrigin)) {
+      throw new Error("Board recovery origin is invalid.");
+    }
+    try { normalizeBoardId(page.recoveryOrigin.boardId); }
+    catch { throw new Error("Board recovery origin id is invalid."); }
+    if (!/^[a-f0-9]{64}$/.test(page.recoveryOrigin.snapshotHash ?? "")) {
+      throw new Error("Board recovery origin hash is invalid.");
+    }
+  }
   if (page.version !== undefined) {
     if (!Number.isInteger(page.version) || page.version < 1) {
       throw new Error("Board version is invalid.");

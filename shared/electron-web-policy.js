@@ -3,6 +3,50 @@ import { isThirdPartySite } from "./site-boundary.js";
 
 const COOKIE_BLOCKER_MODES = new Set(["off", "third-party", "all"]);
 
+export function createWebSessionConfigurationQueue() {
+  const pendingByPartition = new Map();
+  return (partition, configure) => {
+    const previous = pendingByPartition.get(partition);
+    const pending = previous
+      ? previous.then(configure, configure)
+      : Promise.resolve().then(configure);
+    pendingByPartition.set(partition, pending);
+    const cleanup = () => {
+      if (pendingByPartition.get(partition) === pending)
+        pendingByPartition.delete(partition);
+    };
+    pending.then(cleanup, cleanup);
+    return pending;
+  };
+}
+
+/** Resolve this request's top-level context without committing a navigation. */
+export function resolveWebRequestPolicy(details, settings, currentTopLevelUrl) {
+  const isMainFrame = details.resourceType === "mainFrame";
+  const candidate = isMainFrame
+    ? details.url
+    : currentTopLevelUrl || settings.topLevelUrl;
+  const topLevelUrl =
+    typeof candidate === "string" &&
+    /^https?:\/\//i.test(candidate) &&
+    isAllowedEmbeddedWebUrl(candidate)
+      ? candidate
+      : undefined;
+  return {
+    settings: topLevelUrl ? { ...settings, topLevelUrl } : settings,
+    mainFrameUrl: isMainFrame ? topLevelUrl : undefined,
+  };
+}
+
+export function shouldRememberMainFrameUrl(details, decision) {
+  return (
+    details.resourceType === "mainFrame" &&
+    isAllowedEmbeddedWebUrl(details.url) &&
+    decision?.cancel !== true &&
+    !decision?.redirectURL
+  );
+}
+
 export const normalizeWebSessionSettings = (settings = {}) => ({
   topLevelUrl:
     typeof settings.topLevelUrl === "string" &&

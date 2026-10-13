@@ -41,6 +41,32 @@ test("desktop archive loading validates and restores assets immutably", async ()
   assert.notEqual(loaded.elements, source.elements);
 });
 
+test("desktop archive loading leaves literal assets paths in text elements untouched", async () => {
+  const source = {
+    ...page(),
+    elements: [
+      {
+        id: "text-1",
+        type: "text",
+        position: { x: 0, y: 0 },
+        content: "assets/missing-note.txt",
+        zIndex: 1,
+      },
+      {
+        id: "spreadsheet-1",
+        type: "spreadsheet",
+        position: { x: 0, y: 100 },
+        content: "assets/asset-1.png",
+        zIndex: 2,
+      },
+    ],
+  };
+
+  const loaded = await loadDesktopBoardArchive(await archive(source));
+  assert.equal(loaded.elements[0].content, "assets/missing-note.txt");
+  assert.equal(loaded.elements[1].content, "assets/asset-1.png");
+});
+
 test("desktop archive loading enforces JSON and asset expansion limits", async () => {
   await assert.rejects(
     async () =>

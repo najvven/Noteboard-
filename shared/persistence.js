@@ -50,7 +50,11 @@ export function enqueueWrite(key, operation) {
   });
 }
 
-export async function atomicWriteJson(filePath, value) {
+export async function atomicWriteJson(filePath, value, options = {}) {
+  const maxBytes = options.maxBytes ?? MAX_BOARD_FILE_BYTES;
+  const payload = JSON.stringify(value);
+  assertFileSize(Buffer.byteLength(payload, "utf8"), maxBytes, "Saved JSON");
+  options.validate?.(value);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = path.join(
     path.dirname(filePath),
@@ -59,14 +63,41 @@ export async function atomicWriteJson(filePath, value) {
     }.tmp`,
   );
   const backupPath = `${filePath}.bak`;
-  const payload = JSON.stringify(value);
 
   try {
-    await fs.writeFile(temporaryPath, payload, { encoding: "utf8", flag: "wx" });
+    const handle = await fs.open(temporaryPath, "wx");
     try {
-      await fs.copyFile(filePath, backupPath);
+      await handle.writeFile(payload, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    let previous;
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.isFile() && stat.size <= maxBytes)
+        previous = await readFileLimited(filePath, maxBytes, "Previous JSON", "utf8");
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
+    }
+    let validPrevious = previous !== undefined;
+    if (validPrevious) {
+      try {
+        options.validate?.(JSON.parse(previous));
+      } catch {
+        validPrevious = false;
+      }
+    }
+    // A corrupt primary must never rotate over its last valid recovery copy.
+    // Filesystem failures abort before replacing the primary.
+    if (validPrevious) {
+      const backupTemporaryPath = `${temporaryPath}.bak`;
+      try {
+        await fs.writeFile(backupTemporaryPath, previous, { encoding: "utf8", flag: "wx" });
+        await replaceFile(backupTemporaryPath, backupPath);
+      } finally {
+        await fs.rm(backupTemporaryPath, { force: true }).catch(() => undefined);
+      }
     }
     await replaceFile(temporaryPath, filePath);
   } catch (error) {
@@ -113,15 +144,19 @@ export async function readJsonWithBackup(
   const label = options.label ?? "JSON file";
   let primaryError;
   try {
-    return JSON.parse(await readFileLimited(filePath, maxBytes, label, "utf8"));
+    const value = JSON.parse(await readFileLimited(filePath, maxBytes, label, "utf8"));
+    options.validate?.(value);
+    return value;
   } catch (error) {
     primaryError = error;
   }
 
   try {
-    return JSON.parse(
+    const value = JSON.parse(
       await readFileLimited(`${filePath}.bak`, maxBytes, `${label} backup`, "utf8"),
     );
+    options.validate?.(value);
+    return value;
   } catch {
     if (fallbackValue !== undefined) return fallbackValue;
     throw primaryError;

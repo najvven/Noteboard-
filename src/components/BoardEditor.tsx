@@ -41,13 +41,22 @@ import WebBlockingBadge from "./WebBlockingBadge";
 import NativeWebView from "./NativeWebView";
 import { WEB_DEVICE_PROFILES, normalizeWebDeviceMode } from "../../shared/web-device.js";
 import SegmentedControl from "./SegmentedControl";
-import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget, readCurrentClipboard, copyBoardToSystem, placeClipboardElements, type ClipboardContents, type ClipboardRegion } from "../features/board/clipboard";
+import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget, readCurrentClipboard, copyBoardToSystem, placeClipboardElements, ClipboardLimitError, type ClipboardContents, type ClipboardRegion } from "../features/board/clipboard";
 import { boardMemberIds, resizeMainBoard, type MainBoardGeometry } from "../features/board/board-resize";
 import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
 import { elementColors, defaultFillColor } from "../features/board/element-colors";
 import SaveAsDialog from "./SaveAsDialog";
 import SpreadsheetElement from "./SpreadsheetElement";
 import SpreadsheetCellSizeControls from './SpreadsheetCellSizeControls';
+import { nextBoardRevision, registerDocumentFlush } from '../lib/board-operations';
+import { prepareBrowserUnload } from '../lib/storage';
+import {
+  boardSnapshotPayloadKey,
+  persistLatestBoardSnapshot,
+  stabilizeBoardSnapshotRevision,
+  type PendingBoardSave,
+  type StableBoardRevision,
+} from '../features/board/save-snapshot';
 import {gridObjectSize, snapGridObjectSize, fitGridObjectSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
 import {createSimpleWorkbook, resizeSimpleWorkbook} from '../features/spreadsheet/simple-workbook';
 
@@ -311,7 +320,7 @@ const SHAPE_TYPES = [
 interface Props {
   page: Page;
   onBack: () => void;
-  onSave: (page: Page, options?: { keepalive?: boolean }) => void;
+  onSave: (page: Page, options?: { keepalive?: boolean; baseRevision?: number | null; recoveryPredecessor?: Page }) => void | boolean | Promise<void | boolean>;
   /** Persist a duplicate board without replacing the currently open board. */
   onSaveAs?: (page: Page) => void | Promise<boolean>;
   onSavePreset: (preset: Preset) => void | Promise<boolean>;
@@ -1047,6 +1056,22 @@ export default function BoardEditor({
   onSavePreset,
 }: Props) {
   const initialEditorSettings = page.editorSettings ?? {};
+  const persistedBaseRevisionRef = useRef<number | null>(page.updatedAt ?? 0);
+  const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingSaveRef = useRef<PendingBoardSave | null>(null);
+  const stableRevisionRef = useRef<StableBoardRevision | null>(null);
+  const currentPageIdRef = useRef(page.id);
+  const currentPageGenerationRef = useRef(0);
+  if (currentPageIdRef.current !== page.id) {
+    currentPageIdRef.current = page.id;
+    currentPageGenerationRef.current += 1;
+  }
+  useEffect(() => {
+    currentPageIdRef.current = page.id;
+    persistedBaseRevisionRef.current = page.updatedAt ?? 0;
+    pendingSaveRef.current = null;
+    stableRevisionRef.current = null;
+  }, [page.id]);
   const [pageDimensions, setPageDimensions] = useState({
     width: page.width || 1024,
     height: page.height || 1024,
@@ -1089,6 +1114,8 @@ export default function BoardEditor({
   const presentationRef=useRef<BoardDocumentPresentation>({
     title:page.title,boardColor:page.boardColor??'#ffffff',gridColor:page.gridColor??'#e2e8f0',
     gridSize:page.gridSize??24,gridThickness:page.gridThickness??1,showGrid:page.showGrid??false,snapToGrid:page.snapToGrid??false,
+    showWorkspaceGrid:page.showWorkspaceGrid??false,workspaceGridColor:page.workspaceGridColor??'#333333',
+    workspaceGridThickness:page.workspaceGridThickness??1,workspaceGridSize:page.workspaceGridSize??50,
   });
   const [documentHistory, setDocumentHistory] = useState(() =>
     createBoardDocumentHistory({
@@ -1832,17 +1859,22 @@ export default function BoardEditor({
   const [workspaceGridColor, setWorkspaceGridColor] = useState(page.workspaceGridColor ?? "#333333");
   const [workspaceGridThickness, setWorkspaceGridThickness] = useState(page.workspaceGridThickness ?? 1);
   const [workspaceGridSize, setWorkspaceGridSize] = useState(page.workspaceGridSize ?? 50);
-  presentationRef.current={title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid};
+  presentationRef.current={title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid,
+    showWorkspaceGrid,workspaceGridColor,workspaceGridThickness,workspaceGridSize};
   const applyPresentation=(value:BoardDocumentPresentation)=>{
     presentationRef.current=value;
     setTitle(value.title);setBoardColor(value.boardColor);setGridColor(value.gridColor);
     setGridSize(value.gridSize);setGridThickness(value.gridThickness);setShowGrid(value.showGrid);setSnapToGrid(value.snapToGrid);
+    setShowWorkspaceGrid(value.showWorkspaceGrid??false);
+    setWorkspaceGridColor(value.workspaceGridColor??'#333333');
+    setWorkspaceGridThickness(value.workspaceGridThickness??1);
+    setWorkspaceGridSize(value.workspaceGridSize??50);
   };
   useEffect(()=>{
     if(equalDocumentValue(documentHistoryRef.current.entries[documentHistoryRef.current.index].presentation,presentationRef.current))return;
     const timer=setTimeout(()=>pushDocument(elementsRef.current),250);
     return()=>clearTimeout(timer);
-  },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid]);
+  },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid,showWorkspaceGrid,workspaceGridColor,workspaceGridThickness,workspaceGridSize]);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [presetName, setPresetName] = useState(
@@ -2007,6 +2039,14 @@ export default function BoardEditor({
       return { ...element, content };
     });
     return changed ? merged : sourceElements;
+  };
+
+  const captureLiveDocumentHistoryBaseline = () => {
+    const liveElements = syncLiveEditableState(elementsRef.current, true);
+    // pushDocument is the single history owner. It adds a baseline only when
+    // the live iframe/editor content differs from the current saved snapshot.
+    pushDocument(liveElements);
+    return elementsRef.current;
   };
 
   // Auto-save to ensure real-time persistence
@@ -4724,16 +4764,41 @@ export default function BoardEditor({
       }
       const bounds = activeSurfaceBoundsRef.current;
       if (bounds) {
-        finalRect.w = Math.min(finalRect.w, bounds.maxX - bounds.minX);
-        finalRect.h = Math.min(finalRect.h, bounds.maxY - bounds.minY);
-        finalRect.x = Math.min(
-          Math.max(bounds.minX, finalRect.x),
-          Math.max(bounds.minX, bounds.maxX - finalRect.w),
-        );
-        finalRect.y = Math.min(
-          Math.max(bounds.minY, finalRect.y),
-          Math.max(bounds.minY, bounds.maxY - finalRect.h),
-        );
+        if (type === "embed" || type === "media") {
+          const gesture = areaGestureRef.current;
+          const anchor = gesture?.start ?? { x: rect.x, y: rect.y };
+          const direction = (axis: "x" | "y") => {
+            const delta = gesture ? gesture.current[axis] - gesture.start[axis] : 0;
+            if (delta < 0) return -1;
+            if (delta > 0) return 1;
+            const before = anchor[axis] - (axis === "x" ? bounds.minX : bounds.minY);
+            const after = (axis === "x" ? bounds.maxX : bounds.maxY) - anchor[axis];
+            return before > after ? -1 : 1;
+          };
+          const horizontalDirection = direction("x");
+          const verticalDirection = direction("y");
+          const availableWidth = horizontalDirection < 0
+            ? anchor.x - bounds.minX
+            : bounds.maxX - anchor.x;
+          const availableHeight = verticalDirection < 0
+            ? anchor.y - bounds.minY
+            : bounds.maxY - anchor.y;
+          finalRect.w = Math.max(1, Math.min(finalRect.w, availableWidth));
+          finalRect.h = Math.max(1, Math.min(finalRect.h, availableHeight));
+          finalRect.x = horizontalDirection < 0 ? anchor.x - finalRect.w : anchor.x;
+          finalRect.y = verticalDirection < 0 ? anchor.y - finalRect.h : anchor.y;
+        } else {
+          finalRect.w = Math.min(finalRect.w, bounds.maxX - bounds.minX);
+          finalRect.h = Math.min(finalRect.h, bounds.maxY - bounds.minY);
+          finalRect.x = Math.min(
+            Math.max(bounds.minX, finalRect.x),
+            Math.max(bounds.minX, bounds.maxX - finalRect.w),
+          );
+          finalRect.y = Math.min(
+            Math.max(bounds.minY, finalRect.y),
+            Math.max(bounds.minY, bounds.maxY - finalRect.h),
+          );
+        }
       }
     }
 
@@ -4992,15 +5057,41 @@ export default function BoardEditor({
 
     try {
       const parsed = await readBoardPackageFile(file);
+      const destinationSurface = findBoardSurface(position, elementsRef.current);
+      const origin = destinationSurface?.position ?? { x: 0, y: 0 };
+      const destinationSize = destinationSurface?.size ?? pageDimensions;
+      const layerParentId = targetLayerId ?? currentLayerView ?? undefined;
+      const hierarchy = createElementHierarchy(elementsRef.current);
+      const layerBelongsToSurface = Boolean(
+        destinationSurface &&
+          layerParentId &&
+          (layerParentId === destinationSurface.id ||
+            hierarchy.isDescendantOf(layerParentId, destinationSurface.id)),
+      );
       const placed = placeBoardPackage(parsed, {
         existingElements: elementsRef.current,
         existingSheets: sectionSheetsRef.current,
-        pageSize: pageDimensions,
-        position,
-        parentId: targetLayerId ?? currentLayerView ?? undefined,
+        pageSize: destinationSize,
+        position: { x: position.x - origin.x, y: position.y - origin.y },
+        parentId:
+          destinationSurface && !layerBelongsToSurface
+            ? destinationSurface.id
+            : layerParentId,
         createId: generateId,
       });
-      pushDocument(placed.elements, placed.sectionSheets);
+      const importedElements = destinationSurface
+        ? placed.importedElements.map((element) => ({
+            ...element,
+            position: {
+              x: element.position.x + origin.x,
+              y: element.position.y + origin.y,
+            },
+          }))
+        : placed.importedElements;
+      pushDocument(
+        [...elementsRef.current, ...importedElements],
+        placed.sectionSheets,
+      );
       setSelectedId(placed.selectedId);
       if (activeTool !== "select") setActiveTool("select");
       return true;
@@ -5088,7 +5179,7 @@ export default function BoardEditor({
 
   const pasteSystemClipboard = async (region?: ClipboardRegion, parentId?: string) => {
     try { pasteClipboardContents(await readCurrentClipboard(),region,parentId); }
-    catch { alert('Could not access the clipboard. Try Ctrl+V.'); }
+    catch (error) { alert(error instanceof ClipboardLimitError ? error.message : 'Could not access the clipboard. Try Ctrl+V.'); }
   };
 
   const mergeSelectionArea=()=>{
@@ -5147,8 +5238,10 @@ export default function BoardEditor({
 
   const duplicateElement = (id: string) => {
     if(elementsRef.current.find(element=>element.id===id)?.type==='group'){duplicateElementTree(id);return;}
-    const requested = elements.find((e) => e.id === id);
-    const el = requested ? elementHierarchy.ancestors(id).slice().reverse().find(parent=>parent.type==='group') ?? requested : undefined;
+    const latestElements = captureLiveDocumentHistoryBaseline();
+    const latestHierarchy = createElementHierarchy(latestElements);
+    const requested = latestElements.find((e) => e.id === id);
+    const el = requested ? latestHierarchy.ancestors(id).slice().reverse().find(parent=>parent.type==='group') ?? requested : undefined;
     if (el) {
       const newEl = {
         ...el,
@@ -5156,15 +5249,15 @@ export default function BoardEditor({
         ...(el.type === 'embed' ? { webSessionId: generateId() } : {}),
         sheetCell: undefined,
         position: { x: el.position.x + 20, y: el.position.y + 20 },
-        zIndex: elements.length + 1,
+        zIndex: latestElements.length + 1,
       };
-      pushElements([...elements, newEl]);
+      pushElements([...latestElements, newEl]);
       setSelectedId(newEl.id);
     }
   };
 
   const duplicateElementTree = (id: string) => {
-    const latestElements = elementsRef.current;
+    const latestElements = captureLiveDocumentHistoryBaseline();
     const root = latestElements.find((el) => el.id === id);
     if (!root) return;
     const collected: BoardElement[] = [];
@@ -5275,20 +5368,18 @@ export default function BoardEditor({
     };
     // Persist the explicit next snapshot now; waiting for the state update
     // would let the auto-save capture the previous defaults object.
-    onSave(
-      buildCurrentPage({
-        objectDefaults: nextObjectDefaults,
-        pendingProps: nextPendingProps,
-      }),
-    );
-    setObjectDefaultsSaved(true);
-    if (objectDefaultsSavedTimerRef.current) {
-      clearTimeout(objectDefaultsSavedTimerRef.current);
-    }
-    objectDefaultsSavedTimerRef.current = setTimeout(() => {
-      setObjectDefaultsSaved(false);
-      objectDefaultsSavedTimerRef.current = null;
-    }, 900);
+    void enqueueBoardSave(() => buildCurrentPage({
+      objectDefaults: nextObjectDefaults,
+      pendingProps: nextPendingProps,
+    })).then(accepted => {
+      if (accepted === false) return;
+      setObjectDefaultsSaved(true);
+      if (objectDefaultsSavedTimerRef.current) clearTimeout(objectDefaultsSavedTimerRef.current);
+      objectDefaultsSavedTimerRef.current = setTimeout(() => {
+        setObjectDefaultsSaved(false);
+        objectDefaultsSavedTimerRef.current = null;
+      }, 900);
+    });
   };
 
   const saveDefaultsForElement = (element: BoardElement) => {
@@ -5338,6 +5429,7 @@ export default function BoardEditor({
     const clone: BoardElement = {
       ...preset.element,
       id: generateId(),
+      ...(preset.element.type === "embed" ? { webSessionId: generateId() } : {}),
       parentId: targetLayerId ?? undefined,
       position: {
         x: Math.max(
@@ -5637,14 +5729,86 @@ export default function BoardEditor({
       viewportCenterX,
       viewportCenterY,
       editorSettings,
-      updatedAt: Date.now(),
+      updatedAt: nextBoardRevision(page.id, page.updatedAt),
     };
   };
 
-  const doSave = (
-    options: { keepalive?: boolean } = {},
+  const flushLiveWorkbookEditors = async () => {
+    const frames = Array.from(
+      document.querySelectorAll<HTMLIFrameElement>("iframe[data-spreadsheet-element-id]"),
+    ).filter((frame) => frame.dataset.spreadsheetReadonly !== "true");
+    await Promise.all(
+      frames.map(async (frame) => {
+        await spreadsheetBridge(frame)?.flush();
+      }),
+    );
+  };
+
+  const stabilizeSaveSnapshot = (snapshot: Page) => {
+    const stable = stabilizeBoardSnapshotRevision(
+      snapshot,
+      stableRevisionRef.current,
+      () => nextBoardRevision(snapshot.id, persistedBaseRevisionRef.current ?? 0),
+      pendingSaveRef.current,
+    );
+    stableRevisionRef.current = stable.stableRevision;
+    return stable.snapshot;
+  };
+
+  function enqueueBoardSave(
+    makeSnapshot: () => Page,
+    options: {
+      keepalive?: boolean;
+      flushWorkbooks?: boolean;
+      recoveryPredecessor?: Page;
+    } = {},
+  ) {
+    const { flushWorkbooks = false, recoveryPredecessor, ...saveOptions } = options;
+    const targetPageId = page.id;
+    const targetPageGeneration = currentPageGenerationRef.current;
+    const save = saveQueueRef.current.catch(() => undefined).then(async () => {
+      if (flushWorkbooks) await flushLiveWorkbookEditors();
+      const latestSnapshot = stabilizeSaveSnapshot(makeSnapshot());
+      const result = await persistLatestBoardSnapshot(
+        latestSnapshot,
+        pendingSaveRef.current,
+        persistedBaseRevisionRef.current,
+        async (attempt) => {
+          const isLatest = boardSnapshotPayloadKey(attempt.snapshot) ===
+            boardSnapshotPayloadKey(latestSnapshot);
+          return onSave(attempt.snapshot, {
+            ...(isLatest ? saveOptions : {}),
+            ...(isLatest && recoveryPredecessor ? { recoveryPredecessor } : {}),
+            // Keepalive storage must retain recovery metadata for the latest
+            // snapshot; retry an uncertain predecessor with an ordinary write.
+            ...(isLatest ? {} : { keepalive: false }),
+            baseRevision: attempt.baseRevision,
+          });
+        },
+        (pending) => {
+          pendingSaveRef.current = pending;
+        },
+      );
+      if (currentPageIdRef.current === targetPageId &&
+          currentPageGenerationRef.current === targetPageGeneration) {
+        persistedBaseRevisionRef.current = result.baseRevision;
+      }
+      if (result.error) {
+        console.error('Could not save the board.', result.error);
+      }
+      return result.accepted;
+    });
+    saveQueueRef.current = save.then(() => undefined, () => undefined);
+    return save.catch((error) => {
+      console.error('Could not save the board.', error);
+      return false;
+    });
+  }
+
+  const doSave = async (
+    options: { keepalive?: boolean; flushWorkbooks?: boolean } = {},
   ) => {
-    onSave(buildCurrentPage(), options);
+    return enqueueBoardSave(buildCurrentPage, options);
   };
 
   const handleSaveAs = async (kind: SaveAsKind, name: string): Promise<string> => {
@@ -6058,8 +6222,36 @@ export default function BoardEditor({
 
   const saveLatestRef = useRef(doSave);
   saveLatestRef.current = doSave;
+  const buildLatestRef = useRef(buildCurrentPage);
+  buildLatestRef.current = buildCurrentPage;
+  const queueUnloadSnapshotRef = useRef<(event: Event) => void>(() => undefined);
+  queueUnloadSnapshotRef.current = (event) => {
+    // Capture once while the document and workbook editor are still live.
+    // Both browser lifecycle events then refer to the same logical revision.
+    const snapshot = stabilizeSaveSnapshot(buildLatestRef.current());
+    const pending = pendingSaveRef.current;
+    const recoveryPredecessor = pending &&
+      pending.snapshot.id === snapshot.id &&
+      pending.snapshot.updatedAt < snapshot.updatedAt &&
+      boardSnapshotPayloadKey(pending.snapshot) !== boardSnapshotPayloadKey(snapshot)
+      ? pending.snapshot
+      : undefined;
+    const baseRevision = persistedBaseRevisionRef.current;
+    if (!prepareBrowserUnload(snapshot, baseRevision, recoveryPredecessor) && event.type === 'beforeunload') {
+      event.preventDefault();
+      (event as BeforeUnloadEvent).returnValue = '';
+    }
+    void enqueueBoardSave(() => snapshot, {
+      keepalive: true,
+      recoveryPredecessor,
+    });
+  };
+  useEffect(() => registerDocumentFlush(() => saveLatestRef.current({ flushWorkbooks: true })), []);
   useEffect(() => {
-    const flushLatestDocument = () => saveLatestRef.current({ keepalive: true });
+    const flushLatestDocument = (event: Event) => {
+      if (window.noteboardAPI) return;
+      queueUnloadSnapshotRef.current(event);
+    };
     window.addEventListener("pagehide", flushLatestDocument);
     window.addEventListener("beforeunload", flushLatestDocument);
     return () => {
@@ -6184,6 +6376,8 @@ export default function BoardEditor({
       if (eraserMode === 'partial' && currentDrawPoints && currentDrawPoints.length > 0) {
         const minX = Math.min(...currentDrawPoints.map((p) => p.x));
         const minY = Math.min(...currentDrawPoints.map((p) => p.y));
+        const maxX = Math.max(...currentDrawPoints.map((p) => p.x));
+        const maxY = Math.max(...currentDrawPoints.map((p) => p.y));
         const normalizedPoints = currentDrawPoints.map((p) => ({
           x: p.x - minX,
           y: p.y - minY,
@@ -6193,8 +6387,8 @@ export default function BoardEditor({
           type: "draw",
           position: { x: minX, y: minY },
           size: {
-            width: Math.max(...currentDrawPoints.map((p) => p.x)) - minX,
-            height: Math.max(...currentDrawPoints.map((p) => p.y)) - minY,
+            width: Math.max(1, maxX - minX),
+            height: Math.max(1, maxY - minY),
           },
           points: normalizedPoints,
           color: "#ffffff", // color doesn't matter for mask, but stroke will be black in mask
@@ -6696,9 +6890,8 @@ export default function BoardEditor({
         {/* Left Side: General settings */}
         <div className="flex items-center gap-2 shrink-0 min-w-0">
           <button
-            onClick={() => {
-              doSave();
-              onBack();
+            onClick={async () => {
+              if (await doSave({ flushWorkbooks: true }) !== false) onBack();
             }}
             title="Back"
             className="shrink-0 p-2 rounded-lg text-gray-500 hover:text-[#1A1A1A] justify-center hover:bg-gray-100 transition-colors border-2 border-transparent hover:border-gray-300"
@@ -6746,7 +6939,7 @@ export default function BoardEditor({
                 title="Save title"
                 onClick={() => {
                   (document.activeElement as HTMLElement)?.blur?.();
-                  doSave();
+                  doSave({ flushWorkbooks: true });
                 }}
               >
                 <Check className="w-3.5 h-3.5 stroke-[3]" />
@@ -8159,41 +8352,57 @@ export default function BoardEditor({
                           );
                           if (!clipped) return null;
 
+                          const previewElement = activeTool === "embed" || activeTool === "media"
+                            ? buildRegionElement(activeTool as ElementType, clipped)
+                            : null;
+                          const previewRect = previewElement
+                            ? {
+                                x: previewElement.position.x,
+                                y: previewElement.position.y,
+                                w: previewElement.size?.width ?? clipped.w,
+                                h: previewElement.size?.height ?? clipped.h,
+                              }
+                            : clipped;
+
                           if (getActiveToolMenuSettings().previewMode === "box") {
                             return (
                               <div
+                                data-board-placement-preview="true"
                                 className="absolute border-[1.5px] border-blue-500 bg-blue-500/10 pointer-events-none"
                                 style={{
-                                  left: clipped.x,
-                                  top: clipped.y,
-                                  width: clipped.w,
-                                  height: clipped.h,
-                                  clipPath: creationClip(clipped),
+                                  left: previewRect.x,
+                                  top: previewRect.y,
+                                  width: previewRect.w,
+                                  height: previewRect.h,
+                                  clipPath: previewElement
+                                    ? creationClip(previewRect, previewElement.rotation ?? 0, previewElement)
+                                    : creationClip(previewRect),
                                 }}
                               />
                             );
                           } else {
-                            const previewElement = buildRegionElement(activeTool as ElementType, clipped);
+                            const realisticElement = previewElement ?? buildRegionElement(activeTool as ElementType, clipped);
                             return (
                               <div
+                                data-board-placement-preview="true"
                                 className="pointer-events-none"
                                 style={{
                                   position: "absolute",
-                                  opacity: (previewElement.opacity ?? 100) / 100,
-                                  transform: `rotate(${previewElement.rotation ?? 0}deg) scaleX(${previewElement.flipX ? -1 : 1}) scaleY(${previewElement.flipY ? -1 : 1})`,
+                                  opacity: (realisticElement.opacity ?? 100) / 100,
+                                  transform: `rotate(${realisticElement.rotation ?? 0}deg) scaleX(${realisticElement.flipX ? -1 : 1}) scaleY(${realisticElement.flipY ? -1 : 1})`,
                                   transformOrigin: "center center",
-                                  clipPath: creationClip({ x: previewElement.position.x, y: previewElement.position.y, w: previewElement.size.width, h: previewElement.size.height }, previewElement.rotation ?? 0, previewElement),
-                                  left: previewElement.position.x,
-                                  top: previewElement.position.y,
-                                  width: Math.max(1, previewElement.size.width),
+                                  clipPath: creationClip({ x: realisticElement.position.x, y: realisticElement.position.y, w: realisticElement.size.width, h: realisticElement.size.height }, realisticElement.rotation ?? 0, realisticElement),
+                                  left: realisticElement.position.x,
+                                  top: realisticElement.position.y,
+                                  width: Math.max(1, realisticElement.size.width),
                                   height: Math.max(
                                     1,
-                                    previewElement.size.height,
+                                    realisticElement.size.height,
                                   ),
                                 }}
                               >
                                 <ElementVisuals
-                                  element={previewElement as BoardElement}
+                                  element={realisticElement as BoardElement}
                                   onUpdate={() => {}}
                                   allowEditing={false}
                                 />
@@ -8359,6 +8568,9 @@ export default function BoardEditor({
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
                       onBoardResizeStart={beginSecondaryBoardResize}
+                      onCaptureHistoryBaseline={
+                        el.type === "table" ? captureLiveDocumentHistoryBaseline : undefined
+                      }
                       onSmartMove={updateSmartGuides}
                       onGuidesEnd={()=>setVisibleGuides([])}
                       highlightAll={highlightAll}
@@ -8489,6 +8701,9 @@ export default function BoardEditor({
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
                       onBoardResizeStart={beginSecondaryBoardResize}
+                      onCaptureHistoryBaseline={
+                        el.type === "table" ? captureLiveDocumentHistoryBaseline : undefined
+                      }
                       onSmartMove={updateSmartGuides}
                       onGuidesEnd={()=>setVisibleGuides([])}
                       highlightAll={highlightAll}
@@ -10306,6 +10521,7 @@ function BoardElementNode({
   element,
   renderZIndex,
   onBoardResizeStart,
+  onCaptureHistoryBaseline,
   onSmartMove,
   onGuidesEnd,
   isSelectMode: _isSelectMode,
@@ -10350,6 +10566,7 @@ function BoardElementNode({
   element: BoardElement;
   renderZIndex?: number;
   onBoardResizeStart?: (id:string)=>void;
+  onCaptureHistoryBaseline?: () => void;
   onSmartMove?: (element:BoardElement,position:{x:number;y:number},allowSnap?:boolean)=>{x:number;y:number};
   onGuidesEnd?: ()=>void;
   allowEditing?: boolean;
@@ -10455,6 +10672,9 @@ function BoardElementNode({
     e.preventDefault();
     e.stopPropagation();
     if (!nodeRef.current || !canResize) return;
+    // Capture an active workbook edit before focusing the board root blurs its
+    // iframe. The resize itself will then form a separate history entry.
+    if (element.type === "table") onCaptureHistoryBaseline?.();
     nodeRef.current.closest<HTMLElement>('[data-board-root]')?.focus({preventScroll:true});
     if(element.type==="board")onBoardResizeStart?.(element.id);
 
@@ -10463,25 +10683,37 @@ function BoardElementNode({
     setInteractionPreview(null);
     document.body.style.userSelect = "none";
 
+    const currentElement = elements?.find((item) => item.id === element.id) ?? element;
+    let resizeElement = currentElement;
+    if (currentElement.type === "table") {
+      const frame = Array.from(
+        document.querySelectorAll<HTMLIFrameElement>("iframe[data-spreadsheet-element-id]"),
+      ).find((candidate) => candidate.dataset.spreadsheetElementId === currentElement.id);
+      const liveContent = spreadsheetBridge(frame ?? null)?.snapshot();
+      if (typeof liveContent === "string" && parseWorkbookDocument(liveContent)) {
+        resizeElement = { ...currentElement, content: liveContent };
+      }
+    }
+
     const startX = e.clientX;
     const startY = e.clientY;
-    const startWidth = element.size?.width || nodeRef.current.offsetWidth;
-    const startHeight = element.size?.height || nodeRef.current.offsetHeight;
-    const startPosX = element.position.x;
-    const startPosY = element.position.y;
-    const rotation = element.rotation || 0;
+    const startWidth = resizeElement.size?.width || nodeRef.current.offsetWidth;
+    const startHeight = resizeElement.size?.height || nodeRef.current.offsetHeight;
+    const startPosX = resizeElement.position.x;
+    const startPosY = resizeElement.position.y;
+    const rotation = resizeElement.rotation || 0;
     const rad = -rotation * (Math.PI / 180);
     const startFontSize =
-      element.fontSize ||
-      (element.type === "h1"
+      resizeElement.fontSize ||
+      (resizeElement.type === "h1"
         ? 36
-        : element.type === "h2"
+        : resizeElement.type === "h2"
           ? 24
-          : element.type === "h3"
+          : resizeElement.type === "h3"
             ? 18
             : 16);
-    const startLineHeight = element.lineHeight || 24;
-    const startCrop = element.crop || {
+    const startLineHeight = resizeElement.lineHeight || 24;
+    const startCrop = resizeElement.crop || {
       left: 0,
       top: 0,
       right: 0,
@@ -10686,8 +10918,8 @@ function BoardElementNode({
         }, 750);
       }
 
-      const simpleDoc=element.type==='table'?parseWorkbookDocument(element.content):null;
-      const minSize = simpleDoc?.mode==='simple'?fitGridObjectSize(simpleDoc,0,0):getElementMinSize(element);
+      const simpleDoc=resizeElement.type==='table'?parseWorkbookDocument(resizeElement.content):null;
+      const minSize = simpleDoc?.mode==='simple'?fitGridObjectSize(simpleDoc,0,0):getElementMinSize(resizeElement);
       let finalW: number;
       let finalH: number;
       if (isProportional) {
@@ -10709,8 +10941,8 @@ function BoardElementNode({
       }
 
       if (element.type === 'table' && !isProportional) {
-        const cell=workbookCellSize(parseWorkbookDocument(element.content));
-        const doc=parseWorkbookDocument(element.content);
+        const cell=workbookCellSize(parseWorkbookDocument(resizeElement.content));
+        const doc=parseWorkbookDocument(resizeElement.content);
         if (doc?.mode==='simple') {
           const size=fitGridObjectSize(doc,finalW,finalH);
           if (dir.includes('e') || dir.includes('w')) finalW=size.width;
@@ -10793,8 +11025,8 @@ function BoardElementNode({
         },
       };
 
-      if (element.type==='table' && getSpreadsheetMode(parseWorkbookDocument(element.content))==='simple')
-        updatePayload.content=resizeSimpleWorkbook(element.content,finalW,finalH).content;
+      if (resizeElement.type==='table' && getSpreadsheetMode(parseWorkbookDocument(resizeElement.content))==='simple')
+        updatePayload.content=resizeSimpleWorkbook(resizeElement.content,finalW,finalH).content;
 
       if (isTextScaling(element)) {
         updatePayload.textScale = resizedTextScale(element, startWidth, finalW);
@@ -12793,10 +13025,14 @@ function ElementVisuals({
         audioDuration > 0 ? Math.max(0, Math.min(1, audioCurrentTime / audioDuration)) : 0;
       const mediaWidth = content
         ? size?.width || MEDIA_DEFAULT_SIZE.width
-        : Math.max(size?.width || MEDIA_DEFAULT_SIZE.width, MIN_MEDIA_SIZE.width);
+        // A media element can be deliberately narrower than the normal
+        // minimum when a placement gesture reaches a surface edge. Its
+        // rendered box must match the stored box so the final result agrees
+        // with the placement preview.
+        : size?.width || MEDIA_DEFAULT_SIZE.width;
       const mediaHeight = content
         ? size?.height || MEDIA_DEFAULT_SIZE.height
-        : Math.max(size?.height || MEDIA_DEFAULT_SIZE.height, MIN_MEDIA_SIZE.height);
+        : size?.height || MEDIA_DEFAULT_SIZE.height;
 
       return (
         <div

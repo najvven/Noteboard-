@@ -1,11 +1,18 @@
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 contextBridge.exposeInMainWorld("noteboardAPI", {
+  onCloseRequested: (callback) => {
+    const listener = (_event, requestId) => callback(requestId);
+    ipcRenderer.on("document:prepare-close", listener);
+    ipcRenderer.send("document:close-handler-ready");
+    return () => ipcRenderer.removeListener("document:prepare-close", listener);
+  },
+  respondToClose: (requestId, saved) => ipcRenderer.send("document:close-ready", requestId, saved === true),
   readClipboard: () => ipcRenderer.invoke("clipboard:read"),
   writeBoardClipboard: (json) => ipcRenderer.invoke("clipboard:write-board", json),
   loadPages: () => ipcRenderer.invoke("storage:get-pages"),
-  savePage: (page) => ipcRenderer.invoke("storage:save-page", page),
-  deletePage: (pageId) => ipcRenderer.invoke("storage:delete-page", pageId),
+  savePage: (page, options) => ipcRenderer.invoke("storage:save-page", page, options),
+  deletePage: (pageId, options) => ipcRenderer.invoke("storage:delete-page", pageId, options),
   loadPresets: () => ipcRenderer.invoke("storage:get-presets"),
   savePresets: (presets) => ipcRenderer.invoke("storage:save-presets", presets),
   loadSettings: () => ipcRenderer.invoke("storage:get-settings"),

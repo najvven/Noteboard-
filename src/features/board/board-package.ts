@@ -22,6 +22,40 @@ import { assertSafeZipDirectory } from "../../../shared/zip-preflight.js";
 
 export { mimeFromAssetPath } from "../../../shared/board-package-stream.js";
 
+const isPackagedAssetElement = (element: BoardElement) =>
+  element.type === "image" || element.type === "media";
+
+const assertExportedArchiveFitsLimits = async (bytes: Uint8Array) => {
+  assertFileSize(bytes.byteLength, MAX_BOARD_FILE_BYTES, "Board file");
+  const { entryCount } = assertSafeZipDirectory(bytes);
+  const zip = await JSZip.loadAsync(bytes);
+  if (entryCount !== Object.values(zip.files).length) {
+    throw new Error("Generated board package entry count is invalid.");
+  }
+
+  const jsonFile = zip.file("board.json");
+  if (!jsonFile) throw new Error("Invalid board package (missing board.json).");
+  assertFileSize(
+    getArchiveEntryDeclaredSize(jsonFile),
+    MAX_BOARD_JSON_BYTES,
+    "board.json",
+  );
+
+  for (const [path, entry] of Object.entries(zip.files)) {
+    if (entry.dir || !path.startsWith("assets/")) continue;
+    assertFileSize(
+      getArchiveEntryDeclaredSize(entry),
+      MAX_ARCHIVE_ASSET_BYTES,
+      "Board asset",
+    );
+  }
+  assertFileSize(
+    getArchiveDeclaredSize(zip.files),
+    MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    "Expanded board package",
+  );
+};
+
 /** Shared portable export used by both the workspace and Save as File. */
 export async function createBoardArchive(page: Page): Promise<Uint8Array> {
   assertValidBoard(page);
@@ -35,7 +69,9 @@ export async function createBoardArchive(page: Page): Promise<Uint8Array> {
     return { ...element, mediaMime: element.type === 'media' ? element.mediaMime || data[1] : element.mediaMime, content: assetPath };
   });
   zip.file('board.json', JSON.stringify({ ...page, version: page.version || 3, elements }, null, 2));
-  return zip.generateAsync({ type: 'uint8array' });
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  await assertExportedArchiveFitsLimits(bytes);
+  return bytes;
 }
 
 export async function downloadBoardArchive(page: Page, name = page.title): Promise<void> {
@@ -167,6 +203,7 @@ const restorePackagedAssets = async (
   const referencedPaths = [
     ...new Set(
       packageElements(data)
+        .filter(isPackagedAssetElement)
         .map((element) => element.content)
         .filter((content): content is string =>
           typeof content === "string" && content.startsWith("assets/"),
@@ -205,6 +242,7 @@ const restorePackagedAssets = async (
   }
 
   const elements = packageElements(data).map((element) => {
+    if (!isPackagedAssetElement(element)) return element;
     const path = element.content;
     if (typeof path !== "string" || !path.startsWith("assets/")) return element;
     const encoded = encodedAssets.get(path);

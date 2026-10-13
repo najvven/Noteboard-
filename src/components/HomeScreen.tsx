@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Page } from '../types';
+import { generateId } from '../lib/utils';
 import { Search, Pin, MoreHorizontal, Files, Plus, Trash2, Check, ArrowRight, CornerUpRight, AlertTriangle, Download, LoaderCircle, X, Settings2 } from 'lucide-react';
 import { openBoardStorageFolder } from '../lib/storage';
 import { filterAndSortPages } from '../features/home/page-search';
@@ -14,6 +15,7 @@ import {
 } from '../../shared/board-data.js';
 
 interface Props {
+  active?: boolean;
   pages: Page[];
   onOpenPage: (id: string) => void;
   onCreateNewPage: () => void;
@@ -21,13 +23,13 @@ interface Props {
   onRenamePage: (id: string, name: string) => void;
   onTogglePin: (id: string) => void;
   onMovePage: (sourceId: string, targetId: string) => void;
-  onImportPage: (page: Page) => void;
+  onImportPage: (page: Page) => Promise<void>;
   onRefreshPages: () => Promise<void>;
   globalBrightness: number;
   setGlobalBrightness: (val: number) => void;
 }
 
-export default function HomeScreen({ pages, onOpenPage, onCreateNewPage, onDeletePage, onRenamePage, onTogglePin, onMovePage, onImportPage, onRefreshPages, globalBrightness, setGlobalBrightness }: Props) {
+export default function HomeScreen({ active = true, pages, onOpenPage, onCreateNewPage, onDeletePage, onRenamePage, onTogglePin, onMovePage, onImportPage, onRefreshPages, globalBrightness, setGlobalBrightness }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const allPages = filterAndSortPages(pages, searchQuery);
   const pinnedPages = allPages.filter(p => p.isPinned);
@@ -69,7 +71,7 @@ export default function HomeScreen({ pages, onOpenPage, onCreateNewPage, onDelet
     setFileOperation({ label: `Importing ${file.name}`, progress: 0 });
     try {
       const parsed = await readBoardPackageFile(file, {
-        createBoardId: () => `page-${Date.now()}`,
+        createBoardId: () => `page-${generateId()}`,
         isCancelled: () => cancelFileOperationRef.current,
         onProgress: ({ stage, percent }) => {
           const progress =
@@ -89,7 +91,7 @@ export default function HomeScreen({ pages, onOpenPage, onCreateNewPage, onDelet
       });
       if (Array.isArray(parsed)) throw new Error('Invalid board package format.');
       setFileOperation({ label: `Finishing ${file.name}`, progress: 100 });
-      onImportPage(parsed);
+      await onImportPage(parsed);
     } catch (error) {
       if (
         !(error instanceof BoardPackageCancelledError) &&
@@ -103,17 +105,19 @@ export default function HomeScreen({ pages, onOpenPage, onCreateNewPage, onDelet
   };
 
   useEffect(() => {
-    const handlePaste = (e: ClipboardEvent) => {
+    if (!active) return;
+    const handlePaste = async (e: ClipboardEvent) => {
+      if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return;
       const text = e.clipboardData?.getData('text');
       if (text) {
         try {
           const parsed = JSON.parse(text);
           if (parsed && typeof parsed === 'object' && parsed.id && Array.isArray(parsed.elements)) {
             if (!parsed.version) parsed.version = 1;
-            parsed.id = `page-${Date.now()}`;
+            parsed.id = `page-${generateId()}`;
             assertValidBoard(parsed);
             e.preventDefault();
-            onImportPage(parsed as Page);
+            await onImportPage(parsed as Page);
           }
         } catch (err) {
           // Ignore parse errors on paste, could be random text
@@ -151,7 +155,7 @@ export default function HomeScreen({ pages, onOpenPage, onCreateNewPage, onDelet
       window.removeEventListener('dragleave', handleDragLeave);
       window.removeEventListener('drop', handleDrop);
     };
-  }, [onImportPage]);
+  }, [active, onImportPage]);
 
   const handlePageClick = (id: string) => {
     if (movingPageId) {

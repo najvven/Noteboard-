@@ -18,6 +18,10 @@ export interface BoardDocumentPresentation {
   gridThickness: number;
   showGrid: boolean;
   snapToGrid: boolean;
+  showWorkspaceGrid?: boolean;
+  workspaceGridColor?: string;
+  workspaceGridThickness?: number;
+  workspaceGridSize?: number;
 }
 
 export interface BoardDocumentHistory {

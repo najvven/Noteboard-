@@ -7,8 +7,7 @@ import {
   normalizeBoardId,
 } from "./shared/board-data.js";
 import { atomicWriteJson, enqueueWrite, readJsonWithBackup } from "./shared/persistence.js";
-import { repairLegacyBoard } from "./shared/board-migration.js";
-import { mapInBatches } from "./shared/batch.js";
+import { loadStoredBoards, saveStoredBoard, saveStoredBoards, deleteStoredBoard } from "./shared/board-store.js";
 import {
   getLocalSecurityHeaders,
   isTrustedLocalHost,
@@ -22,7 +21,17 @@ const BOARDS_DIR = path.join(DATA_DIR, "boards");
 const PRESETS_FILE = path.join(DATA_DIR, "presets.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
-const boardFile = (id: unknown) => path.join(BOARDS_DIR, `${normalizeBoardId(id)}.json`);
+function requestBaseRevision(req: express.Request) {
+  const match = req.get('If-Match');
+  const absent = req.get('If-None-Match');
+  if (absent !== undefined) {
+    if (absent !== '*' || match !== undefined) throw new Error('Invalid base revision.');
+    return null;
+  }
+  if (match !== undefined && !/^"\d+"$/.test(match)) throw new Error('Invalid base revision.');
+  return match === undefined ? undefined : Number(match.slice(1, -1));
+}
+
 
 async function ensureDirs() {
   try {
@@ -74,24 +83,7 @@ async function startServer() {
   // Pages/Boards
   app.get("/api/pages", async (_req, res) => {
     try {
-      const files = await fs.readdir(BOARDS_DIR);
-      const loadedPages = await mapInBatches(files, 8, async (file) => {
-        try {
-          if (file.endsWith(".json")) {
-            const filePath = path.join(BOARDS_DIR, file);
-            const page = repairLegacyBoard(await readJsonWithBackup(filePath));
-            assertValidBoard(page);
-            return page;
-          }
-        } catch (error) {
-          console.warn(`Skipping unreadable board file: ${file}`, error);
-        }
-        return null;
-      });
-      const pages = loadedPages.filter(Boolean);
-      // Sort by updatedAt descending
-      pages.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-      res.json(pages);
+      res.json(await loadStoredBoards(BOARDS_DIR));
     } catch (err) {
       res.status(500).json({ error: "Failed to load pages" });
     }
@@ -106,15 +98,12 @@ async function startServer() {
       }
       // Validate the whole import before replacing any existing board.
       // A later invalid item must not leave an earlier item partially saved.
-      pages.forEach(assertValidBoard);
-      for (const page of pages) {
-        const filePath = boardFile(page.id);
-        await enqueueWrite(filePath, () => atomicWriteJson(filePath, page));
-      }
+      await saveStoredBoards(BOARDS_DIR, pages);
 
       res.json({ success: true });
     } catch (err) {
-      res.status(400).json({ error: "Failed to save pages" });
+      const conflict = (err as { code?: string }).code === 'STALE_BOARD_REVISION';
+      res.status(conflict ? 409 : 400).json({ error: conflict ? 'A newer board version is already saved. Reload before replacing it.' : 'Failed to save pages' });
     }
   });
 
@@ -127,30 +116,21 @@ async function startServer() {
         res.status(400).json({ error: "Board id does not match the route" });
         return;
       }
-      const filePath = boardFile(page.id);
-      await enqueueWrite(filePath, () => atomicWriteJson(filePath, page));
+      await saveStoredBoard(BOARDS_DIR, page, { baseRevision: requestBaseRevision(req) });
       res.json({ success: true });
     } catch (err) {
-      res.status(400).json({ error: "Failed to save page" });
+      const conflict = (err as { code?: string }).code === 'STALE_BOARD_REVISION';
+      res.status(conflict ? 409 : 400).json({ error: conflict ? 'A newer board version is already saved. Reload before replacing it.' : 'Failed to save page' });
     }
   });
 
   app.delete("/api/pages/:id", async (req, res) => {
     try {
-      const filePath = boardFile(req.params.id);
-      await enqueueWrite(filePath, async () => {
-        await Promise.all([
-          fs.unlink(filePath).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== "ENOENT") throw error;
-          }),
-          fs.unlink(`${filePath}.bak`).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== "ENOENT") throw error;
-          }),
-        ]);
-      });
+      await deleteStoredBoard(BOARDS_DIR, req.params.id, { baseRevision: requestBaseRevision(req) });
       res.json({ success: true });
     } catch (err) {
-      res.status(500).json({ error: "Failed to delete page" });
+      const conflict = (err as { code?: string }).code === 'STALE_BOARD_REVISION';
+      res.status(conflict ? 409 : 500).json({ error: conflict ? 'The board changed. Reload before deleting it.' : 'Failed to delete page' });
     }
   });
 

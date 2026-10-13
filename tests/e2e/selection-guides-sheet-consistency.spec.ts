@@ -13,13 +13,14 @@ const board = (id: string, elements: any[] = [], settings = {}) => ({
 });
 const box = (id:string,x:number,y:number) => ({id,type:'rectangle',position:{x,y},size:{width:80,height:60},content:'',color:'#dbeafe',zIndex:1});
 async function open(page:Page,request:any,data:any) {
-  await request.post('/api/pages',{data:[data]});
+  const response = await request.post('/api/pages',{data:[data]});
+  expect(response.ok(), await response.text()).toBe(true);
   await page.goto('/');await page.getByRole('button',{name:`Open ${data.id}`,exact:true}).click();
 }
 
 for (const mode of ['polygon','lasso']) for (const preview of ['translucent','realistic']) {
   test(`${mode} ${preview} respects Lock in time, cancels early releases and rebases the anchor`,async({page,request})=>{
-    await open(page,request,board(`lock-${mode}-${preview}`,[box('box',200,220)],{selectMode:mode,previewMode:preview}));
+    await open(page,request,board(`lock-${mode}-${preview}`,[box('box',200,220)],{selectMode:mode,previewMode:preview==='translucent'?'box':'realistic'}));
     const root=(await page.locator('[data-board-root]').boundingBox())!;
     const move=async(x:number,y:number)=>page.mouse.move(root.x+x,root.y+y);
     await move(80,120);await page.mouse.down();await move(110,140);await page.mouse.up();

@@ -2,6 +2,7 @@ import type { BoardElement, SectionSheet } from "../../types";
 import {
   assertValidBoard,
   MAX_BOARD_FILE_BYTES,
+  MAX_MEDIA_FILE_BYTES,
 } from "../../../shared/board-data.js";
 import { selectedBounds, type SelectionArea } from "./selection";
 import { getTextScale, isScalableText } from "./text-scaling";
@@ -18,6 +19,93 @@ export interface ClipboardContents {
   text: string;
   html: string;
   files: File[];
+}
+
+export class ClipboardLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClipboardLimitError";
+  }
+}
+
+export interface ClipboardBudget {
+  maxMediaFileBytes: number;
+  maxTotalBytes: number;
+}
+
+const DEFAULT_CLIPBOARD_BUDGET: ClipboardBudget = {
+  maxMediaFileBytes: MAX_MEDIA_FILE_BYTES,
+  maxTotalBytes: MAX_BOARD_FILE_BYTES,
+};
+
+interface ClipboardReadableItem {
+  types: readonly string[];
+  getType(type: string): Promise<Blob>;
+}
+
+const isClipboardMediaType = (type: string) => /^(image|audio|video)\//i.test(type);
+
+export async function readBrowserClipboardItems(
+  items: readonly ClipboardReadableItem[],
+  budget: ClipboardBudget = DEFAULT_CLIPBOARD_BUDGET,
+): Promise<ClipboardContents> {
+  const result: ClipboardContents = { text: "", html: "", files: [] };
+  const supportedBlobs: Array<{ type: string; normalizedType: string; blob: Blob }> = [];
+  let totalBytes = 0;
+  for (const item of items) for (const type of item.types) {
+    const normalizedType = type.toLowerCase();
+    if (normalizedType !== "text/plain" && normalizedType !== "text/html" &&
+        !isClipboardMediaType(type)) continue;
+    const blob = await item.getType(type);
+    if (isClipboardMediaType(type) && blob.size > budget.maxMediaFileBytes) {
+      throw new ClipboardLimitError("Clipboard media file exceeds the size limit.");
+    }
+    if (totalBytes + blob.size > budget.maxTotalBytes) {
+      throw new ClipboardLimitError("Clipboard contents exceed the total size limit.");
+    }
+    totalBytes += blob.size;
+    supportedBlobs.push({ type, normalizedType, blob });
+  }
+  // Inspect every supported Blob's declared size before decoding text or
+  // constructing any File, so a late oversized item cannot follow a large
+  // earlier conversion.
+  for (const { type, normalizedType, blob } of supportedBlobs) {
+    if (normalizedType === "text/plain") result.text = await blob.text();
+    else if (normalizedType === "text/html") result.html = await blob.text();
+    else result.files.push(new File([blob], "clipboard", { type }));
+  }
+  return result;
+}
+
+export function decodeNativeClipboardMedia(
+  encoded: string,
+  name: string,
+  type: string,
+  totalBytes = 0,
+  budget: ClipboardBudget = DEFAULT_CLIPBOARD_BUDGET,
+) {
+  if (!isClipboardMediaType(type)) throw new Error("Unsupported clipboard media type.");
+  const remainingBytes = Math.min(budget.maxMediaFileBytes, budget.maxTotalBytes - totalBytes);
+  if (remainingBytes < 0 || encoded.length > 4 * Math.ceil(remainingBytes / 3)) {
+    throw new ClipboardLimitError("Clipboard media exceeds the size limit.");
+  }
+  const binary = atob(encoded);
+  if (binary.length > remainingBytes) throw new ClipboardLimitError("Clipboard media exceeds the size limit.");
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return { file: new File([bytes], name, { type }), totalBytes: totalBytes + bytes.byteLength };
+}
+
+export function getNativeClipboardTextBytes(
+  text: string,
+  html: string,
+  budget: ClipboardBudget = DEFAULT_CLIPBOARD_BUDGET,
+) {
+  const encoder = new TextEncoder();
+  const totalBytes = encoder.encode(text).byteLength + encoder.encode(html).byteLength;
+  if (totalBytes > budget.maxTotalBytes) {
+    throw new ClipboardLimitError("Clipboard contents exceed the total size limit.");
+  }
+  return totalBytes;
 }
 
 export type ClipboardRegion = SelectionArea;
@@ -58,19 +146,23 @@ export function writeBoardClipboard(
 export async function readCurrentClipboard(): Promise<ClipboardContents> {
   if (window.noteboardAPI?.readClipboard) {
     const value = await window.noteboardAPI.readClipboard();
-    const files = value.files.map(file => new File([Uint8Array.from(atob(file.base64), char => char.charCodeAt(0))], file.name, {type: file.type}));
-    if (value.image && !files.length) files.push(new File([Uint8Array.from(atob(value.image.slice(value.image.indexOf(',')+1)), char=>char.charCodeAt(0))], "clipboard.png", {type:"image/png"}));
+    const files: File[] = [];
+    let totalBytes = getNativeClipboardTextBytes(value.text, value.html);
+    for (const file of value.files) {
+      if (!isClipboardMediaType(file.type)) continue;
+      const decoded = decodeNativeClipboardMedia(file.base64, file.name, file.type, totalBytes);
+      files.push(decoded.file);
+      totalBytes = decoded.totalBytes;
+    }
+    if (value.image && !files.length) {
+      const separator = value.image.indexOf(",");
+      const encoded = separator >= 0 ? value.image.slice(separator + 1) : value.image;
+      files.push(decodeNativeClipboardMedia(encoded, "clipboard.png", "image/png", totalBytes).file);
+    }
     return {text:value.text,html:value.html,files};
   }
   const items = await navigator.clipboard.read();
-  const result: ClipboardContents = {text:"",html:"",files:[]};
-  for (const item of items) for (const type of item.types) {
-    const blob = await item.getType(type);
-    if (type === "text/plain") result.text = await blob.text();
-    else if (type === "text/html") result.html = await blob.text();
-    else if (/^(image|audio|video)\//.test(type)) result.files.push(new File([blob],"clipboard",{type}));
-  }
-  return result;
+  return readBrowserClipboardItems(items);
 }
 
 export async function copyBoardToSystem(elements: BoardElement[], sheets: SectionSheet[]) {

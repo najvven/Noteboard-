@@ -4,6 +4,20 @@ import {fileURLToPath} from 'node:url';
 import { assertValidBoard, MAX_BOARD_FILE_BYTES, MAX_MEDIA_FILE_BYTES } from './board-data.js';
 
 const mediaTypes = {'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.gif':'image/gif','.webp':'image/webp','.svg':'image/svg+xml','.bmp':'image/bmp','.avif':'image/avif','.mp4':'video/mp4','.webm':'video/webm','.mov':'video/quicktime','.mp3':'audio/mpeg','.wav':'audio/wav','.ogg':'audio/ogg','.m4a':'audio/mp4'};
+const MAX_CLIPBOARD_MEDIA_BYTES = 128 * 1024 * 1024;
+
+const readBoundedFile = async (handle) => {
+  const chunks = [];
+  let total = 0;
+  // Read one byte beyond the per-file limit so a file replaced or grown after
+  // stat cannot cause an unbounded readFile allocation.
+  for await (const chunk of handle.createReadStream({start: 0, end: MAX_MEDIA_FILE_BYTES})) {
+    total += chunk.length;
+    if (total > MAX_MEDIA_FILE_BYTES) throw new Error('Clipboard media file is too large.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, total);
+};
 
 export async function readNativeClipboard(clipboard) {
   // Read synchronously before any file I/O: this represents the current OS
@@ -19,17 +33,28 @@ export async function readNativeClipboard(clipboard) {
     for(const uri of uris)try{fileNames.push(fileURLToPath(uri));}catch{/* Unsupported clipboard URI. */}
   }
   const files=[];
+  let totalMediaBytes = 0;
   for (const name of fileNames.slice(0,32)) {
     const type=mediaTypes[path.extname(name).toLowerCase()];
     if (!type) continue;
-    const handle=await fs.open(name,'r');
     try {
+      const handle=await fs.open(name,'r');
+      let bytes;
+      try {
       const stat=await handle.stat();
       if (!stat.isFile() || stat.size>MAX_MEDIA_FILE_BYTES) throw new Error('Clipboard media file is too large.');
-      const bytes=await handle.readFile();
-      if(bytes.length>MAX_MEDIA_FILE_BYTES)throw new Error('Clipboard media file is too large.');
+        if (totalMediaBytes + stat.size > MAX_CLIPBOARD_MEDIA_BYTES) throw new Error('Clipboard media exceeds the total size limit.');
+        bytes=await readBoundedFile(handle);
+        if (totalMediaBytes + bytes.length > MAX_CLIPBOARD_MEDIA_BYTES) throw new Error('Clipboard media exceeds the total size limit.');
+      } finally {
+        await handle.close();
+      }
       files.push({name:path.basename(name),type,base64:bytes.toString('base64')});
-    } finally {await handle.close();}
+      totalMediaBytes += bytes.length;
+    } catch {
+      // One stale, inaccessible, oversized, or otherwise unreadable file must
+      // not discard clipboard text, HTML, images, or files that can be read.
+    }
   }
   return {text,html,image:image.isEmpty()?'':image.toDataURL(),files};
 }

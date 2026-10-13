@@ -56,13 +56,50 @@ const sanitizeStyle = (value: string) => {
   const color = source.style.color;
   const decoration = source.style.textDecoration;
   const cursor = source.style.cursor;
-  if (color && !/url\s*\(/i.test(color)) safe.push(`color:${color}`);
+  const fontSize = source.style.fontSize;
+  const fontWeight = source.style.fontWeight;
+  const fontStyle = source.style.fontStyle;
+  const lineHeight = source.style.lineHeight;
+  const letterSpacing = source.style.letterSpacing;
+  const wordSpacing = source.style.wordSpacing;
+  const textAlign = source.style.textAlign;
+  const fontFamily = source.style.fontFamily;
+  if (isSafeColor(color)) safe.push(`color:${color}`);
   if (/^(?:none|underline)$/i.test(decoration)) {
     safe.push(`text-decoration:${decoration}`);
   }
   if (cursor === "pointer") safe.push("cursor:pointer");
+  if (isSafeFontSize(fontSize)) safe.push(`font-size:${fontSize}`);
+  if (/^(?:normal|bold|bolder|lighter|[1-9]00)$/i.test(fontWeight)) {
+    safe.push(`font-weight:${fontWeight}`);
+  }
+  if (/^(?:normal|italic|oblique)$/i.test(fontStyle)) {
+    safe.push(`font-style:${fontStyle}`);
+  }
+  if (isSafeLineHeight(lineHeight)) safe.push(`line-height:${lineHeight}`);
+  if (isSafeSpacing(letterSpacing)) safe.push(`letter-spacing:${letterSpacing}`);
+  if (isSafeSpacing(wordSpacing)) safe.push(`word-spacing:${wordSpacing}`);
+  if (/^(?:left|right|center|justify|start|end)$/i.test(textAlign)) {
+    safe.push(`text-align:${textAlign}`);
+  }
+  if (isSafeFontFamily(fontFamily)) safe.push(`font-family:${fontFamily}`);
   return safe.join(";");
 };
+
+const isSafeColor = (value: string) =>
+  /^(?:#[0-9a-f]{3,8}|[a-z]{1,32}|(?:rgb|rgba|hsl|hsla)\([0-9.%\s,+/-]+\))$/i.test(value);
+
+const isSafeFontSize = (value: string) =>
+  /^(?:xx-small|x-small|small|medium|large|x-large|xx-large|xxx-large|smaller|larger|(?:\d+(?:\.\d+)?)(?:px|pt|pc|in|cm|mm|em|rem|ex|ch|%)?)$/i.test(value);
+
+const isSafeLineHeight = (value: string) =>
+  /^(?:normal|\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?)(?:px|pt|pc|in|cm|mm|em|rem|ex|ch|%))$/i.test(value);
+
+const isSafeSpacing = (value: string) =>
+  /^(?:normal|(?:-?\d+(?:\.\d+)?)(?:px|pt|pc|in|cm|mm|em|rem|ex|ch|%))$/i.test(value);
+
+const isSafeFontFamily = (value: string) =>
+  /^(?:(?:"[a-z0-9 _-]+"|'[a-z0-9 _-]+'|[a-z][a-z0-9_-]*)(?:\s*,\s*(?:"[a-z0-9 _-]+"|'[a-z0-9 _-]+'|[a-z][a-z0-9_-]*))*)$/i.test(value);
 
 const escapeHtml = (value: string) =>
   value

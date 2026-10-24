@@ -137,21 +137,25 @@ function toStyle(style: IStyleData): Partial<ExcelJS.Style> {
 }
 
 /** RFC-style quoted rows; also accepts TSV and semicolon-separated spreadsheets. */
-export function parseDelimited(text: string) {
+export function parseDelimited(text: string, separatorHint?: "," | ";" | "\t") {
   text = text.replace(/^\uFEFF/, "");
   const counts = { ",": 0, ";": 0, "\t": 0 };
   let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
+  for (let i = 0; !separatorHint && i < text.length; i++) {
     const ch = text[i];
     if (ch === '"') {
       if (inQuotes && text[i + 1] === '"') i++;
       else inQuotes = !inQuotes;
     } else if (!inQuotes) {
-      if (ch === "\r" || ch === "\n") break;
+      if (ch === "\r" || ch === "\n") {
+        // A one-cell heading does not describe the later rows' delimiter.
+        if (counts[","] || counts[";"] || counts["\t"]) break;
+        continue;
+      }
       if (ch in counts) counts[ch as keyof typeof counts]++;
     }
   }
-  const separator = counts["\t"] ? "\t" : counts[";"] > counts[","] ? ";" : ",";
+  const separator = separatorHint ?? (counts["\t"] ? "\t" : counts[";"] > counts[","] ? ";" : ",");
   const rows: string[][] = [],
     row: string[] = [];
   let cell = "",
@@ -196,7 +200,7 @@ export async function importSpreadsheet(
     return {
       document: createWorkbookDocument(
         name.replace(/\.[^.]+$/, ""),
-        parseDelimited(new TextDecoder().decode(bytes)),
+        parseDelimited(new TextDecoder().decode(bytes), /\.tsv$/i.test(name) ? "\t" : undefined),
       ),
       warnings: [],
     };

@@ -30,6 +30,15 @@ test('Vite 6 development HTML authorizes its actual plugin-react preamble', asyn
     server: { middlewareMode: true },
     // This test transforms entry HTML; dependency prebundling has no consumer.
     optimizeDeps: { noDiscovery: true, include: [] },
+    plugins: [{
+      name: 'html-contract-without-dependency-prebundling',
+      configResolved(config) {
+        // Vite merges include arrays with the application's explicit workers.
+        // Clear the resolved test configuration before creating the optimizer.
+        config.optimizeDeps.include = [];
+        config.optimizeDeps.noDiscovery = true;
+      },
+    }],
   });
   try {
     for (const entry of ['index.html', 'sheet.html']) {

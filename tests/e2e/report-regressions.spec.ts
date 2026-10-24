@@ -85,6 +85,13 @@ test('editable Simple spreadsheets import XLSX sheets without replacing existing
   await expect.poll(async()=>(await snapshot()).workbook.sheetOrder.length).toBe(2);
   const result=await snapshot();expect(result.mode).toBe('simple');expect(result.workbook.sheets['sheet-1'].cellData[0][0].v).toBe('Keep original');
   expect(Object.values(result.workbook.sheets).some((sheet:any)=>sheet.cellData?.[0]?.[0]?.v==='Imported value')).toBeTruthy();
+  const tsvChooser=page.waitForEvent('filechooser');
+  await page.getByRole('button',{name:'Import sheets',exact:true}).click();
+  await(await tsvChooser).setFiles({name:'single-heading.tsv',mimeType:'text/tab-separated-values',buffer:Buffer.from('Heading, with punctuation\n1\t2\n')});
+  await expect.poll(async()=>(await snapshot()).workbook.sheetOrder.length).toBe(3);
+  const withTsv=await snapshot();
+  expect(withTsv.workbook.sheets['sheet-1'].cellData[0][0].v).toBe('Keep original');
+  expect(Object.values(withTsv.workbook.sheets).some((sheet:any)=>sheet.cellData?.[0]?.[0]?.v==='Heading, with punctuation'&&sheet.cellData?.[1]?.[0]?.v===1&&sheet.cellData?.[1]?.[1]?.v===2)).toBeTruthy();
   await page.getByRole('button',{name:'Draw',exact:true}).click();
   await expect(page.getByRole('button',{name:'Import sheets',exact:true})).toHaveCount(0);
  }finally{await deleteFixtureBoard(request,`/api/pages/${id}`);}

@@ -14,6 +14,8 @@ z tablicami użytkownika.
 - Przeładowanie widoku arkusza zachowuje wpisywaną komórkę, także formułę,
   formatowanie i możliwość kontynuowania wpisywania. Import XLSX jest dostępny
   również w edytowalnym trybie prostym.
+- Jednokomórkowy nagłówek nie powoduje utraty późniejszych kolumn CSV/TSV.
+  Rozszerzenie TSV określa separator także przy przecinkach w treści nagłówka.
 - Rysunki o dużej liczbie punktów nie korzystają z rozwijania całej tablicy
   punktów jako argumentów funkcji. Main Board przesuwa się zgodnie z ruchem
   kursora przy różnych poziomach zoomu i obsługuje Undo/Redo.
@@ -25,7 +27,7 @@ z tablicami użytkownika.
 - Limit archiwum pozostaje 128 MiB. Zachowano dotychczasowe identyfikatory
   aplikacji i położenie danych. Instalator nie zawiera osobistych tablic.
 
-Weryfikacja: 324 testy źródłowe i 9 testów pomocników przeglądarkowych przechodzą.
+Weryfikacja: 325 testów źródłowych i 9 testów pomocników przeglądarkowych przechodzi.
 W poprzednim etapie sprawdzono 37 scenariuszy interakcji i osobny scenariusz
 pełnych wierszy tekstu; obecne przygotowanie wydania ponownie sprawdza
 szczególnie zapis konfliktów, przeładowanie komórki, import i ruch Main Board.
@@ -38,7 +40,7 @@ danych w archiwum aplikacji. Aktualizacji instalatorem na profilu użytkownika
 nie uruchamiano; zachowano prywatną kopię danych do odzyskania.
 
 **Otwarty punkt jakościowy:** deklarowany próg 80% pokrycia źródeł nadal nie jest
-osiągnięty. Aktualny pomiar: 61,46% linii, 77,16% gałęzi, 54,10% funkcji.
+osiągnięty. Aktualny pomiar: 61,47% linii, 77,23% gałęzi, 54,10% funkcji.
 Progu nie obniżono; `npm run test:coverage` i zadanie coverage w CI zgłaszają
 błąd. Przechodzące testy przeglądarkowe i desktopowe nie są doliczane do tych
 wartości. Nie oznaczamy całego raportu audytowego jako zamkniętego.

@@ -5,6 +5,15 @@ import {importSpreadsheet,exportSpreadsheet,parseDelimited} from '../src/feature
 import {createWorkbookDocument,parseWorkbookDocument} from '../src/features/spreadsheet/workbook';
 import {createBoardArchive,readBoardPackageFile} from '../src/features/board/board-package';
 
+test('single-cell headings do not hide later CSV or TSV columns, and TSV filenames determine their delimiter',async()=>{
+  for(const delimiter of [',',';','\t'])
+    assert.deepEqual(parseDelimited(`Header\n1${delimiter}2\n`),[['Header'],['1','2']]);
+  const imported=await importSpreadsheet(new TextEncoder().encode('A title, with punctuation\n1\t2\n').buffer,'Report.TSV');
+  const cells=imported.document.workbook.sheets!['sheet-1'].cellData;
+  assert.equal(cells[0][0].v,'A title, with punctuation');
+  assert.equal(cells[1][0].v,1);assert.equal(cells[1][1].v,2);
+});
+
 test('CSV quoting, numeric data, formula cells and multiple lines are imported without evaluation as code',async()=>{
   assert.deepEqual(parseDelimited('Name;Value\r\n"a;b";"one\nline"\r\n"say ""hello""";3'),[['Name','Value'],['a;b','one\nline'],['say "hello"','3']]);
   assert.throws(()=>parseDelimited('a,"unfinished'),/unclosed/);

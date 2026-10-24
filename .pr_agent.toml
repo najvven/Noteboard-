@@ -8,5 +8,5 @@ reproducible correctness, state, data integrity, interaction and native isolatio
 defects. Preserve the established UI design. Check Text scaling, rich-text ranges,
 Web viewport/device/session behavior, Section clipping and persistence together.
 The files in build/web-filters are vendored generated filter data; focus review on
-the application integration in shared/, main.js, preload.cjs and src/ instead.
+the application integration in shared/, the desktop IPC bridge and src/ instead.
 """

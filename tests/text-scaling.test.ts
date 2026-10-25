@@ -25,3 +25,10 @@ test('saved text scaling accepts valid factors and rejects malformed state', () 
   for (const value of [0,-1,Infinity,NaN,'2']) assert.throws(()=>assertValidBoard({...page,elements:[{...element,textScale:value}]}),/text scale/);
   assert.throws(()=>assertValidBoard({...page,elements:[{...element,textScaling:'yes'}]}),/text scaling/);
 });
+
+test('text resize keeps its prior finite scale when width inputs are invalid', () => {
+  const element: BoardElement={id:'text',type:'text',position:{x:0,y:0},size:{width:350,height:200},content:'Text',textScaling:true,textScale:1.5,zIndex:1};
+  assert.equal(resizedTextScale(element,0,120),1.5);
+  assert.equal(resizedTextScale(element,Number.NaN,120),1.5);
+  assert.equal(resizedTextScale(element,120,0),1.5);
+});

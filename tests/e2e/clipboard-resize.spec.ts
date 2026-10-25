@@ -1,4 +1,4 @@
-import {test,expect} from '@playwright/test';
+import {test,expect} from './test';
 
 test('Ctrl+V follows the current clipboard after copying an object and respects text focus',async({page,request,context})=>{
   await context.grantPermissions(['clipboard-read','clipboard-write']);

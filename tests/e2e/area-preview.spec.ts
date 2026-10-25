@@ -1,4 +1,4 @@
-import {test,expect} from '@playwright/test';
+import {test,expect} from './test';
 
 const board=(id:string,tool='select',snapToGrid=false)=>({
   id,title:id,width:1100,height:700,boardX:64,boardY:0,workspaceWidth:1500,workspaceHeight:1000,

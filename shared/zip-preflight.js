@@ -35,51 +35,63 @@ const findEndOfCentralDirectory = (view) => {
 const readDirectoryMetadata = (view, eocdOffset) => {
   const disk = view.getUint16(eocdOffset + 4, true);
   const centralDisk = view.getUint16(eocdOffset + 6, true);
+  const entriesOnDisk = view.getUint16(eocdOffset + 8, true);
   if (disk !== 0 || centralDisk !== 0) {
     throw new Error('Multi-disk ZIP archives are not supported.');
   }
   const entryCount = view.getUint16(eocdOffset + 10, true);
   const centralSize = view.getUint32(eocdOffset + 12, true);
   const centralOffset = view.getUint32(eocdOffset + 16, true);
-  if (
-    entryCount !== 0xffff &&
-    centralSize !== 0xffffffff &&
-    centralOffset !== 0xffffffff
-  ) {
-    return { entryCount, centralSize, centralOffset };
+  const locatorOffset = eocdOffset - 20;
+  const hasLocator = locatorOffset >= 0 && view.getUint32(locatorOffset, true) === ZIP64_LOCATOR_SIGNATURE;
+  const usesZip64 = entriesOnDisk === 0xffff || entryCount === 0xffff ||
+    centralSize === 0xffffffff || centralOffset === 0xffffffff;
+  if (usesZip64) {
+    if (!hasLocator) throw new Error('ZIP64 central directory locator is missing.');
+    const locatorDisk = view.getUint32(locatorOffset + 4, true);
+    const zip64Offset = safeNumber(
+      view.getBigUint64(locatorOffset + 8, true),
+      'ZIP64 directory offset',
+    );
+    const totalDisks = view.getUint32(locatorOffset + 16, true);
+    if (locatorDisk !== 0 || totalDisks !== 1) {
+      throw new Error('Multi-disk ZIP64 archives are not supported.');
+    }
+    if (
+      zip64Offset + 56 > locatorOffset ||
+      view.getUint32(zip64Offset, true) !== ZIP64_EOCD_SIGNATURE
+    ) {
+      throw new Error('ZIP64 central directory is invalid.');
+    }
+    const recordLength = safeNumber(view.getBigUint64(zip64Offset + 4, true), 'ZIP64 record size');
+    if (recordLength < 44 || zip64Offset + 12 + recordLength !== locatorOffset)
+      throw new Error('ZIP64 central directory bounds are invalid.');
+    const zip64Disk = view.getUint32(zip64Offset + 16, true);
+    const zip64CentralDisk = view.getUint32(zip64Offset + 20, true);
+    if (zip64Disk !== 0 || zip64CentralDisk !== 0)
+      throw new Error('Multi-disk ZIP64 archives are not supported.');
+    const zip64EntriesOnDisk = safeNumber(view.getBigUint64(zip64Offset + 24, true), 'ZIP64 entry count');
+    const zip64EntryCount = safeNumber(view.getBigUint64(zip64Offset + 32, true), 'ZIP64 entry count');
+    const zip64CentralSize = safeNumber(view.getBigUint64(zip64Offset + 40, true), 'ZIP64 directory size');
+    const zip64CentralOffset = safeNumber(view.getBigUint64(zip64Offset + 48, true), 'ZIP64 directory offset');
+    if (zip64EntriesOnDisk !== zip64EntryCount)
+      throw new Error('ZIP64 entry counts are inconsistent.');
+    if ((entriesOnDisk !== 0xffff && entriesOnDisk !== zip64EntriesOnDisk) ||
+        (entryCount !== 0xffff && entryCount !== zip64EntryCount) ||
+        (centralSize !== 0xffffffff && centralSize !== zip64CentralSize) ||
+        (centralOffset !== 0xffffffff && centralOffset !== zip64CentralOffset))
+      throw new Error('Classic and ZIP64 directory fields are inconsistent.');
+    return {
+      entryCount: zip64EntryCount,
+      centralSize: zip64CentralSize,
+      centralOffset: zip64CentralOffset,
+      centralDirectoryEnd: zip64Offset,
+    };
   }
 
-  const locatorOffset = eocdOffset - 20;
-  if (
-    locatorOffset < 0 ||
-    view.getUint32(locatorOffset, true) !== ZIP64_LOCATOR_SIGNATURE
-  ) {
-    throw new Error('ZIP64 central directory locator is missing.');
-  }
-  const zip64Offset = safeNumber(
-    view.getBigUint64(locatorOffset + 8, true),
-    'ZIP64 directory offset',
-  );
-  if (
-    zip64Offset + 56 > view.byteLength ||
-    view.getUint32(zip64Offset, true) !== ZIP64_EOCD_SIGNATURE
-  ) {
-    throw new Error('ZIP64 central directory is invalid.');
-  }
-  return {
-    entryCount: safeNumber(
-      view.getBigUint64(zip64Offset + 32, true),
-      'ZIP entry count',
-    ),
-    centralSize: safeNumber(
-      view.getBigUint64(zip64Offset + 40, true),
-      'ZIP central directory size',
-    ),
-    centralOffset: safeNumber(
-      view.getBigUint64(zip64Offset + 48, true),
-      'ZIP central directory offset',
-    ),
-  };
+  if (hasLocator || entriesOnDisk !== entryCount)
+    throw new Error('Classic ZIP directory fields are inconsistent.');
+  return { entryCount, centralSize, centralOffset, centralDirectoryEnd: eocdOffset };
 };
 
 export function assertSafeZipDirectory(input, options = {}) {
@@ -95,7 +107,7 @@ export function assertSafeZipDirectory(input, options = {}) {
   const centralEnd = metadata.centralOffset + metadata.centralSize;
   if (
     metadata.centralOffset < 0 ||
-    centralEnd > eocdOffset ||
+    centralEnd !== metadata.centralDirectoryEnd ||
     centralEnd > bytes.byteLength
   ) {
     throw new Error('ZIP central directory bounds are invalid.');

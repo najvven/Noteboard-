@@ -44,9 +44,8 @@ export function installAdCosmeticHandlers(ipcMain, getSettings, getEngine) {
       state.styles.add(styles);
       stylesByFrame.set(frame, state);
       if (state.styles.size !== existingStyleCount) {
-        const css = [...state.styles].join('\n');
         const styleId = 'noteboard-adblocker-cosmetics';
-        const code = `(() => { let style = document.getElementById(${JSON.stringify(styleId)}); if (!style) { style = document.createElement('style'); style.id = ${JSON.stringify(styleId)}; (document.head || document.documentElement).appendChild(style); } style.textContent = ${JSON.stringify(css)}; })()`;
+        const code = `(() => { let style = document.getElementById(${JSON.stringify(styleId)}); if (!style) { style = document.createElement('style'); style.id = ${JSON.stringify(styleId)}; (document.head || document.documentElement).appendChild(style); } style.appendChild(document.createTextNode(${JSON.stringify(styles)})); })()`;
         await frame.executeJavaScript(code).catch(error => {
           console.warn('Ad cosmetic styles could not be applied.', String(error));
         });

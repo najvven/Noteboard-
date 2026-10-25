@@ -13,6 +13,7 @@ import {
   cloneBoardDocument,
 } from './features/board/clone-board-document';
 import { clonePageAsAdditionalBoard, pagePresentationFromPreset } from './features/board/board-transfer';
+import { stableValue } from './features/board/recovery';
 import { flushBoardOperations, nextBoardRevision } from './lib/board-operations';
 import { BoardConflictError, isDefinitiveBoardWriteError } from './lib/storage-errors';
 import {
@@ -62,6 +63,7 @@ export default function App() {
   const homeActionQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingHomeActionsRef = useRef(0);
   const initialSavePendingRef = useRef(false);
+  const pendingCreateFromPresetRef = useRef<{ fingerprint: string; page: Page } | null>(null);
   const [activePageId, setActivePageId] = useState<string | null>(null);
   const [storageError, updateStorageError] = useState<{ message: string; conflictedPageId?: string } | null>(null);
   const setStorageError = (message: string | null, conflictedPageId?: string) => updateStorageError(message ? { message, conflictedPageId } : null);
@@ -226,8 +228,8 @@ export default function App() {
     }
   };
 
-  const handleImportPage = async (importedPage: Page) => {
-    if (initialSavePendingRef.current) return;
+  const handleImportPage = async (importedPage: Page, { openAfterImport = true }: { openAfterImport?: boolean } = {}) => {
+    if (initialSavePendingRef.current) throw new Error('Another board write is still in progress. Retry the import shortly.');
     initialSavePendingRef.current = true;
     try {
       let migratedPage = pendingImportCandidatesRef.current.get(importedPage);
@@ -242,10 +244,12 @@ export default function App() {
       await savePage(migratedPage, { baseRevision: null });
       pendingImportCandidatesRef.current.delete(importedPage);
       importRequiresFreshIdRef.current.delete(importedPage);
-      updatePages((prev) => [migratedPage, ...prev]);
+      updatePages((prev) => [migratedPage!, ...prev.filter(page => page.id !== migratedPage!.id)]);
       setStorageError(null);
-      setActivePageId(migratedPage.id);
-      setCurrentScreen('editor');
+      if (openAfterImport) {
+        setActivePageId(migratedPage.id);
+        setCurrentScreen('editor');
+      }
     } catch (error) {
       if (error instanceof BoardConflictError) {
         pendingImportCandidatesRef.current.delete(importedPage);
@@ -274,33 +278,79 @@ export default function App() {
   };
 
   const handleStartFromPreset = async (title: string, width: number, height: number, workspaceWidth: number, workspaceHeight: number, snapToGrid: boolean, preset: Preset | null) => {
-    if (initialSavePendingRef.current) return;
+    if (initialSavePendingRef.current) {
+      setStorageError('Another board write is still in progress. Retry creating this board shortly.');
+      return;
+    }
     initialSavePendingRef.current = true;
+    const fingerprint = stableValue({ title: title || '', width, height, workspaceWidth, workspaceHeight, snapToGrid, preset });
     try {
-      const clonedPreset = preset
-        ? cloneBoardDocument(preset.elements, preset.sectionSheets ?? [], generateId)
-        : { elements: [], sheets: [] };
-      const newPage: Page = {
-        version: CURRENT_PAGE_VERSION,
-        id: `page-${generateId()}`,
-        title: title || '',
-        ...pagePresentationFromPreset(preset, {
-          width: width ?? 1024, height: height ?? 1024,
-          workspaceWidth: workspaceWidth ?? 100000, workspaceHeight: workspaceHeight ?? 100000,
-          snapToGrid,
-        }),
-        updatedAt: Date.now(),
-        isPinned: false,
-        elements: clonedPreset.elements,
-        sectionSheets: clonedPreset.sheets,
-      };
+      let pending = pendingCreateFromPresetRef.current;
+      if (pending && pending.fingerprint !== fingerprint) {
+        try {
+          const stored = await loadPages();
+          const alreadyStored = stored.find(page => page.id === pending!.page.id);
+          if (alreadyStored) {
+            const savedPage = JSON.parse(JSON.stringify(migratePage(alreadyStored))) as Page;
+            const attemptedPage = JSON.parse(JSON.stringify(migratePage(pending.page))) as Page;
+            delete savedPage.updatedAt;
+            delete attemptedPage.updatedAt;
+            if (stableValue(savedPage) !== stableValue(attemptedPage)) {
+              updatePages(stored);
+              pendingCreateFromPresetRef.current = null;
+              setStorageError('The previous board request conflicted with another saved board. Its current version was refreshed; retry your new board request.');
+              return;
+            }
+            updatePages(previous => [alreadyStored, ...previous.filter(page => page.id !== alreadyStored.id)]);
+          } else {
+            await savePage(pending.page, { baseRevision: null });
+            updatePages(previous => [pending!.page, ...previous.filter(page => page.id !== pending!.page.id)]);
+          }
+          pendingCreateFromPresetRef.current = null;
+        } catch (error) {
+          if (error instanceof BoardConflictError) {
+            pendingCreateFromPresetRef.current = null;
+            await refreshPagesFromStorage().catch(() => undefined);
+            setStorageError('The previous board request conflicted with another saved board. Its current version was refreshed; retry your new board request.');
+          } else {
+            setStorageError('The previous board request is still unconfirmed. Retry it before starting a different board.');
+          }
+          return;
+        }
+        pending = null;
+      }
+      const newPage: Page = pending?.fingerprint === fingerprint ? pending.page : (() => {
+        const clonedPreset = preset
+          ? cloneBoardDocument(preset.elements, preset.sectionSheets ?? [], generateId)
+          : { elements: [], sheets: [] };
+        return {
+          version: CURRENT_PAGE_VERSION,
+          id: `page-${generateId()}`,
+          title: title || '',
+          ...pagePresentationFromPreset(preset, {
+            width: width ?? 1024, height: height ?? 1024,
+            workspaceWidth: workspaceWidth ?? 100000, workspaceHeight: workspaceHeight ?? 100000,
+            snapToGrid,
+          }),
+          updatedAt: Date.now(),
+          isPinned: false,
+          elements: clonedPreset.elements,
+          sectionSheets: clonedPreset.sheets,
+        };
+      })();
+      pendingCreateFromPresetRef.current = { fingerprint, page: newPage };
       await savePage(newPage, { baseRevision: null });
-      updatePages((prev) => [newPage, ...prev]);
+      pendingCreateFromPresetRef.current = null;
+      updatePages((prev) => [newPage, ...prev.filter(page => page.id !== newPage.id)]);
       setStorageError(null);
       setActivePageId(newPage.id);
       setCurrentScreen('editor');
     } catch (error) {
       console.error('Could not create the board', error);
+      if (error instanceof BoardConflictError) {
+        pendingCreateFromPresetRef.current = null;
+        await refreshPagesFromStorage().catch(() => undefined);
+      }
       setStorageError('Could not create the board. Your settings remain open; please retry.');
     } finally { initialSavePendingRef.current = false; }
   };

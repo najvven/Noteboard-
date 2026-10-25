@@ -1,4 +1,4 @@
-import {test,expect} from '@playwright/test';
+import {test,expect} from './test';
 
 test('polygon and freehand selection work across objects, support group movement, clipboard and undo',async({page,request,context})=>{
   await context.grantPermissions(['clipboard-read','clipboard-write']);

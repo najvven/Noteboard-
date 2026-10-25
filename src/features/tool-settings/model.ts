@@ -99,12 +99,12 @@ export const isContainerMenuPinned = (
   containerId: string,
   childMenuIds: readonly string[] = [],
 ): boolean => {
-  if (resolveToolMenuSettings(global, overrides?.[containerId]).alwaysOnTop) {
+  if (resolveToolMenuSettingsForId(global, overrides, containerId).alwaysOnTop) {
     return true;
   }
 
   return childMenuIds.some((childId) =>
-    resolveToolMenuSettings(global, overrides?.[childId]).alwaysOnTop,
+    resolveToolMenuSettingsForId(global, overrides, childId).alwaysOnTop,
   );
 };
 

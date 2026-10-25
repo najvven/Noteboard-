@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import { assertValidBoard, MAX_BOARD_FILE_BYTES, MAX_MEDIA_FILE_BYTES } from './board-data.js';
 
@@ -13,13 +14,15 @@ const readBoundedFile = async (handle) => {
   // stat cannot cause an unbounded readFile allocation.
   for await (const chunk of handle.createReadStream({start: 0, end: MAX_MEDIA_FILE_BYTES})) {
     total += chunk.length;
-    if (total > MAX_MEDIA_FILE_BYTES) throw new Error('Clipboard media file is too large.');
+    if (total > MAX_MEDIA_FILE_BYTES) throw Object.assign(new Error('Clipboard media file is too large.'), { code: 'FILE_TOO_LARGE' });
     chunks.push(chunk);
   }
   return Buffer.concat(chunks, total);
 };
 
-export async function readNativeClipboard(clipboard) {
+const clipboardFileError = (name, code, message) => ({ name: path.basename(name) || 'Clipboard item', code, message });
+
+export async function readNativeClipboard(clipboard, { fileSystem = fs } = {}) {
   // Read synchronously before any file I/O: this represents the current OS
   // clipboard even if a later copy happens while an Explorer file is loading.
   const text=clipboard.readText(),html=clipboard.readHTML(),image=clipboard.readImage();
@@ -33,30 +36,53 @@ export async function readNativeClipboard(clipboard) {
     for(const uri of uris)try{fileNames.push(fileURLToPath(uri));}catch{/* Unsupported clipboard URI. */}
   }
   const files=[];
+  const fileErrors=[];
   let totalMediaBytes = 0;
+  if (fileNames.length > 32) fileErrors.push(clipboardFileError('Clipboard', 'FILE_COUNT_LIMIT', 'Only the first 32 clipboard files can be checked; remaining items were skipped.'));
   for (const name of fileNames.slice(0,32)) {
     const type=mediaTypes[path.extname(name).toLowerCase()];
-    if (!type) continue;
+    if (!type) {
+      fileErrors.push(clipboardFileError(name, 'UNSUPPORTED_FILE_TYPE', 'This clipboard file type cannot be pasted as board media.'));
+      continue;
+    }
     try {
-      const handle=await fs.open(name,'r');
+      // Reject special files before opening them. O_NONBLOCK additionally
+      // prevents a path swapped to a FIFO after stat from hanging the app.
+      const preliminary = await fileSystem.stat(name);
+      if (!preliminary.isFile()) throw Object.assign(new Error('Clipboard item is not a regular file.'), { code: 'NOT_A_REGULAR_FILE' });
+      if (preliminary.size > MAX_MEDIA_FILE_BYTES) throw Object.assign(new Error('Clipboard media file is too large.'), { code: 'FILE_TOO_LARGE' });
+      if (totalMediaBytes + preliminary.size > MAX_CLIPBOARD_MEDIA_BYTES)
+        throw Object.assign(new Error('Clipboard media exceeds the total size limit.'), { code: 'TOTAL_SIZE_LIMIT' });
+      const handle=await fileSystem.open(name, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
       let bytes;
       try {
-      const stat=await handle.stat();
-      if (!stat.isFile() || stat.size>MAX_MEDIA_FILE_BYTES) throw new Error('Clipboard media file is too large.');
-        if (totalMediaBytes + stat.size > MAX_CLIPBOARD_MEDIA_BYTES) throw new Error('Clipboard media exceeds the total size limit.');
+        const stat=await handle.stat();
+        if (!stat.isFile()) throw Object.assign(new Error('Clipboard item is not a regular file.'), { code: 'NOT_A_REGULAR_FILE' });
+        if (stat.size>MAX_MEDIA_FILE_BYTES) throw Object.assign(new Error('Clipboard media file is too large.'), { code: 'FILE_TOO_LARGE' });
+        if (totalMediaBytes + stat.size > MAX_CLIPBOARD_MEDIA_BYTES)
+          throw Object.assign(new Error('Clipboard media exceeds the total size limit.'), { code: 'TOTAL_SIZE_LIMIT' });
         bytes=await readBoundedFile(handle);
-        if (totalMediaBytes + bytes.length > MAX_CLIPBOARD_MEDIA_BYTES) throw new Error('Clipboard media exceeds the total size limit.');
+        if (totalMediaBytes + bytes.length > MAX_CLIPBOARD_MEDIA_BYTES)
+          throw Object.assign(new Error('Clipboard media exceeds the total size limit.'), { code: 'TOTAL_SIZE_LIMIT' });
       } finally {
         await handle.close();
       }
       files.push({name:path.basename(name),type,base64:bytes.toString('base64')});
       totalMediaBytes += bytes.length;
-    } catch {
-      // One stale, inaccessible, oversized, or otherwise unreadable file must
-      // not discard clipboard text, HTML, images, or files that can be read.
+    } catch (error) {
+      const code = error?.code === 'ENOENT' ? 'FILE_MISSING' :
+        error?.code === 'FILE_TOO_LARGE' ? 'FILE_TOO_LARGE' :
+        error?.code === 'TOTAL_SIZE_LIMIT' ? 'TOTAL_SIZE_LIMIT' :
+        error?.code === 'NOT_A_REGULAR_FILE' ? 'NOT_A_REGULAR_FILE' : 'FILE_READ_FAILED';
+      const message = error?.code === 'ENOENT' ? 'The clipboard file is no longer available.' :
+        error?.code === 'FILE_TOO_LARGE' ? 'The clipboard file exceeds the per-file size limit.' :
+        error?.code === 'TOTAL_SIZE_LIMIT' ? 'The clipboard files exceed the total size limit.' :
+        error?.code === 'NOT_A_REGULAR_FILE' ? 'The clipboard item is not a regular file.' :
+        'The clipboard file could not be read.';
+      fileErrors.push(clipboardFileError(name, code, message));
     }
   }
-  return {text,html,image:image.isEmpty()?'':image.toDataURL(),files};
+  return {text,html,image:image.isEmpty()?'':image.toDataURL(),files,fileErrors};
 }
 
 export function writeNativeBoardClipboard(clipboard,json) {

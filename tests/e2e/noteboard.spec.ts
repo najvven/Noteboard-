@@ -4,7 +4,7 @@ import {
   test,
   type APIRequestContext,
   type Page as BrowserPage,
-} from "@playwright/test";
+} from "./test";
 
 const OTHER_BOARD_TITLE = "Unrelated Planning Board";
 

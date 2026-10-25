@@ -46,7 +46,7 @@ test('subframe styles are deduplicated and untrusted or disabled frames are reje
   await inject(f.event(f.subframe), '', { ids: ['new'] });
   const styles = f.calls.filter(call => call.script.includes('noteboard-adblocker-cosmetics'));
   assert.equal(styles.length, 2);
-  assert.equal((styles[1].script.match(/\.ad-slot \{ display:none \}/g) || []).length, 1);
+  assert.equal((styles[1].script.match(/\.ad-slot \{ display:none \}/g) || []).length, 0);
   assert.equal((styles[1].script.match(/\.dynamic-ad \{ display:none \}/g) || []).length, 1);
   await inject(f.event(f.foreign), 'https://ads.test/inside', undefined);
   await inject({ ...f.event(f.subframe), sender: { ...f.sender, getType: () => 'browser-window' } }, '', undefined);

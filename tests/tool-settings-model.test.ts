@@ -181,6 +181,12 @@ test("a pinned child keeps its container open", () => {
   );
 });
 
+test("independent workflow children use their own pin defaults inside More", () => {
+  assert.equal(isContainerMenuPinned(globalSettings, {}, "more", ["link"]), true);
+  assert.equal(isContainerMenuPinned(globalSettings, {}, "more", ["object-presets"]), true);
+  assert.equal(isContainerMenuPinned(globalSettings, { link: { alwaysOnTop: false } }, "more", ["link"]), false);
+});
+
 test("containers and dynamic children inherit a globally enabled pin", () => {
   const global = { ...globalSettings, alwaysOnTop: true };
 

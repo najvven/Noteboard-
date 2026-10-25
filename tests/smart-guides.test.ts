@@ -23,3 +23,8 @@ test('distance guides include diagonal neighbors, real board pixels at any zoom 
   assert.equal(result.guides.filter(guide=>guide.label==='100 px'&&guide.equalSpacing).length,2);
   assert.equal(smartGuides(moving,moving.position,[{...other,type:'board'}],1,false).guides.filter(guide=>guide.label).length,0);
 });
+
+test('sub-tenth-pixel gaps never produce a misleading zero-pixel distance label',()=>{
+  const result=smartGuides(box('move',0,0),{x:0,y:0},[box('other',100.01,0)],1,false);
+  assert.ok(result.guides.every(guide=>guide.label!=='0 px'));
+});

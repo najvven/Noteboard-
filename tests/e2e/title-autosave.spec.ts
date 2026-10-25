@@ -1,5 +1,5 @@
 import { deleteFixtureBoard, putFixtureBoard } from './fixture-storage';
-import { expect, test } from '@playwright/test';
+import { expect, test } from './test';
 
 const BOARD_ID = 'title-autosave';
 const ORIGINAL_TITLE = 'Autosave target';

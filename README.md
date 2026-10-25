@@ -1,6 +1,6 @@
 # Noteboard+
 
-Current version: **1.0.8**. See [release notes and known validation limits](docs/RELEASE-1.0.8.md).
+Current version: **1.0**. See [release notes and known validation limits](docs/RELEASE-1.0.md).
 
 Desktop whiteboard and spatial note-taking application built with Electron, React, Vite, and TypeScript.
 

@@ -56,7 +56,19 @@ test('an uncertain template-add retry is idempotent and rejects a conflicting re
   await updateStoredPreset(target, { type: 'add', preset: candidate });
   await updateStoredPreset(target, { type: 'add', preset: candidate });
   assert.equal((await loadStoredPresets(target)).filter(item => item.id === candidate.id).length, 1);
-  await assert.rejects(updateStoredPreset(target, { type: 'add', preset: { ...candidate, name: 'Different template' } }), /different template/i);
+  const foreignElement = { id: 'foreign-payload', type: 'rectangle', position: { x: 0, y: 0 }, size: { width: 20, height: 20 }, content: '', zIndex: 1 };
+  await assert.rejects(updateStoredPreset(target, { type: 'add', preset: { ...candidate, elements: [foreignElement] } }), /different template/i);
+});
+
+test('an uncertain template-add retry preserves a concurrent rename and allows later queue operations', async t => {
+  const target = await directory(t), candidate = preset('stable-id');
+  await updateStoredPreset(target, { type: 'add', preset: candidate });
+  await updateStoredPreset(target, { type: 'rename', id: candidate.id, name: 'Renamed in another window' });
+
+  const replayed = await updateStoredPreset(target, { type: 'add', preset: candidate });
+  assert.equal(replayed.find(item => item.id === candidate.id)?.name, 'Renamed in another window');
+  await updateStoredPreset(target, { type: 'add', preset: preset('later-add') });
+  assert.deepEqual((await loadStoredPresets(target)).map(item => item.id), ['stable-id', 'later-add']);
 });
 
 test('a rename for a template deleted in another process is resolved without blocking later operations', async t => {
@@ -66,4 +78,17 @@ test('a rename for a template deleted in another process is resolved without blo
   assert.deepEqual(await updateStoredPreset(target, { type: 'rename', id: removed.id, name: 'Stale rename' }), []);
   await updateStoredPreset(target, { type: 'add', preset: preset('later-add') });
   assert.deepEqual((await loadStoredPresets(target)).map(item => item.id), ['later-add']);
+});
+
+test('templates validate element identity before writing and keep invalid legacy records recoverable', async t => {
+  const target = await directory(t);
+  const element = { id: 'cell', type: 'section', position: { x: 0, y: 0 }, size: { width: 20, height: 20 }, content: 'legacy value', zIndex: 1 };
+  const invalid = { ...preset('duplicate-cell'), elements: [element, { ...element }] };
+  await assert.rejects(updateStoredPreset(target, { type: 'add', preset: invalid }), /unique/);
+  assert.deepEqual(await loadStoredPresets(target), []);
+
+  await fs.writeFile(path.join(target, 'presets.json'), JSON.stringify([invalid]));
+  assert.equal((await loadStoredPresets(target))[0].id, 'duplicate-cell');
+  await assert.rejects(updateStoredPreset(target, { type: 'add', preset: preset('new-valid') }), /unique/);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(target, 'presets.json'), 'utf8')), [invalid]);
 });

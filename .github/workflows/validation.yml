@@ -11,7 +11,7 @@ permissions:
 jobs:
   source-and-browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -25,7 +25,7 @@ jobs:
       - run: npm run test:browser
       - run: npm run build
       - name: Report and persistence interaction regressions
-        run: npx playwright test tests/e2e/report-regressions.spec.ts tests/e2e/storage-coherence.spec.ts tests/e2e/interaction-polish.spec.ts tests/e2e/interaction-regressions.spec.ts tests/e2e/task021-flips.spec.ts
+        run: npx playwright test
 
   native-windows:
     runs-on: windows-latest

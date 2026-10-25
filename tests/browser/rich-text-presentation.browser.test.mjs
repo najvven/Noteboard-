@@ -25,18 +25,63 @@ test('many hidden paragraphs avoid line-list and marker work while retaining mix
         let lists=0,markers=0;
         const originalRects=Range.prototype.getClientRects,originalInsert=Node.prototype.insertBefore;
         Range.prototype.getClientRects=function(){lists++;return originalRects.call(this);};
-        Node.prototype.insertBefore=function(node,reference){if(node instanceof HTMLElement&&node.hasAttribute('data-noteboard-text-layout-marker'))markers++;return originalInsert.call(this,node,reference);};
-        try {RichTextPresentation.syncTextLineViewport(editor,50);}
+        Node.prototype.insertBefore=function(node,reference){if(node instanceof HTMLElement&&node.hasAttribute('data-text-layout-marker'))markers++;return originalInsert.call(this,node,reference);};
+        let measuredMarkers=0,positiveControl=0;
+        try {
+          RichTextPresentation.syncTextLineViewport(editor,50);
+          measuredMarkers=markers;
+          const probe=document.createElement('span');probe.setAttribute('data-text-layout-marker','true');
+          editor.insertBefore(probe,editor.firstChild);positiveControl=markers-measuredMarkers;probe.remove();
+        }
         finally {Range.prototype.getClientRects=originalRects;Node.prototype.insertBefore=originalInsert;}
         const canonical=RichTextSanitizer.sanitizeRichText(editor.innerHTML);
-        return {lists,markers,canonical,height:editor.getBoundingClientRect().height};
+        return {lists,markers:measuredMarkers,positiveControl,canonical,height:editor.getBoundingClientRect().height};
       });
       assert.ok(result.lists<30,JSON.stringify({...result,canonical:undefined}));
       assert.ok(result.markers<120,JSON.stringify({...result,canonical:undefined}));
+      assert.equal(result.positiveControl,1,'the marker counter detects a real layout marker insertion');
       assert.ok(result.canonical.includes('Paragraph 999'));
       assert.equal((result.canonical.match(/Paragraph /g)||[]).length,1000);
       assert.ok(result.height<=50.1);
     }
+  } finally {await browser.close();}
+});
+
+test('selection bookmarks preserve adjacent paragraph boundaries, empty lines and backward ranges', async () => {
+  const helperCode=await bundleModule(helperPath,'RichTextPresentation');
+  const browser=await chromium.launch({headless:true,channel:'chrome'});
+  try {
+    const page=await browser.newPage();
+    await page.setContent('<div id="editor" contenteditable="true"><p>A</p><p>B<span>C</span></p><p><br></p></div>');
+    await page.addScriptTag({content:helperCode});
+    const result=await page.evaluate(()=>{
+      const editor=document.querySelector('#editor');
+      const second=editor.children[1], b=second.firstChild, c=second.lastChild.firstChild;
+      const selection=getSelection();
+      selection.setBaseAndExtent(b,0,b,0);
+      const atStartOfNextParagraph=RichTextPresentation.getTextSelectionOffsets(editor);
+      editor.innerHTML='<p>A</p><p><span style="color:red">B</span><span>C</span></p><p><br></p>';
+      RichTextPresentation.restoreTextSelection(editor,atStartOfNextParagraph);
+      const startNode=selection.anchorNode, startOffset=selection.anchorOffset;
+      const emptyLine=editor.children[2];
+      selection.setBaseAndExtent(emptyLine,0,emptyLine,0);
+      const emptyBookmark=RichTextPresentation.getTextSelectionOffsets(editor);
+      editor.children[1].innerHTML='<span><b>B</b></span><span><i>C</i></span>';
+      RichTextPresentation.restoreTextSelection(editor,emptyBookmark);
+      const emptyLinePreserved=selection.anchorNode===emptyLine&&selection.anchorOffset===0;
+      const newB=editor.children[1].querySelector('b').firstChild;
+      const newC=editor.children[1].querySelector('i').firstChild;
+      selection.setBaseAndExtent(newC,1,newB,0);
+      const backward=RichTextPresentation.getTextSelectionOffsets(editor);
+      editor.children[1].innerHTML='<span>B</span><span><strong>C</strong></span>';
+      RichTextPresentation.restoreTextSelection(editor,backward);
+      return {
+        startOfNextParagraphPreserved:startNode?.textContent?.startsWith('B')&&startOffset===0,
+        emptyLinePreserved,
+        backwardPreserved:selection.anchorNode?.textContent==='C'&&selection.anchorOffset===1&&selection.focusNode?.textContent==='B'&&selection.focusOffset===0,
+      };
+    });
+    assert.deepEqual(result,{startOfNextParagraphPreserved:true,emptyLinePreserved:true,backwardPreserved:true});
   } finally {await browser.close();}
 });
 

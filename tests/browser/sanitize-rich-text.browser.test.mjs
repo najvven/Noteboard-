@@ -46,6 +46,11 @@ test("rich-text sanitizer preserves safe inline layout and drops active or layou
       const authoredZeroWidthSpace = RichTextSanitizer.sanitizeRichText('<span>\u200bAuthor text</span>');
       const safeNode = document.createElement("div");
       safeNode.innerHTML = safe;
+      const internalLinks = RichTextSanitizer.sanitizeRichText(
+        '<a href="#TARGET-Item_A">internal</a><a href="https://example.com">external</a>',
+      );
+      const linkNode = document.createElement("div");
+      linkNode.innerHTML = internalLinks;
       const unsafeNode = document.createElement("div");
       unsafeNode.innerHTML = unsafe;
       return {
@@ -60,6 +65,9 @@ test("rich-text sanitizer preserves safe inline layout and drops active or layou
         caretPresentation,
         emptyCaretPresentation,
         authoredZeroWidthSpace,
+        internalHref: linkNode.querySelectorAll("a")[0]?.getAttribute("href"),
+        internalTarget: linkNode.querySelectorAll("a")[0]?.getAttribute("target"),
+        externalTarget: linkNode.querySelectorAll("a")[1]?.getAttribute("target"),
       };
     });
 
@@ -86,6 +94,9 @@ test("rich-text sanitizer preserves safe inline layout and drops active or layou
     assert.equal(result.caretPresentation, "漢");
     assert.equal(result.emptyCaretPresentation, "");
     assert.equal(result.authoredZeroWidthSpace, "<span>\u200bAuthor text</span>");
+    assert.equal(result.internalHref, "#target-Item_A");
+    assert.equal(result.internalTarget, null);
+    assert.equal(result.externalTarget, "_blank");
   } finally {
     await browser.close();
   }

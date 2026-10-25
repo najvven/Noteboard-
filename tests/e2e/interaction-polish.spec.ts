@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Page, type APIRequestContext } from './test';
 import sharp from 'sharp';
 
 const textElement = { id: 'text', type: 'text', position: { x: 100, y: 90 }, size: { width: 300, height: 110 }, content: 'Alpha <b>bravo</b> Charlie', textColor: '#000000', color: 'transparent', zIndex: 2 };

@@ -118,7 +118,7 @@ export function smartGuides(
   const offer = (side: string, distance: number, perpendicular: number, guide: SmartGuide) => {
     const score = Math.hypot(distance, perpendicular);
     if (
-      distance > 0 &&
+      Math.round(distance * 10) / 10 > 0 &&
       score < (nearest.get(side)?.score ?? Infinity)
     )
       nearest.set(side, {

@@ -18,22 +18,64 @@ export const FILTER_LISTS = [
 ];
 const RESOURCES_URL = 'https://raw.githubusercontent.com/ghostery/adblocker/master/packages/adblocker/assets/ublock-origin/resources.json';
 const UPDATE_INTERVAL = 24 * 60 * 60 * 1000;
-const MAX_RESOURCE_BYTES = 16 * 1024 * 1024;
+export const MAX_FILTER_RESPONSE_BYTES = 16 * 1024 * 1024;
+export const MAX_FILTER_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const FILTER_DOWNLOAD_BATCH_SIZE = 2;
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
-async function download(url, fetchImpl) {
+async function download(url, fetchImpl, budget) {
   const response = await fetchImpl(url, { signal: AbortSignal.timeout(15000) });
   if (!response.ok) throw new Error(`Filter download failed (${response.status}).`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (!bytes.length || bytes.length > MAX_RESOURCE_BYTES) throw new Error('Invalid filter download size.');
+  const declaredLength = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_FILTER_RESPONSE_BYTES)
+    throw new Error('Invalid filter download size.');
+  const reader = response.body?.getReader?.();
+  if (!reader) throw new Error('Filter downloads require a streaming response body.');
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_FILTER_RESPONSE_BYTES ||
+          budget.total + value.byteLength > budget.limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error('Invalid filter download size.');
+      }
+      budget.total += value.byteLength;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  if (!total) throw new Error('Invalid filter download size.');
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
   return { url, text: new TextDecoder().decode(bytes), sha256: hash(bytes), bytes: bytes.length };
 }
 
-export async function downloadFilterSnapshot(fetchImpl = fetch) {
-  const [lists, resources] = await Promise.all([
-    Promise.all(FILTER_LISTS.map(url => download(url, fetchImpl))),
-    download(RESOURCES_URL, fetchImpl),
-  ]);
+export async function downloadFilterSnapshot(fetchImpl = fetch, { maxTotalBytes = MAX_FILTER_SNAPSHOT_BYTES } = {}) {
+  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes < 1)
+    throw new Error('Invalid filter download budget.');
+  const urls = [...FILTER_LISTS, RESOURCES_URL];
+  const budget = { total: 0, limit: maxTotalBytes };
+  const sources = [];
+  for (let offset = 0; offset < urls.length; offset += FILTER_DOWNLOAD_BATCH_SIZE) {
+    const results = await Promise.allSettled(
+      urls.slice(offset, offset + FILTER_DOWNLOAD_BATCH_SIZE)
+        .map(url => download(url, fetchImpl, budget)),
+    );
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+    sources.push(...results.map(result => result.value));
+  }
+  const lists = sources.slice(0, FILTER_LISTS.length);
+  const resources = sources.at(-1);
   for (const list of lists) {
     if (!/^[!\[]/.test(list.text.trim()) || /^\s*</.test(list.text)) throw new Error('Unexpected filter list format.');
   }

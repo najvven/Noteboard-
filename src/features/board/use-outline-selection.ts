@@ -67,8 +67,10 @@ export function useOutlineSelection({
     onInteraction(false);
   };
   useEffect(() => {
-    if (ownsArea.current && tool !== "select" && tool !== "pan") onArea?.(null);
-    ownsArea.current = false;
+    if (ownsArea.current && tool !== "select" && tool !== "pan") {
+      onArea?.(null);
+      ownsArea.current = false;
+    }
     cancel();
     return () => clearPending();
   }, [tool, mode, lockDelay]);

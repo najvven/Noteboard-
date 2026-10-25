@@ -1,4 +1,4 @@
-import { test,expect } from '@playwright/test';
+import { test,expect } from './test';
 import {createSimpleWorkbook} from '../../src/features/spreadsheet/simple-workbook';
 import {deleteFixtureBoard} from './fixture-storage';
 import ExcelJS from 'exceljs';

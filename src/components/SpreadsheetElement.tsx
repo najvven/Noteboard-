@@ -164,6 +164,8 @@ export default function SpreadsheetElement({
       if (data.type === "loaded") {
         clearTimeout(loadTimeout.current);
         setLoading(false);
+        setFatal(false);
+        setError("");
         const generation=data.documentId;
         spreadsheetBridge(frame.current)?.observeReloadDraft(draft => {
           if (!sessionAlive.current || generation !== documentGeneration.current || !parseWorkbookDocument(draft.content)) return;
@@ -180,6 +182,8 @@ export default function SpreadsheetElement({
         setLoading(false);
         setFatal(true);
         setError(data.message);
+      } else if (data.type === "formula-timeout") {
+        setNotice(typeof data.message === "string" ? data.message : "A formula took too long; the spreadsheet was restarted.");
       } else if (data.type === "changed") emit(data.content);
       else if (data.type === "selection") setSelection(data.selection);
     };

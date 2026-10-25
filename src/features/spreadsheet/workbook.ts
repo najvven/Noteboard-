@@ -1,8 +1,11 @@
 import type { IWorkbookData, ICellData } from "@univerjs/core";
 import type { BoardElement, SectionSheet } from "../../types";
 import {gridObjectSize} from './grid-geometry';
+import { MAX_BOARD_FILE_BYTES } from "../../../shared/board-data.js";
 
 export const MAX_WORKBOOK_CHARACTERS = 32 * 1024 * 1024;
+export const MAX_MERGED_CELL_AREA = 200_000;
+const MAX_LEGACY_CONVERSION_BYTES = MAX_BOARD_FILE_BYTES - 16 * 1024 * 1024;
 
 export interface WorkbookDocument {
   format: "noteboard/workbook";
@@ -74,6 +77,27 @@ export function workbookCellSize(document: WorkbookDocument | null) {
     sheet?.rowData?.[0]?.h ?? sheet?.defaultRowHeight ?? 24);
 }
 
+/** True only when every explicit and default cell dimension is already uniform. */
+export function workbookCellDimensionsMatch(
+  sheet: {
+    defaultColumnWidth?: number;
+    defaultRowHeight?: number;
+    columnData?: { [index: number]: { w?: number } | undefined };
+    rowData?: { [index: number]: { h?: number; ah?: number; ia?: number } | undefined };
+  } | undefined,
+  size: { width: number; height: number },
+) {
+  if (!sheet ||
+      (sheet.defaultColumnWidth ?? 100) !== size.width ||
+      (sheet.defaultRowHeight ?? 24) !== size.height) return false;
+  if (Object.values(sheet.columnData ?? {}).some(column =>
+    column?.w !== undefined && column.w !== size.width)) return false;
+  return !Object.values(sheet.rowData ?? {}).some(row =>
+    (row?.h !== undefined && row.h !== size.height) ||
+    row?.ah !== undefined ||
+    row?.ia === 1);
+}
+
 /** Change one workbook's active sheet, preserving values, styles and hidden rows. */
 export function withWorkbookCellSize(content: string, width: number, height: number) {
   const document = content ? parseWorkbookDocument(content) : createWorkbookDocument();
@@ -112,44 +136,112 @@ export function renameFormulaSheetReferences(
   formula: string,
   replacements: ReadonlyMap<string, string>,
 ) {
-  const quotedOrUnquotedSheet =
-    String.raw`(?:'((?:[^']|'')+)'|([^+\-*/^&=<>(),;!:\s'"]+))`;
-  const reference = new RegExp(
-    String.raw`(?<![A-Za-z0-9_.])${quotedOrUnquotedSheet}(?:\s*:\s*${quotedOrUnquotedSheet})?!`,
-    "g",
-  );
-  const escapeSheetName = (name: string) => `'${name.replace(/'/g, "''")}'`;
-  const renameReferences = (part: string) =>
-    part.replace(
-      reference,
-      (match, firstQuoted, firstBare, lastQuoted, lastBare) => {
-        let first = (firstQuoted ?? firstBare).replace(/''/g, "'");
-        let last = lastQuoted ?? lastBare;
-        // Excel also quotes a complete 3D range as 'First:Last'!A1.
-        if (last === undefined && firstQuoted && first.includes(":")) {
-          const separator = first.indexOf(":");
-          last = first.slice(separator + 1);
-          first = first.slice(0, separator);
-        } else if (last !== undefined) {
-          last = last.replace(/''/g, "'");
-        }
-        const renamedFirst = replacements.get(first.toLowerCase()) ?? first;
-        const renamedLast =
-          last === undefined
-            ? undefined
-            : replacements.get(last.toLowerCase()) ?? last;
-        if (renamedFirst === first && renamedLast === last) return match;
-        const range = renamedLast === undefined
-          ? escapeSheetName(renamedFirst)
-          : escapeSheetName(`${renamedFirst}:${renamedLast}`);
-        return `${range}!`;
-      },
-    );
+  const escapeSheetName = (name: string) => "'" + name.replace(/'/g, "''") + "'";
+  const isBareSheetCharacter = (character: string) =>
+    character !== "" &&
+    !/[+\-*/^&=<>(),;!:\s'"]/.test(character);
+  const readSheetToken = (start: number) => {
+    if (formula[start] !== "'") {
+      let end = start;
+      while (end < formula.length && isBareSheetCharacter(formula[end])) end += 1;
+      return end === start ? null : { name: formula.slice(start, end), end };
+    }
+    let name = "";
+    let cursor = start + 1;
+    while (cursor < formula.length) {
+      if (formula[cursor] !== "'") {
+        name += formula[cursor++];
+        continue;
+      }
+      if (formula[cursor + 1] === "'") {
+        name += "'";
+        cursor += 2;
+        continue;
+      }
+      return { name, end: cursor + 1 };
+    }
+    return { name: "", end: formula.length, malformed: true as const };
+  };
+  const skipWhitespace = (index: number) => {
+    while (/\s/.test(formula[index] ?? "")) index += 1;
+    return index;
+  };
+  const skipStringLiteral = (start: number) => {
+    let cursor = start + 1;
+    while (cursor < formula.length) {
+      if (formula[cursor] !== '"') cursor += 1;
+      else if (formula[cursor + 1] === '"') cursor += 2;
+      else return cursor + 1;
+    }
+    return formula.length;
+  };
 
-  return formula
-    .split(/("(?:[^"]|"")*")/g)
-    .map((part, index) => (index % 2 ? part : renameReferences(part)))
-    .join("");
+  const output: string[] = [];
+  let index = 0;
+  while (index < formula.length) {
+    if (formula[index] === '"') {
+      const end = skipStringLiteral(index);
+      output.push(formula.slice(index, end));
+      index = end;
+      continue;
+    }
+    const boundary = index === 0 || !/[A-Za-z0-9_.]/.test(formula[index - 1]);
+    if (boundary && (formula[index] === "'" || isBareSheetCharacter(formula[index]))) {
+      const firstToken = readSheetToken(index);
+      if (firstToken?.malformed) {
+        output.push(formula.slice(index));
+        break;
+      }
+      if (firstToken) {
+        let cursor = skipWhitespace(firstToken.end);
+        let lastToken: typeof firstToken | undefined;
+        if (formula[cursor] === ":") {
+          cursor = skipWhitespace(cursor + 1);
+          const candidate = readSheetToken(cursor);
+          if (candidate?.malformed) {
+            output.push(formula.slice(index));
+            break;
+          }
+          if (candidate) {
+            lastToken = candidate;
+            cursor = skipWhitespace(candidate.end);
+          }
+        } else if (formula[index] === "'" && firstToken.name.includes(":")) {
+          // Excel also quotes a complete 3D range as 'First:Last'!A1.
+          const separator = firstToken.name.indexOf(":");
+          lastToken = {
+            name: firstToken.name.slice(separator + 1),
+            end: firstToken.end,
+          };
+          firstToken.name = firstToken.name.slice(0, separator);
+        }
+
+        if (formula[cursor] === "!") {
+          const renamedFirst = replacements.get(firstToken.name.toLowerCase()) ?? firstToken.name;
+          const renamedLast = lastToken
+            ? replacements.get(lastToken.name.toLowerCase()) ?? lastToken.name
+            : undefined;
+          if (renamedFirst === firstToken.name && renamedLast === lastToken?.name) {
+            output.push(formula.slice(index, cursor + 1));
+          } else {
+            const range = renamedLast === undefined
+              ? renamedFirst
+              : renamedFirst + ":" + renamedLast;
+            output.push(escapeSheetName(range) + "!");
+          }
+          index = cursor + 1;
+          continue;
+        }
+        // Consume a failed candidate once instead of retrying each apostrophe.
+        output.push(formula.slice(index, firstToken.end));
+        index = firstToken.end;
+        continue;
+      }
+    }
+    output.push(formula[index]);
+    index += 1;
+  }
+  return output.join("");
 }
 
 /** Assign collision-free imported names using the editor's existing suffix. */
@@ -225,6 +317,20 @@ function isCellDataMatrix(value: unknown, rowCount: number, columnCount: number)
   });
 }
 
+function hasBoundedMergeArea(ranges: readonly unknown[]) {
+  let total = 0;
+  for (const range of ranges) {
+    if (!isRecord(range)) return false;
+    const height = range.endRow - range.startRow + 1;
+    const width = range.endColumn - range.startColumn + 1;
+    const area = height * width;
+    if (!Number.isSafeInteger(area) || area < 1 || area > MAX_MERGED_CELL_AREA - total)
+      return false;
+    total += area;
+  }
+  return true;
+}
+
 function hasValidDimensionOverrides(value: unknown, dimension: "h" | "w", limit: number) {
   return (
     value === undefined ||
@@ -291,6 +397,7 @@ export function parseWorkbookDocument(
         !hasValidDimensionOverrides(sheet.columnData, "w", sheet.columnCount) ||
         (sheet.mergeData !== undefined &&
           (!Array.isArray(sheet.mergeData) ||
+            !hasBoundedMergeArea(sheet.mergeData) ||
             sheet.mergeData.some(
               (range: any) =>
                 !isRecord(range) ||
@@ -331,14 +438,49 @@ export function parseWorkbookDocument(
   }
 }
 
-const plain = (value: string) =>
-  value
-    .replace(/<br\s*\/?\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&amp;/g, "&");
+const utf8ByteLength = (value: string) => {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length &&
+      value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+      bytes += 4;
+      index += 1;
+    } else bytes += 3;
+  }
+  return bytes;
+};
+
+const plain = (value: string) => {
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    const open = value.indexOf("<", cursor);
+    if (open < 0) {
+      chunks.push(value.slice(cursor));
+      break;
+    }
+    if (open > cursor) chunks.push(value.slice(cursor, open));
+    let close = open + 1;
+    while (close < value.length && value.charCodeAt(close) !== 62) close += 1;
+    if (close === value.length) {
+      chunks.push(value.slice(open));
+      break;
+    }
+    const tag = value.slice(open + 1, close).trim();
+    const isBreak = tag.slice(0, 2).toLowerCase() === "br" &&
+      (tag.slice(2).trim() === "" || tag.slice(2).trim() === "/");
+    if (isBreak) chunks.push("\n");
+    cursor = close + 1;
+  }
+  return chunks.join("")
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+};
 
 /** One-way import adapter. Old Section cells no longer act as a formula engine. */
 export function upgradeLegacyWorkbooks(
@@ -347,6 +489,26 @@ export function upgradeLegacyWorkbooks(
 ): BoardElement[] {
   if (!sheets.length) return [...elements];
   const byId = new Map(elements.map((element) => [element.id, element]));
+  const plainById = new Map<string, string>();
+  const referencedCellIds = new Set<string>();
+  let conversionBytes = 0;
+  for (const sheet of sheets) {
+    if (!Array.isArray(sheet.cellIds)) throw Error("Legacy spreadsheet cells are invalid.");
+    for (const row of sheet.cellIds) {
+      if (!Array.isArray(row)) throw Error("Legacy spreadsheet rows are invalid.");
+      for (const id of row) {
+        if (typeof id !== "string" || !byId.has(id)) continue;
+        if (referencedCellIds.has(id))
+          throw Error("A legacy spreadsheet cell is referenced more than once.");
+        referencedCellIds.add(id);
+        const text = plain(byId.get(id)?.content ?? "");
+        conversionBytes += utf8ByteLength(text);
+        if (conversionBytes > MAX_LEGACY_CONVERSION_BYTES)
+          throw Error("Legacy spreadsheet conversion exceeds the board size limit.");
+        plainById.set(id, text);
+      }
+    }
+  }
   const consumed = new Set<string>(),
     replacements = new Map<string, string>(),
     tables: BoardElement[] = [],
@@ -358,7 +520,7 @@ export function upgradeLegacyWorkbooks(
       .filter((item): item is BoardElement => Boolean(item));
     if (!cells.length) continue;
     const values = sheet.cellIds.map((row) =>
-      row.map((id) => plain(byId.get(id)?.content ?? "")),
+      row.map((id) => (typeof id === "string" ? plainById.get(id) : undefined) ?? ""),
     );
     const document = createWorkbookDocument(
       sheet.name || "Spreadsheet",
@@ -369,19 +531,25 @@ export function upgradeLegacyWorkbooks(
       row.forEach((id, c) => {
         const old = byId.get(id);
         if (!old) return;
+        const borderColor = old.borderColor;
+        const borderThickness = old.borderWidth ?? 0;
+        const hasLegacyBorder = typeof borderColor === "string" && borderColor !== "transparent" && borderThickness > 0;
+        const borderStyle = borderThickness >= 3 ? 13 : borderThickness >= 2 ? 8 : 1;
+        const border = hasLegacyBorder
+          ? { s: borderStyle, cl: { rgb: borderColor! } }
+          : undefined;
         (target.cellData![r] ??= {})[c] = {
-          ...cellFromInput(
-            plain(old.content),
-            old.sheetCell?.valueType === "text",
-          ),
+          ...cellFromInput(plainById.get(id) ?? "", old.sheetCell?.valueType === "text"),
           s: {
             ...(old.isBold ? { bl: 1 as const } : {}),
             ...(old.isItalic ? { it: 1 as const } : {}),
+            ...(old.textAlign ? { ht: ({ left: 1, center: 2, right: 3 } as const)[old.textAlign] } : {}),
             ...(old.color && old.color !== "transparent"
               ? { bg: { rgb: old.color } }
               : {}),
             ...(old.textColor ? { cl: { rgb: old.textColor } } : {}),
             ...(old.fontSize ? { fs: old.fontSize * 0.75 } : {}),
+            ...(border ? { bd: { t: border, r: border, b: border, l: border } } : {}),
           },
         };
       }),
@@ -398,6 +566,9 @@ export function upgradeLegacyWorkbooks(
         { h: sheet.rows?.[id]?.height ?? 24 },
       ]),
     );
+    const workbookContent = JSON.stringify(document);
+    if (workbookContent.length > MAX_WORKBOOK_CHARACTERS || utf8ByteLength(workbookContent) > MAX_LEGACY_CONVERSION_BYTES)
+      throw Error("Legacy spreadsheet conversion exceeds the workbook size limit.");
     let x = Infinity,
       y = Infinity,
       right = -Infinity,
@@ -417,7 +588,7 @@ export function upgradeLegacyWorkbooks(
       id,
       type: "table",
       name: sheet.name,
-      content: JSON.stringify(document),
+      content: workbookContent,
       position: { x, y },
       size: { width: Math.max(1, right - x), height: Math.max(1, bottom - y) },
       zIndex,
@@ -467,7 +638,7 @@ export function upgradeLegacyWorkbooks(
 }
 
 export function readLiveWorkbookSnapshots(elements: readonly BoardElement[],forHistory=false) {
-  const live = new Map<string, string>();
+  const live = new Map<string, { content: string; document: WorkbookDocument }>();
   document
     .querySelectorAll<HTMLIFrameElement>("iframe[data-spreadsheet-element-id]")
     .forEach((frame) => {
@@ -475,16 +646,26 @@ export function readLiveWorkbookSnapshots(elements: readonly BoardElement[],forH
       if (frame.dataset.spreadsheetReadonly === "true") return;
       try {
         const api=(frame.contentWindow as any)?.noteboardSheet;
+        // The bridge exists before its init handshake. An empty history value
+        // in that interval is not an intentional workbook deletion.
+        if (api?.isReady?.() === false) return;
         const value=forHistory ? api?.historySnapshot?.() ?? api?.snapshot?.() : api?.snapshot?.();
-        if (typeof value === "string" && ((forHistory && value==='') || parseWorkbookDocument(value)))
-          live.set(frame.dataset.spreadsheetElementId!, value);
+        if (typeof value === "string") {
+          const document = parseWorkbookDocument(value);
+          if (document)
+            live.set(frame.dataset.spreadsheetElementId!, { content: value, document });
+        }
       } catch {
         /* An attaching frame keeps the saved snapshot. */
       }
     });
   return elements.map((element) =>
     live.has(element.id)
-      ? { ...element, content: live.get(element.id)!,...(parseWorkbookDocument(live.get(element.id)!)?.mode==='simple'?{size:gridObjectSize(parseWorkbookDocument(live.get(element.id)!))}:{}) }
+      ? (() => {
+          const snapshot = live.get(element.id)!;
+          const size = snapshot.document?.mode === 'simple' ? gridObjectSize(snapshot.document) : undefined;
+          return { ...element, content: snapshot.content, ...(size ? { size } : {}) };
+        })()
       : element,
   );
 }

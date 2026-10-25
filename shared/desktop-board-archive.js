@@ -13,7 +13,8 @@ import {
 import {
   assertSafeAssetPath,
   bytesToBase64,
-  mimeFromAssetPath,
+  estimateRestoredBoardJsonBytes,
+  restoredAssetMime,
   readZipEntryBytes,
 } from "./board-package-stream.js";
 import { repairLegacyBoard } from "./board-migration.js";
@@ -87,7 +88,13 @@ export async function loadDesktopBoardArchive(input, options = {}) {
         ),
     ),
   ];
+  const sourceElementsByPath = new Map();
+  for (const element of page.elements) {
+    if (isPackagedAssetElement(element) && typeof element.content === "string" && element.content.startsWith("assets/"))
+      sourceElementsByPath.set(element.content, element);
+  }
   const assets = new Map();
+  const assetInfoByPath = new Map();
 
   for (const assetPath of referencedPaths) {
     assertSafeAssetPath(assetPath);
@@ -104,8 +111,14 @@ export async function loadDesktopBoardArchive(input, options = {}) {
       "Board asset",
       archiveBudget,
     );
-    assets.set(assetPath, bytesToBase64(bytes));
+    const sourceElement = sourceElementsByPath.get(assetPath);
+    const mime = restoredAssetMime(assetPath, sourceElement?.mediaMime || "application/octet-stream");
+    assets.set(assetPath, bytes);
+    assetInfoByPath.set(assetPath, { byteLength: bytes.byteLength, mime });
   }
+
+  estimateRestoredBoardJsonBytes(page, assetInfoByPath, limits.boardJsonBytes);
+  for (const [assetPath, bytes] of assets) assets.set(assetPath, bytesToBase64(bytes));
 
   const elements = page.elements.map((element) => {
     if (!isPackagedAssetElement(element)) return element;
@@ -117,13 +130,11 @@ export async function loadDesktopBoardArchive(input, options = {}) {
     if (encoded === undefined) {
       throw new Error(`Board package asset is missing: ${assetPath}`);
     }
-    const mime = element.mediaMime || mimeFromAssetPath(assetPath);
+    const mime = assetInfoByPath.get(assetPath)?.mime || restoredAssetMime(assetPath);
     return {
       ...element,
       content: `data:${mime};base64,${encoded}`,
-      ...(element.type === "media" && !element.mediaMime
-        ? { mediaMime: mime }
-        : {}),
+      ...(element.type === "media" ? { mediaMime: mime } : {}),
     };
   });
   const restored = { ...page, elements };

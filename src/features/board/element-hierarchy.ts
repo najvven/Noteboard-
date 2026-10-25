@@ -14,12 +14,8 @@ export const createElementHierarchy = (
   elements: readonly BoardElement[],
 ): ElementHierarchy => {
   const byId = new Map(elements.map((element) => [element.id, element]));
-  const ancestryCache = new Map<string, readonly BoardElement[]>();
-  const stackCache = new Map<string, readonly number[]>();
 
   const ancestors = (id: string) => {
-    const cached = ancestryCache.get(id);
-    if (cached) return cached;
     const chain: BoardElement[] = [];
     const visited = new Set<string>();
     let current = byId.get(id);
@@ -28,18 +24,19 @@ export const createElementHierarchy = (
       chain.push(current);
       current = current.parentId ? byId.get(current.parentId) : undefined;
     }
-    ancestryCache.set(id, chain);
     return chain;
   };
 
-  const stackPath = (id: string) => {
-    const cached = stackCache.get(id);
-    if (cached) return cached;
-    const path = ancestors(id)
-      .map((element) => element.zIndex)
-      .reverse();
-    stackCache.set(id, path);
-    return path;
+  const stackPath = (id: string) => ancestors(id).map((element) => element.zIndex).reverse();
+  const hasAncestor = (id: string, predicate: (element: BoardElement) => boolean) => {
+    const visited = new Set<string>();
+    let current = byId.get(id);
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      if (predicate(current)) return true;
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    return false;
   };
 
   const compare = (left: BoardElement, right: BoardElement) => {
@@ -57,13 +54,10 @@ export const createElementHierarchy = (
   return {
     byId,
     ancestors,
-    isDescendantOf: (id, ancestorId) =>
-      ancestors(id)
-        .slice(1)
-        .some((element) => element.id === ancestorId),
-    isLocked: (id) => ancestors(id).some((element) => element.isLocked),
+    isDescendantOf: (id, ancestorId) => hasAncestor(id, element => element.id !== id && element.id === ancestorId),
+    isLocked: (id) => hasAncestor(id, element => element.isLocked === true),
     isVisible: (id, respectVisibility) =>
-      !respectVisibility || !ancestors(id).some((element) => element.isHidden),
+      !respectVisibility || !hasAncestor(id, element => element.isHidden === true),
     stackPath,
     compare,
   };

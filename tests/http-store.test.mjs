@@ -24,6 +24,10 @@ test('HTTP preconditions, batch bases and filesystem conflicts share definitive 
   const request=(method,route,value,headers={})=>fetch(base+route,{method,headers:{'Content-Type':'application/json',...headers},body:value===undefined?undefined:JSON.stringify(value)});
   let response=await request('PUT','/api/pages/one',board('one'));
   assert.equal(response.status,428);assert.equal((await response.json()).code,'BOARD_PRECONDITION_REQUIRED');
+  response=await request('PUT','/api/pages/one',{});
+  assert.equal(response.status,428);assert.equal((await response.json()).code,'BOARD_PRECONDITION_REQUIRED');
+  response=await request('PUT','/api/pages/one',{}, {'If-Match':'invalid'});
+  assert.equal(response.status,400);assert.equal((await response.json()).code,'INVALID_BOARD_DATA');
   assert.equal((await request('PUT','/api/pages/one',board('one'),{'If-None-Match':'*'})).status,200);
   assert.equal((await request('DELETE','/api/pages/one')).status,428);
   assert.equal((await request('PUT','/api/pages/one',board('one',2),{'If-Match':'invalid'})).status,400);

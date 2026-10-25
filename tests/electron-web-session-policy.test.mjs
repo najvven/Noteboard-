@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   createWebSessionConfigurationQueue,
+  normalizeWebSessionSettings,
   resolveWebRequestPolicy,
   shouldBlockCookies,
-  shouldRememberMainFrameUrl,
 } from '../shared/electron-web-policy.js';
 
 function deferred() {
@@ -48,7 +48,7 @@ test('Web session configuration applies in request order after delayed filter se
   ]);
 });
 
-test('a blocked main-frame request does not replace first-party context', () => {
+test('a provisional main-frame request does not replace committed first-party context', () => {
   const settings = {
     topLevelUrl: 'https://publisher.example/page',
     cookieBlocker: 'third-party',
@@ -65,10 +65,9 @@ test('a blocked main-frame request does not replace first-party context', () => 
   assert.equal(policy.settings.topLevelUrl, blockedNavigation.url);
   assert.equal(policy.mainFrameUrl, blockedNavigation.url);
 
-  let rememberedTopLevelUrl = settings.topLevelUrl;
-  const blocked = { cancel: true };
-  if (shouldRememberMainFrameUrl(blockedNavigation, blocked))
-    rememberedTopLevelUrl = policy.mainFrameUrl;
+  // The request policy can use a provisional navigation URL for that request,
+  // but the committed context is only updated from a main-frame navigation event.
+  const rememberedTopLevelUrl = settings.topLevelUrl;
   assert.equal(rememberedTopLevelUrl, settings.topLevelUrl);
 
   const followingRequest = resolveWebRequestPolicy(
@@ -81,12 +80,21 @@ test('a blocked main-frame request does not replace first-party context', () => 
     shouldBlockCookies('https://cdn.tracker.example/app.js', followingRequest.settings),
     true,
   );
-  assert.equal(
-    shouldRememberMainFrameUrl(blockedNavigation, { redirectURL: 'data:text/plain,' }),
-    false,
+  const notCommitted = resolveWebRequestPolicy(
+    { resourceType: 'script', url: 'http://localhost/tracker' },
+    settings,
+    rememberedTopLevelUrl,
   );
-  assert.equal(
-    shouldRememberMainFrameUrl(blockedNavigation, { cancel: false }),
-    true,
-  );
+  assert.equal(notCommitted.settings.topLevelUrl, settings.topLevelUrl);
+});
+
+test('hostless about:blank context fails closed instead of treating tracker cookies as first-party', () => {
+  assert.equal(normalizeWebSessionSettings({
+    cookieBlocker: 'third-party',
+    topLevelUrl: 'about:blank',
+  }).topLevelUrl, '');
+  assert.equal(shouldBlockCookies('https://tracker.example/data', {
+    cookieBlocker: 'third-party',
+    topLevelUrl: 'about:blank',
+  }), true);
 });

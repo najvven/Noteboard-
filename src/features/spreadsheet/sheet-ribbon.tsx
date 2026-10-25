@@ -13,6 +13,12 @@ type ClonedStyle = {
   signature: string;
 };
 
+export function clearStaleSheetRibbonNodes(root: Pick<ShadowRoot, "querySelectorAll">) {
+  root.querySelectorAll(
+    "[data-sheet-ribbon-style], [data-sheet-ribbon-layout], [data-sheet-ribbon-mount]",
+  ).forEach(node => node.remove());
+}
+
 /**
  * Renders Univer's live ribbon in a host-document element while keeping its
  * styles scoped to that element's shadow root.
@@ -98,6 +104,9 @@ export function SheetRibbon({ targetId }: SheetRibbonProps) {
 
       host = nextHost;
       shadowRoot = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+      // A previous iframe generation may have been destroyed before its React
+      // cleanup ran. Remove only nodes owned by this host before mounting anew.
+      clearStaleSheetRibbonNodes(shadowRoot);
       mount = hostDocument.createElement("div");
       mount.dataset.sheetRibbonMount = "true";
       mount.style.boxSizing = "border-box";

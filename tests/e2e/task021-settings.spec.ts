@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from './test';
 
 const textElement = {
   id: 'task021-text', type: 'text', position: { x: 120, y: 120 },

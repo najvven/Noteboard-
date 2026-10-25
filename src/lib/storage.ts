@@ -37,7 +37,13 @@ export interface WebBlockingStatus {
 interface NoteboardDesktopApi {
   onCloseRequested?: (callback: (requestId: string) => void) => () => void;
   respondToClose?: (requestId: string, saved: boolean) => void;
-  readClipboard: () => Promise<{text:string;html:string;image:string;files:{name:string;type:string;base64:string}[]}>;
+  readClipboard: () => Promise<{
+    text: string;
+    html: string;
+    image: string;
+    files: { name: string; type: string; base64: string }[];
+    fileErrors?: { name: string; code: string; message: string }[];
+  }>;
   writeBoardClipboard: (json:string) => Promise<boolean>;
   loadPages: () => Promise<Page[]>;
   savePage: (page: Page, options?: { baseRevision?: number | null }) => Promise<BoardWriteResult>;

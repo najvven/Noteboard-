@@ -36,9 +36,13 @@ const BLOCKED_TAGS = new Set([
   "TEMPLATE",
 ]);
 
+export const internalRichTextTargetId = (value: string) =>
+  /^#target-([a-z0-9_-]+)$/i.exec(value.trim())?.[1] ?? null;
+
 const sanitizeHref = (value: string) => {
   const trimmed = value.trim();
-  if (/^#target-[a-z0-9_-]+$/i.test(trimmed)) return trimmed;
+  const targetId = internalRichTextTargetId(trimmed);
+  if (targetId !== null) return "#target-" + targetId;
   try {
     const url = new URL(trimmed, window.location.origin);
     return ["http:", "https:", "mailto:"].includes(url.protocol)
@@ -176,7 +180,7 @@ export function sanitizeRichText(value: string): string {
 
     if (element.tagName === "A") {
       element.setAttribute("rel", "noopener noreferrer");
-      if (!element.getAttribute("href")?.startsWith("#target-")) {
+      if (internalRichTextTargetId(element.getAttribute("href") || "") === null) {
         element.setAttribute("target", "_blank");
       }
     }

@@ -59,6 +59,30 @@ test('Vite 6 development HTML authorizes its actual plugin-react preamble', asyn
   }
 });
 
+test('Vite does not expose a runtime directory through its public URL mapping', async t => {
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'noteboard-vite-public-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const runtime=path.join(root,'public','runtime');
+  await fs.mkdir(runtime,{recursive:true});
+  await fs.writeFile(path.join(runtime,'synthetic.json'),'private-runtime-marker');
+  const server=await createServer({
+    configFile:false,
+    root,
+    publicDir:false,
+    server:{host:'127.0.0.1',port:0,strictPort:true},
+    appType:'spa',
+  });
+  try {
+    await server.listen();
+    const address=server.httpServer.address();
+    const response=await fetch(`http://127.0.0.1:${address.port}/runtime/synthetic.json`);
+    assert.notEqual(response.status,200);
+    assert.doesNotMatch(await response.text(),/private-runtime-marker/);
+  } finally {
+    await server.close();
+  }
+});
+
 test('native dev assets build into a clean output directory without relying on dist', async (t) => {
   const scripts = JSON.parse(await fs.readFile('package.json', 'utf8')).scripts;
   assert.match(scripts['electron:dev'], /^node scripts\/build-native-assets\.mjs &&/);

@@ -5,6 +5,8 @@ import { getBrowserWebSource, normalizeWebUrl } from "../src/features/web/model.
 
 test("web fields normalize network addresses and reject privileged schemes", () => {
   assert.equal(normalizeWebUrl("example.com/docs"), "https://example.com/docs");
+  assert.equal(normalizeWebUrl("localhost:5173/board"), "https://localhost:5173/board");
+  assert.equal(normalizeWebUrl("127.0.0.1:8080"), "https://127.0.0.1:8080");
   assert.equal(normalizeWebUrl(" https://openai.com/path "), "https://openai.com/path");
   assert.equal(normalizeWebUrl("about:blank"), "about:blank");
   assert.equal(normalizeWebUrl("file:///C:/secret.txt"), "");

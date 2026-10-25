@@ -3,6 +3,13 @@ import { createPortal } from "react-dom";
 import { webWheelClientPoint } from '../features/web/wheel-point';
 import {useOutlineSelection} from '../features/board/use-outline-selection';
 import {initialSelectMode, type SelectMode} from '../features/board/select-mode';
+import {
+  normalizeShortcut as normalizeShortcutValue,
+  normalizeShortcutKey as normalizeShortcutKeyValue,
+  shortcutFromEvent as shortcutFromEventValue,
+  shortcutParts,
+  isSafeStructuralShortcut,
+} from '../features/shortcuts/model';
 import {selectedBounds, selectElementsInOutline, selectionOutline, createSelectionArea} from '../features/board/selection';
 import {mergeAreaElements,ungroupAreaElements,updateMergedGroup,isMergedGroupMember,localGroupElement} from '../features/board/grouping';
 import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
@@ -16,7 +23,7 @@ import {
   SectionSheet,
 } from "../types";
 import { generateId, cn } from "../lib/utils";
-import { sanitizeRichText } from "../lib/sanitize-rich-text";
+import { internalRichTextTargetId, sanitizeRichText } from "../lib/sanitize-rich-text";
 import { BoardSettingsIcon } from "./icons/BoardSettingsIcon";
 import {
   BUILT_IN_MORE_TOOL_IDS,
@@ -45,6 +52,7 @@ import {
   syncTextLineViewport,
   TEXT_PRESENTATION_ATTRIBUTE,
   getTextSelectionOffsets,
+  type TextSelectionOffsets,
   type TextLineLayout,
 } from "../features/board/rich-text-formatting";
 import {
@@ -52,7 +60,7 @@ import {
   resolveTextLineSettings,
 } from "../features/board/text-lines";
 import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary } from "../features/board/board-surfaces";
-import { elementPolygon, getPlacementSection, getSectionClipPath } from "../features/board/section-clipping";
+import { elementPolygon, getPlacementSection, getSectionClipPath, isPointInVisibleElementArea } from "../features/board/section-clipping";
 import { getElementPermissions } from "../features/board/interaction-permissions";
 import { isFlippableElementType } from "../features/board/flip";
 import { mergeSiblingLayers } from "../features/board/layer-merge";
@@ -71,6 +79,7 @@ import SpreadsheetElement from "./SpreadsheetElement";
 import SpreadsheetCellSizeControls from './SpreadsheetCellSizeControls';
 import { nextBoardRevision, registerDocumentFlush } from '../lib/board-operations';
 import { prepareBrowserUnload } from '../lib/storage';
+import { stableValue } from '../features/board/recovery';
 import {
   boardSnapshotPayloadKey,
   persistLatestBoardSnapshot,
@@ -78,7 +87,7 @@ import {
   type PendingBoardSave,
   type StableBoardRevision,
 } from '../features/board/save-snapshot';
-import {gridObjectSize, snapGridObjectSize, fitGridObjectSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
+import {gridObjectSize, snapGridObjectSize, fitGridObjectSize, fitSimpleGridSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
 import {createSimpleWorkbook, resizeSimpleWorkbook} from '../features/spreadsheet/simple-workbook';
 
 const isSpreadsheetPanelEvent=(event:Event)=>event.composedPath().some(target=>target instanceof Element && Boolean(target.closest('[data-spreadsheet-panel]')));
@@ -1952,7 +1961,7 @@ export default function BoardEditor({
   },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid,showWorkspaceGrid,workspaceGridColor,workspaceGridThickness,workspaceGridSize]);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
-  const pendingSaveAsRef = useRef<{ kind: SaveAsKind; name: string; value: Page | Preset } | null>(null);
+  const pendingSaveAsRef = useRef<{ kind: SaveAsKind; name: string; sourceFingerprint: string; value: Page | Preset } | null>(null);
   const pendingPresetRef = useRef<Preset | null>(null);
   const [presetSaving, setPresetSaving] = useState(false);
   const [presetSaveError, setPresetSaveError] = useState('');
@@ -2227,30 +2236,16 @@ export default function BoardEditor({
   }, [activeTool, selectMode]);
 
   const getShortcutFromEvent = (e: KeyboardEvent | React.KeyboardEvent) => {
-    const key = e.key === " " ? "Space" : e.key;
-    const parts: string[] = [];
-    if (e.ctrlKey) parts.push("Ctrl");
-    if (e.altKey) parts.push("Alt");
-    if (e.shiftKey) parts.push("Shift");
-    if (e.metaKey) parts.push("Meta");
-    if (["Control", "Shift", "Alt", "Meta"].includes(key)) {
-      return parts.join("+");
-    }
-    parts.push(key.length === 1 ? key.toUpperCase() : toTitleCase(key));
-    return parts.join("+");
+    return shortcutFromEventValue(e);
   };
 
-  const normalizeShortcutKey = (key: string) =>
-    key === " " ? "Space" : key.length === 1 ? key.toUpperCase() : toTitleCase(key);
+  const normalizeShortcutKey = (key: string) => normalizeShortcutKeyValue(key);
 
   const isShortcutPressed = (
     shortcut: string,
     e?: { ctrlKey?: boolean; altKey?: boolean; shiftKey?: boolean; metaKey?: boolean },
   ) => {
-    const parts = shortcut
-      .split("+")
-      .map((part) => part.trim())
-      .filter(Boolean);
+    const parts = shortcutParts(normalizeShortcutValue(shortcut));
     if (!parts.length) return false;
     const pressedKeys = pressedKeysRef.current;
     return parts.every((part) => {
@@ -2266,7 +2261,7 @@ export default function BoardEditor({
   const shortcutMatches = (
     shortcut: string,
     e: KeyboardEvent | React.KeyboardEvent,
-  ) => shortcut.trim() !== "" && getShortcutFromEvent(e) === shortcut;
+  ) => shortcut.trim() !== "" && isSafeStructuralShortcut(shortcut) && getShortcutFromEvent(e) === normalizeShortcutValue(shortcut);
 
   const zoomAtPoint = (delta: number, clientX: number, clientY: number) => {
     const container = containerRef.current;
@@ -2409,6 +2404,7 @@ export default function BoardEditor({
         }
         const shortcut = getShortcutFromEvent(e);
         if (!shortcut) return;
+        if (target !== "crop" && target !== "scrollZoom" && !isSafeStructuralShortcut(shortcut)) return;
         onChange(shortcut);
         setRecordingShortcut(null);
       }}
@@ -2452,6 +2448,7 @@ export default function BoardEditor({
         }
         const shortcut = getShortcutFromEvent(e);
         if (!shortcut) return;
+        if (!isSafeStructuralShortcut(shortcut)) return;
         setObjectPresets((prev) =>
           prev.map((item) =>
             item.id === preset.id ? { ...item, shortcut } : item,
@@ -4827,7 +4824,7 @@ export default function BoardEditor({
     parentId: creationParentId(areaGestureRef.current?.start ?? { x: rect.x, y: rect.y }),
     zIndex: activeTool === 'section' ? Math.min(0, minimumBy<BoardElement>(elementsRef.current, e=>e.zIndex))-1 : Math.max(0, maximumBy<BoardElement>(elementsRef.current, e=>e.zIndex)) + 1,
     };
-    return getSectionClipPath(element, elementsRef.current, elementBoardBoundary(element,elementsRef.current,pageDimensions));
+    return getSectionClipPath(element, elementsRef.current, elementBoardBoundary(element,elementsRef.current,pageDimensions,elementHierarchy));
   };
 
   const buildRegionElement = (
@@ -4835,7 +4832,7 @@ export default function BoardEditor({
     rect: { x: number; y: number; w: number; h: number },
     extraProps?: Partial<BoardElement>,
     id = "preview",
-  ) => {
+  ): BoardElement | null => {
     const latestElements = elementsRef.current;
     let finalRect = type === "board"
       ? getBoardPlacementRect(
@@ -4853,16 +4850,31 @@ export default function BoardEditor({
       });
       finalRect.w = Math.max(finalRect.w, minimum.width);
       finalRect.h = Math.max(finalRect.h, minimum.height);
+      const bounds = activeSurfaceBoundsRef.current;
       if (type === 'table') {
         if (spreadsheetMode==='simple') {
-          const size=snapGridObjectSize(rect.w,rect.h,spreadsheetCellSize);
-          finalRect.w=size.width;finalRect.h=size.height;
+          let availableWidth = finalRect.w, availableHeight = finalRect.h;
+          if (bounds) {
+            const left = Math.max(bounds.minX, Math.min(bounds.maxX, finalRect.x));
+            const top = Math.max(bounds.minY, Math.min(bounds.maxY, finalRect.y));
+            const right = Math.max(left, Math.min(bounds.maxX, finalRect.x + finalRect.w));
+            const bottom = Math.max(top, Math.min(bounds.maxY, finalRect.y + finalRect.h));
+            finalRect.x = left;
+            finalRect.y = top;
+            availableWidth = right - left;
+            availableHeight = bottom - top;
+          }
+          const size = bounds
+            ? fitSimpleGridSize(availableWidth, availableHeight, spreadsheetCellSize)
+            : snapGridObjectSize(availableWidth, availableHeight, spreadsheetCellSize);
+          if (!size) return null;
+          finalRect.w = size.width;
+          finalRect.h = size.height;
         } else {
           finalRect.w = Math.ceil(finalRect.w/spreadsheetCellSize.width)*spreadsheetCellSize.width;
           finalRect.h = Math.ceil(finalRect.h/spreadsheetCellSize.height)*spreadsheetCellSize.height;
         }
       }
-      const bounds = activeSurfaceBoundsRef.current;
       if (bounds) {
         if (type === "embed" || type === "media") {
           const gesture = areaGestureRef.current;
@@ -4963,6 +4975,10 @@ export default function BoardEditor({
   ): boolean => {
     const latestElements = elementsRef.current;
     const newElement = buildRegionElement(type, rect, extraProps, generateId());
+    if (!newElement) {
+      if (finishToolOnRejectedPlacement) finishToolUse(type);
+      return false;
+    }
     if (overlapMode === "full" && type !== "section" && type !== "board") {
       const isOverlap = latestElements.some(el => {
         if (el.type === "section" || el.type === "board") return false;
@@ -5389,6 +5405,10 @@ export default function BoardEditor({
   };
 
   const pasteClipboardContents = (contents: ClipboardContents, region?: ClipboardRegion, parentId?: string) => {
+    if (contents.diagnostics?.length) {
+      const skipped = contents.diagnostics.map(item => `${item.name}: ${item.message}`).join('\n');
+      alert(`Some clipboard items were skipped:\n${skipped}`);
+    }
     const boardRect=boardSurfaceRef.current?.getBoundingClientRect(), viewport=containerRef.current?.getBoundingClientRect();
     if (!boardRect || !viewport) return;
     const position=region ? {x:region.x,y:region.y} : {x:(viewport.left+viewport.width/2-boardRect.left)/zoomRef.current,y:(viewport.top+viewport.height/2-boardRect.top)/zoomRef.current};
@@ -6097,26 +6117,45 @@ export default function BoardEditor({
   };
 
   const handleSaveAs = async (kind: SaveAsKind, name: string): Promise<string> => {
+    const snapshot = buildCurrentPage();
+    const { updatedAt: _revision, ...sourcePayload } = snapshot;
+    const sourceFingerprint = stableValue(sourcePayload);
     const previous = pendingSaveAsRef.current;
-    const reusable = previous?.kind === kind && previous.name === name;
-    const snapshot = reusable ? undefined : buildCurrentPage();
-    if (kind === 'template') {
-      const candidate = reusable ? previous.value as Preset : createSavedTemplate(snapshot!, name);
-      pendingSaveAsRef.current = { kind, name, value: candidate };
-      if (await onSavePreset(candidate) === false) throw new Error('Could not save the template. Please try again.');
-      pendingSaveAsRef.current = null;
-      return 'Template saved.';
+    const reusable = previous?.kind === kind && previous.name === name &&
+      previous.sourceFingerprint === sourceFingerprint;
+
+    const submit = async (pending: NonNullable<typeof previous>) => {
+      if (pending.kind === 'template') {
+        if (await onSavePreset(pending.value as Preset) === false)
+          throw new Error('Could not save the template. Please retry this save before starting another one.');
+      } else if (pending.kind === 'board') {
+        if (!onSaveAs) throw new Error('Saving a new board is unavailable.');
+        if (await onSaveAs(pending.value as Page) === false)
+          throw new Error('Could not save the new board. Please retry this save before starting another one.');
+      }
+    };
+
+    if (previous && !reusable) {
+      // A changed document/name/kind is a new Save as intent. Resolve the
+      // original exact payload first so an ACK-lost copy is never silently
+      // replaced by the newer snapshot.
+      await submit(previous);
+      if (pendingSaveAsRef.current === previous) pendingSaveAsRef.current = null;
     }
-    if (kind === 'board') {
-      if (!onSaveAs) throw new Error('Saving a new board is unavailable.');
-      const candidate = reusable ? previous.value as Page : createSavedBoard(snapshot!, name);
-      pendingSaveAsRef.current = { kind, name, value: candidate };
-      if (await onSaveAs(candidate) === false) throw new Error('Could not save the new board. Please try again.');
-      pendingSaveAsRef.current = null;
-      return 'New board saved in My Noteboards.';
+
+    if (kind === 'file') {
+      await downloadBoardArchive({ ...snapshot, title: name }, name);
+      return 'File download started.';
     }
-    await downloadBoardArchive({ ...buildCurrentPage(), title: name }, name);
-    return 'File download started.';
+
+    const candidate = reusable
+      ? previous.value
+      : kind === 'template' ? createSavedTemplate(snapshot, name) : createSavedBoard(snapshot, name);
+    const pending = { kind, name, sourceFingerprint, value: candidate };
+    pendingSaveAsRef.current = pending;
+    await submit(pending);
+    if (pendingSaveAsRef.current === pending) pendingSaveAsRef.current = null;
+    return kind === 'template' ? 'Template saved.' : 'New board saved in My Noteboards.';
   };
 
   const handleConfirmPresetSave = async () => {
@@ -6514,7 +6553,7 @@ export default function BoardEditor({
           : getMinimumAreaRect(activeAreaGesture.start, current, gridSize, bounds ?? undefined);
         const preview = buildRegionElement(activeTool as ElementType, rect,
           activeTool === 'line' || activeTool === 'arrow' ? {rotation:getLinePlacementRect(activeAreaGesture.start,current,gridSize,snapToGrid).rotation} : undefined);
-        updateSmartGuides(preview, preview.position, false);
+        if (preview) updateSmartGuides(preview, preview.position, false);
       }
     } else if (!isInteracting && smartGuidesEnabled && activeTool === 'select') {
       const hoveredId = (e.target as HTMLElement).closest?.('[data-board-element-id]')?.getAttribute('data-board-element-id');
@@ -7074,6 +7113,12 @@ export default function BoardEditor({
     if(target.closest('button,input,textarea,dialog'))return;
     const id=target.closest<HTMLElement>('[data-board-element-id]')?.dataset.boardElementId;
     if(!id||!selectedIds.includes(id))return;
+    const selected=elementsRef.current.find(element=>element.id===id);
+    const surfaceRect=boardSurfaceRef.current?.getBoundingClientRect();
+    if(selected&&surfaceRect&&!isPointInVisibleElementArea(selected,elementsRef.current,{
+      x:(event.clientX-surfaceRect.left)/zoomRef.current,
+      y:(event.clientY-surfaceRect.top)/zoomRef.current,
+    },elementBoardBoundary(selected,elementsRef.current,pageDimensions,elementHierarchy),elementHierarchy))return;
     event.preventDefault();event.stopPropagation();window.getSelection()?.removeAllRanges();
     setQuickAddRegion(null);
     groupMoveRef.current={pointerId:event.pointerId,x:event.clientX,y:event.clientY,elements:elementsRef.current,ids:selectionTreeIds(),changed:false,preview:getEffectiveToolMenuSettings('select').previewMode};
@@ -8689,6 +8734,7 @@ export default function BoardEditor({
                           }
 
                           const previewElement = buildRegionElement(activeTool, geometry.rect, {rotation:geometry.rotation});
+                          if (!previewElement) return null;
                           return (
                             <div
                               style={{
@@ -8725,9 +8771,10 @@ export default function BoardEditor({
                           );
                           if (!clipped) return null;
 
-                          const previewElement = activeTool === "embed" || activeTool === "media"
+                          const previewElement = activeTool === "embed" || activeTool === "media" || activeTool === "table"
                             ? buildRegionElement(activeTool as ElementType, clipped)
                             : null;
+                          if (activeTool === "table" && spreadsheetMode === "simple" && !previewElement) return null;
                           const previewRect = previewElement
                             ? {
                                 x: previewElement.position.x,
@@ -8755,6 +8802,7 @@ export default function BoardEditor({
                             );
                           } else {
                             const realisticElement = previewElement ?? buildRegionElement(activeTool as ElementType, clipped);
+                            if (!realisticElement) return null;
                             return (
                               <div
                                 data-board-placement-preview="true"
@@ -9108,6 +9156,7 @@ export default function BoardEditor({
                   );
                   if (getActiveToolMenuSettings().previewMode === 'realistic') {
                     const preview = buildRegionElement('board',rect);
+                    if (!preview) return null;
                     const surface = createBoardSurface(preview.id,preview.position,preview.size,preview.color,preview.zIndex);
                     return <div data-new-board-preview="true" className="absolute pointer-events-none z-[120]"
                       style={{left:surface.position.x,top:surface.position.y,width:surface.size?.width,height:surface.size?.height}}>
@@ -11823,9 +11872,21 @@ function BoardElementNode({
     : element;
   const boardClipStyle = (() => {
     if (!pageDimensions || element.type === "board") return undefined;
-    const boundary = elementBoardBoundary(element,elements??[],pageDimensions);
+    const boundary = elementBoardBoundary(element,elements??[],pageDimensions,sceneHierarchy);
     return { clipPath: getSectionClipPath(element, elements ?? [], boundary, sceneHierarchy) };
   })();
+  const isVisiblePointerPoint = (clientX:number,clientY:number) => {
+    if(element.type==='board'||!pageDimensions||!elements)return true;
+    const surface=document.querySelector<HTMLElement>('[data-board-root=\"true\"]');
+    const rect=surface?.getBoundingClientRect();
+    if(!rect)return true;
+    const point={x:(clientX-rect.left)/zoomRef.current,y:(clientY-rect.top)/zoomRef.current};
+    return isPointInVisibleElementArea(element,elements,point,
+      elementBoardBoundary(element,elements,pageDimensions,sceneHierarchy),sceneHierarchy);
+  };
+  const isElementControlTarget=(target:EventTarget|null) =>
+    target instanceof HTMLElement &&
+    !!target.closest('button,input,textarea,select,[contenteditable=\"true\"]');
 
   // We should also override the drag ability if they only enabled resize, but
   // canInteract covers the handle rendering too.
@@ -11948,10 +12009,16 @@ function BoardElementNode({
         left: element.position.x,
         top: element.position.y,
         zIndex: renderZIndex ?? element.zIndex,
+        // Unselected elements only receive pointer hits in their visible clip.
+        // Keep selected handles available outside the clip.
+        ...(!isSelected ? boardClipStyle : undefined),
         transformOrigin: "center center",
         transform: `rotate(${element.rotation || 0}deg) scaleX(${element.flipX ? -1 : 1}) scaleY(${element.flipY ? -1 : 1})`,
       }}
       onPointerDown={(e) => {
+        if(!isVisiblePointerPoint(e.clientX,e.clientY)&&!isElementControlTarget(e.target)){
+          e.preventDefault();e.stopPropagation();return;
+        }
         // If it's a link and we're not using the link tool, block board interaction and just wait for the click.
         if (element.linkToId && activeTool !== "link") {
           e.stopPropagation();
@@ -11981,6 +12048,9 @@ function BoardElementNode({
         handleDragPointerDown(e);
       }}
       onClick={(e) => {
+        if(!isVisiblePointerPoint(e.clientX,e.clientY)&&!isElementControlTarget(e.target)){
+          e.preventDefault();e.stopPropagation();return;
+        }
         if (!canInteract && element.type === "board") return;
         e.stopPropagation();
         if (
@@ -11995,6 +12065,9 @@ function BoardElementNode({
         if (canInteract) onSelect();
       }}
       onContextMenu={(e) => {
+        if(!isVisiblePointerPoint(e.clientX,e.clientY)&&!isElementControlTarget(e.target)){
+          e.preventDefault();e.stopPropagation();return;
+        }
         if (onContextMenu && canInteract && !isInteractionLocked) {
           e.preventDefault();
           e.stopPropagation();
@@ -12559,7 +12632,7 @@ const ContentEditableText = ({
   const pasteCommandRef = useRef(false);
   const compositionSnapshotRef = useRef<{
     html: string;
-    offsets: { start: number; end: number } | null;
+    offsets: TextSelectionOffsets | null;
     linePath: number[] | null;
   } | null>(null);
   const onUpdateRef = useRef(onUpdate);
@@ -12980,10 +13053,10 @@ const ContentEditableText = ({
         const anchor = target.closest("a");
         if (anchor) {
           const href = anchor.getAttribute("href");
-          if (href && href.includes("#target-")) {
+          const targetId = href ? internalRichTextTargetId(href) : null;
+          if (targetId !== null) {
             e.preventDefault();
             e.stopPropagation();
-            const targetId = href.split("#target-")[1];
             if (activeTool === "link") {
               if (onLinkEdit) onLinkEdit(targetId);
             } else {
@@ -12995,14 +13068,16 @@ const ContentEditableText = ({
       onMouseDown={(e) => {
         const target = e.target as HTMLElement;
         const anchor = target.closest("a");
-        if (anchor && anchor.getAttribute("href")?.includes("#target-")) {
+        const targetId = anchor
+          ? internalRichTextTargetId(anchor.getAttribute("href") || "")
+          : null;
+        if (targetId !== null) {
           // Prevent board dragging or element selection when clicking a link
           e.stopPropagation();
           // In some browsers, clicking a link in contentEditable just focuses the text.
           // To ensure jump works immediately, we trigger the logic here if it's not the link tool.
           if (activeTool !== "link") {
             e.preventDefault();
-            const targetId = anchor.getAttribute("href")?.split("#target-")[1];
             if (targetId && onJumpToTarget) {
               onJumpToTarget(targetId);
             }
@@ -13110,14 +13185,8 @@ function WebBrowserElement({
       className="bg-slate-100 flex flex-col items-center justify-center text-slate-500 gap-3 shadow-lg relative overflow-hidden group"
       style={{
         ...containerStyle,
-        width: Math.max(
-          element.size?.width || WEB_DEFAULT_SIZE.width,
-          MIN_WEB_SIZE.width,
-        ),
-        height: Math.max(
-          element.size?.height || WEB_DEFAULT_SIZE.height,
-          MIN_WEB_SIZE.height,
-        ),
+        width: element.size?.width || WEB_DEFAULT_SIZE.width,
+        height: element.size?.height || WEB_DEFAULT_SIZE.height,
       }}
       onDragOver={(e) => {
         e.preventDefault();

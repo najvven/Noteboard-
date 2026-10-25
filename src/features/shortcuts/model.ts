@@ -13,6 +13,7 @@ export interface ShortcutBinding {
 }
 
 const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift", "Meta"] as const;
+const MODIFIER_SET = new Set<string>(MODIFIER_ORDER);
 const MODIFIER_ALIASES: Record<string, (typeof MODIFIER_ORDER)[number]> = {
   alt: "Alt",
   option: "Alt",
@@ -54,10 +55,17 @@ export const normalizeShortcutKey = (key: string) => {
     : `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1).toLowerCase()}`;
 };
 
+export const shortcutParts = (shortcut: string) => {
+  const compact = shortcut.trim().replace(/\s*\+\s*/g, "+");
+  if (compact === "+") return ["+"];
+  if (compact.endsWith("++"))
+    return [...compact.slice(0, -2).split("+").filter(Boolean), "+"];
+  return compact.split("+").filter(Boolean);
+};
+
 export const normalizeShortcut = (shortcut: string) => {
   const unique = new Set(
-    shortcut
-      .split("+")
+    shortcutParts(shortcut)
       .map(normalizeShortcutKey)
       .filter(Boolean),
   );
@@ -99,8 +107,9 @@ export const findShortcutConflict = (
 export const isSafeStructuralShortcut = (shortcut: string) => {
   const normalized = normalizeShortcut(shortcut);
   if (!normalized) return false;
-  const parts = normalized.split("+");
-  return parts.some((part) => part === "Ctrl" || part === "Alt" || part === "Meta");
+  const parts = shortcutParts(normalized);
+  const keys = parts.filter((part) => !MODIFIER_SET.has(part));
+  return keys.length === 1 && parts.some((part) => part === "Ctrl" || part === "Alt" || part === "Meta");
 };
 
 export const shouldHandleSpreadsheetKeyboard = (

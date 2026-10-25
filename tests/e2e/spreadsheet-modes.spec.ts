@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 import { createSimpleWorkbook } from "../../src/features/spreadsheet/simple-workbook";
 import { createWorkbookDocument } from "../../src/features/spreadsheet/workbook";
 import { gridObjectSize } from "../../src/features/spreadsheet/grid-geometry";

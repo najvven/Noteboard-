@@ -83,6 +83,7 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
 async function fixtureServer(t) {
   const server=http.createServer((request,response)=>{
     if(request.url==='/fail') {request.socket.destroy();return;}
+    if(request.url==='/redirect') {response.writeHead(302,{Location:'/page'});response.end();return;}
     if(request.url==='/corners') {
       response.setHeader('Content-Type','text/html; charset=utf-8');
       response.end(`<title>Native web corners</title><style>html,body{margin:0;width:100%;height:100%;overflow:hidden}button{position:absolute;width:64px;height:48px}#top-left{left:0;top:0}#top-right{right:0;top:0}#bottom-left{left:0;bottom:0}#bottom-right{right:0;bottom:0}</style>${['top-left','top-right','bottom-left','bottom-right'].map(id=>`<button id="${id}" onclick="document.body.dataset.lastCorner='${id}'">${id}</button>`).join('')}`);
@@ -98,6 +99,31 @@ async function fixtureServer(t) {
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   return `http://127.0.0.1:${server.address().port}`;
 }
+
+test('native Web ignores iframe fragment changes and persists committed main-frame URLs only', {timeout:45000}, async t => {
+  const server=http.createServer((request,response)=>{
+    response.setHeader('Content-Type','text/html; charset=utf-8');
+    if(request.url==='/child') {response.end('<title>Child frame</title>');return;}
+    response.end('<title>Navigation ownership</title><iframe id="child" src="about:blank"></iframe>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const url=`http://127.0.0.1:${server.address().port}/page`;
+  const {app,profile}=await launch(t,seed('embed',url));
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Navigation ownership');
+  const childUrl=()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript('document.querySelector("#child")?.contentWindow.location.href'));
+  await expect.poll(childUrl).toBe('about:blank');
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript('document.querySelector("#child").contentWindow.location.hash="audit-poison"; void 0'));
+  await expect.poll(childUrl).toContain('audit-poison');
+  await new Promise(resolve=>setTimeout(resolve,450));
+  const boardFile=path.join(profile,'data','boards','native-source.json');
+  const storedUrl=async()=>JSON.parse(await fs.readFile(boardFile,'utf8')).elements.find(element=>element.id==='web')?.content;
+  assert.equal(await storedUrl(),url,'iframe in-page navigation cannot replace the Web element URL');
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('location.hash="committed"; void 0'));
+  await expect.poll(storedUrl).toBe(`${url}#committed`);
+});
 
 const guestState = app => app.evaluate(async ({webContents}) => Promise.all(webContents.getAllWebContents().filter(c=>c.getType()==='webview').map(async c=>({
   id:c.id,url:c.getURL(),title:c.getTitle(),body:await c.executeJavaScript('document.body?.innerText || ""').catch(()=>''),
@@ -447,9 +473,10 @@ test('cookie consent popups close without main-process errors and Web fullscreen
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script,true),script);
   await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Consent fixture');
   for(let i=0;i<3;i++){
+    const popupPromise=app.waitForEvent('window');
     await run('document.querySelector("#open").click(); void 0');
-    await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().some(c=>c.getTitle()==='Consent popup'))).toBe(true);
-    await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getTitle()==='Consent popup').executeJavaScript('setTimeout(()=>document.querySelector("#accept").click(),0); void 0',true));
+    const popup=await popupPromise;
+    await popup.getByRole('button',{name:'Accept cookies',exact:true}).click();
     await expect.poll(async()=>(await guestState(app))[0]?.url).toContain('/accepted');
     await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(1);
   }
@@ -743,7 +770,12 @@ test('sandboxed frames cannot open windows while an allowed top-level popup stil
 
 test('desktop Web loads, saves before ready, retries and opens isolated popups', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
-  const {app,window,profile,errors}=await launch(t,seed('embed'));
+  const {app,window,profile,errors}=await launch(t,seed('embed',origin+'/page'));
+  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await window.getByRole('button',{name:'Select Tool',exact:true}).click();
+  const field=window.locator('[data-board-element-id="web"]');
+  await field.click({position:{x:5,y:5}});
+  await field.getByRole('button',{name:'Edit web address'}).click();
   const input=window.getByPlaceholder('Paste web link...');
   await expect(input).toBeEnabled();
   await input.fill(`${origin}/slow`); await input.press('Enter');
@@ -757,9 +789,8 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
   await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
   await expect(window.getByText('Loading page…',{exact:true})).toHaveCount(0);
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
-  const field=window.locator('[data-board-element-id="web"]');
   await field.click({position:{x:5,y:5}});
-  for(const suffix of ['/page','/page','/fail','/page']) {
+  for(const suffix of ['/page','/page','/fail','/page','/redirect']) {
     await field.hover();
     await field.getByRole('button',{name:'Edit web address'}).click();
     await input.fill(origin+suffix); await input.press('Enter');
@@ -774,12 +805,68 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
       await expect.poll(async()=> (await guestState(app)).length).toBe(1);
     }
   }
+  await expect.poll(async()=>JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8')).elements.find(e=>e.id==='web').content).toBe(origin+'/page');
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.getElementById("popup").click()',true));
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(2);
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().endsWith('/popup')))).toBe(true);
   const popup=await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().find(w=>w.webContents.getURL().endsWith('/popup'))?.webContents.getLastWebPreferences());
   assert.equal(popup.nodeIntegration,false); assert.equal(popup.contextIsolation,true); assert.equal(popup.sandbox,true);
   assert.deepEqual(errors,[]);
+});
+
+test('cookie and popup policy changes reach already-open popup documents', {timeout:60000}, async t => {
+  let popupLoads = 0, nestedLoads = 0;
+  const server = http.createServer((request, response) => {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (request.url === '/popup') {
+      popupLoads += 1;
+      response.end('<body><input id="draft"><script>document.cookie="probe=1; path=/";document.body.dataset.cookie=document.cookie</script></body>');
+      return;
+    }
+    if (request.url === '/nested') { nestedLoads += 1; response.end('<h1>Nested</h1>'); return; }
+    response.end('<title>Popup policy fixture</title><h1>Popup policy fixture</h1>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const origin = 'http://127.0.0.1:' + server.address().port;
+  const board = seed('embed', origin + '/page');
+  Object.assign(board.elements[1], {webAdBlock: false, webCookieBlocker: 'off', webPopupBlocker: false});
+  const {app, window, errors} = await launch(t, board);
+  await expect.poll(async () => (await guestState(app))[0]?.title).toBe('Popup policy fixture');
+  await app.evaluate(({webContents}) =>
+    webContents.getAllWebContents().find(contents => contents.getType() === 'webview')
+      .executeJavaScript('window.open("/popup","_blank");void 0', true));
+  const popupId = async () => app.evaluate(({BrowserWindow}) =>
+    BrowserWindow.getAllWindows().find(win => win.webContents.getURL().endsWith('/popup'))?.webContents.id ?? null);
+  await expect.poll(popupId).not.toBeNull();
+  const cookieValue = async () => {
+    const id = await popupId();
+    if (!id) return null;
+    return app.evaluate(({webContents}, popupId) =>
+      webContents.fromId(popupId).executeJavaScript('document.body.dataset.cookie'), id).catch(() => null);
+  };
+  await expect.poll(cookieValue).toBe('probe=1');
+
+  const configure = (cookieBlocker, popupBlocker = false) => window.evaluate(
+    ({partition, topLevelUrl, cookieBlocker, popupBlocker}) =>
+      window.noteboardAPI.configureWebSession({
+        partition,
+        settings: {topLevelUrl, adBlock: false, cookieBlocker, popupBlocker},
+      }),
+    {partition: 'persist:noteboard-web-web', topLevelUrl: origin + '/page', cookieBlocker, popupBlocker},
+  );
+  await configure('all');
+  await expect.poll(() => popupLoads).toBeGreaterThan(1);
+  await expect.poll(cookieValue).toBe('');
+  await configure('off', true);
+  await expect.poll(() => popupLoads).toBeGreaterThan(2);
+  await expect.poll(cookieValue).toBe('probe=1');
+  const id = await popupId();
+  await app.evaluate(({webContents}, popupId) =>
+    webContents.fromId(popupId).executeJavaScript('window.open("/nested","_blank");void 0', true), id);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  assert.equal(nestedLoads, 0, 'an existing popup must use the updated popup-blocking setting');
+  assert.deepEqual(errors, []);
 });
 
 test('desktop Save as writes templates, separate boards and a real ZIP download', {timeout:45000}, async t=>{

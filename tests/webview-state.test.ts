@@ -37,3 +37,23 @@ test('saving during native device bootstrap keeps the requested address, not abo
   assert.equal(readLiveWebviewUrl(view),'https://example.com/page');
   assert.equal(readLiveWebviewUrl({...view,getURL:()=> 'https://example.com/next'}),'https://example.com/next');
 });
+
+test('save prefers a pending navigation over the previously committed page', () => {
+  const view = {
+    getURL: () => 'https://example.com/first',
+    getAttribute: (key: string) => key === 'data-web-requested-url'
+      ? 'https://example.com/slow-next'
+      : key === 'data-web-navigation-pending' ? 'true' : null,
+  };
+  assert.equal(readLiveWebviewUrl(view), 'https://example.com/slow-next');
+});
+
+test('save retains the committed redirect after navigation finishes', () => {
+  const view = {
+    getURL: () => 'https://example.com/final',
+    getAttribute: (key: string) => key === 'data-web-requested-url'
+      ? 'https://example.com/final'
+      : null,
+  };
+  assert.equal(readLiveWebviewUrl(view), 'https://example.com/final');
+});

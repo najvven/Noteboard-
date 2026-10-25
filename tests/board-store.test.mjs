@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -74,6 +75,139 @@ test('direct deletion retires a mismatched-name board without requiring a prior 
   assert.ok(!files.includes('page-sjtqz36.json'));
 });
 
+test('mutations reject a canonical filename owned by a different board before changing any source', async t => {
+  const dir = await fixture(t);
+  const foreign = page(4, 'Logical board B', 'board-b');
+  const requested = page(3, 'Logical board A', 'a');
+  const foreignPath = path.join(dir, 'a.json');
+  const requestedPath = path.join(dir, 'legacy-a.json');
+  const foreignBytes = Buffer.from(JSON.stringify(foreign));
+  const requestedBytes = Buffer.from(JSON.stringify(requested));
+  await fs.writeFile(foreignPath, foreignBytes);
+  await fs.writeFile(requestedPath, requestedBytes);
+
+  await assert.rejects(deleteStoredBoard(dir, 'a', { baseRevision: 3 }), { code: 'BOARD_ID_PATH_COLLISION' });
+  await assert.rejects(saveStoredBoard(dir, page(4, 'Changed A', 'a'), { baseRevision: 3 }), { code: 'BOARD_ID_PATH_COLLISION' });
+  assert.deepEqual(await fs.readFile(foreignPath), foreignBytes);
+  assert.deepEqual(await fs.readFile(requestedPath), requestedBytes);
+  assert.deepEqual(new Map((await loadStoredBoards(dir)).map(board => [board.id, board.title])), new Map([
+    ['board-b', 'Logical board B'], ['a', 'Logical board A'],
+  ]));
+});
+
+test('foreign backup ownership and alias cycles are preserved without partial batch writes', async t => {
+  const dir = await fixture(t);
+  const backupPath = path.join(dir, 'a.json.bak');
+  const aliasPath = path.join(dir, 'legacy-a.json');
+  const backupBytes = Buffer.from(JSON.stringify(page(8, 'Backup owner B', 'board-b')));
+  const aliasBytes = Buffer.from(JSON.stringify(page(7, 'Alias owner A', 'a')));
+  await fs.writeFile(backupPath, backupBytes);
+  await fs.writeFile(aliasPath, aliasBytes);
+  await assert.rejects(deleteStoredBoard(dir, 'a', { baseRevision: 7 }), { code: 'BOARD_ID_PATH_COLLISION' });
+  await assert.rejects(saveStoredBoards(dir, [page(1, 'Fresh board', 'fresh'), page(8, 'Changed A', 'a')]), {
+    code: 'BOARD_ID_PATH_COLLISION',
+  });
+  assert.deepEqual(await fs.readFile(backupPath), backupBytes);
+  assert.deepEqual(await fs.readFile(aliasPath), aliasBytes);
+  await assert.rejects(fs.stat(boardFile(dir, 'fresh')), { code: 'ENOENT' });
+
+  const cycle = path.join(dir, 'cycle');
+  await fs.mkdir(cycle);
+  const aPath = path.join(cycle, 'a.json'), bPath = path.join(cycle, 'b.json');
+  const aBytes = Buffer.from(JSON.stringify(page(2, 'B in A path', 'b')));
+  const bBytes = Buffer.from(JSON.stringify(page(2, 'A in B path', 'a')));
+  await fs.writeFile(aPath, aBytes);
+  await fs.writeFile(bPath, bBytes);
+  assert.deepEqual(new Map((await loadStoredBoards(cycle)).map(board => [board.id, board.title])), new Map([
+    ['b', 'B in A path'], ['a', 'A in B path'],
+  ]));
+  assert.deepEqual(await fs.readFile(aPath), aBytes);
+  assert.deepEqual(await fs.readFile(bPath), bBytes);
+});
+
+test('a failed multi-source deletion restores every moved board source before rejecting', async t => {
+  const dir = await fixture(t);
+  await saveStoredBoard(dir, page(1));
+  await saveStoredBoard(dir, page(2, 'Latest'));
+  const primaryPath = boardFile(dir, 'board-one');
+  const backupPath = `${primaryPath}.bak`;
+  const primaryBytes = await fs.readFile(primaryPath);
+  const backupBytes = await fs.readFile(backupPath);
+  const rename = fs.rename.bind(fs);
+  let failed = false;
+  t.mock.method(fs, 'rename', async (source, destination, ...args) => {
+    if (!failed && String(source) === backupPath && String(destination).includes('.noteboard-delete-transactions')) {
+      failed = true;
+      throw Object.assign(new Error('Injected backup rename failure'), { code: 'EIO' });
+    }
+    return rename(source, destination, ...args);
+  });
+
+  await assert.rejects(deleteStoredBoard(dir, 'board-one', { baseRevision: 2 }), /Injected backup rename failure/);
+  assert.equal(failed, true);
+  assert.deepEqual(await fs.readFile(primaryPath), primaryBytes);
+  assert.deepEqual(await fs.readFile(backupPath), backupBytes);
+  assert.equal((await loadStoredBoards(dir))[0].title, 'Latest');
+  await assert.rejects(fs.stat(path.join(dir, '.noteboard-delete-transactions')), { code: 'ENOENT' });
+});
+
+test('startup restores a pending deletion after a process exits between source moves and commit', async t => {
+  const dir = await fixture(t), transactionId = '11111111-1111-4111-8111-111111111111';
+  const transactionDirectory = path.join(dir, '.noteboard-delete-transactions', `.delete-${transactionId}`);
+  const filesDirectory = path.join(transactionDirectory, 'files');
+  const bytes = Buffer.from(JSON.stringify(page(4, 'Recover pending delete')));
+  const sourceName = 'board-one.json';
+  const stagedName = `0-${Buffer.from(sourceName).toString('base64url')}`;
+  await fs.mkdir(filesDirectory, { recursive: true });
+  await fs.writeFile(path.join(filesDirectory, stagedName), bytes);
+  await fs.writeFile(path.join(transactionDirectory, 'manifest.json'), JSON.stringify({
+    version: 1, transactionId, boardId: 'board-one',
+    sources: [{ sourceName, stagedName, sha256: createHash('sha256').update(bytes).digest('hex'), preserveAsRetired: false }],
+  }));
+
+  assert.equal((await loadStoredBoards(dir))[0].title, 'Recover pending delete');
+  assert.deepEqual(await fs.readFile(boardFile(dir, 'board-one')), bytes);
+  await assert.rejects(fs.stat(path.join(dir, '.noteboard-delete-transactions')), { code: 'ENOENT' });
+});
+
+test('a committed deletion cleans staged recovery bytes without resurrecting the board', async t => {
+  const dir = await fixture(t), transactionId = '22222222-2222-4222-8222-222222222222';
+  const transactionDirectory = path.join(dir, '.noteboard-delete-transactions', `.delete-${transactionId}`);
+  const filesDirectory = path.join(transactionDirectory, 'files');
+  const bytes = Buffer.from(JSON.stringify(page(4, 'Already deleted')));
+  const sourceName = 'board-one.json';
+  const stagedName = `0-${Buffer.from(sourceName).toString('base64url')}`;
+  const manifestBytes = Buffer.from(JSON.stringify({
+    version: 1, transactionId, boardId: 'board-one',
+    sources: [{ sourceName, stagedName, sha256: createHash('sha256').update(bytes).digest('hex'), preserveAsRetired: false }],
+  }));
+  await fs.mkdir(filesDirectory, { recursive: true });
+  await fs.writeFile(path.join(filesDirectory, stagedName), bytes);
+  await fs.writeFile(path.join(transactionDirectory, 'manifest.json'), manifestBytes);
+  await fs.writeFile(path.join(transactionDirectory, 'committed'), JSON.stringify({
+    version: 1, transactionId, manifestSha256: createHash('sha256').update(manifestBytes).digest('hex'),
+  }));
+
+  assert.deepEqual(await loadStoredBoards(dir), []);
+  await assert.rejects(fs.stat(path.join(dir, '.noteboard-delete-transactions')), { code: 'ENOENT' });
+});
+
+test('failure writing the deletion commit marker restores the acknowledged board sources', async t => {
+  const dir = await fixture(t);
+  await saveStoredBoard(dir, page(1));
+  await saveStoredBoard(dir, page(2, 'Latest'));
+  const originalOpen = fs.open.bind(fs);
+  t.mock.method(fs, 'open', async (filePath, ...args) => {
+    if (String(filePath).includes('.noteboard-delete-transactions') && path.basename(String(filePath)) === 'committed')
+      throw Object.assign(new Error('Injected deletion commit failure'), { code: 'EIO' });
+    return originalOpen(filePath, ...args);
+  });
+
+  await assert.rejects(deleteStoredBoard(dir, 'board-one', { baseRevision: 2 }), /Injected deletion commit failure/);
+  assert.equal((await loadStoredBoards(dir))[0].title, 'Latest');
+  await assert.rejects(fs.stat(path.join(dir, '.noteboard-delete-transactions')), { code: 'ENOENT' });
+});
+
 test('backup-only aliases migrate and later delete without resurrection', async t => {
   const dir = await fixture(t), alias = path.join(dir, 'old-name.json');
   await fs.writeFile(`${alias}.bak`, JSON.stringify(page(3, 'Backup alias', 'page-sjtqz36')));
@@ -83,9 +217,7 @@ test('backup-only aliases migrate and later delete without resurrection', async 
   assert.deepEqual(await loadStoredBoards(dir), []);
 });
 
-test('case-folded canonical path collisions preserve legacy files and reject mutation on Windows', {
-  skip: process.platform !== 'win32',
-}, async t => {
+test('case-folded canonical path collisions preserve legacy files on every filesystem', async t => {
   const dir = await fixture(t);
   const sources = new Map([
     ['legacy-a.json', JSON.stringify(page(7, 'Uppercase', 'Page'))],

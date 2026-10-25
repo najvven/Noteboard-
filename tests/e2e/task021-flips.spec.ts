@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Page } from './test';
 import { createSimpleWorkbook } from '../../src/features/spreadsheet/simple-workbook';
 import { gridObjectSize } from '../../src/features/spreadsheet/grid-geometry';
 

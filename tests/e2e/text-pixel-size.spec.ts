@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from './test';
 
 const boardId = 'text-pixel-size-range';
 const boardTitle = 'Text pixel size range';

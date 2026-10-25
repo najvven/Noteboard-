@@ -477,6 +477,55 @@ test("atomic writes keep a readable backup and serialize queued writes", async (
   }
 });
 
+test("Windows replacement fallback preserves the previous backup when installing a new backup fails", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "noteboard-windows-backup-"));
+  try {
+    const filePath = path.join(directory, "state.json");
+    const backupPath = `${filePath}.bak`;
+    await atomicWriteJson(filePath, { version: 1 });
+    await atomicWriteJson(filePath, { version: 2 });
+    const fileSystem = Object.create(fs);
+    fileSystem.rename = async (source, destination, ...args) => {
+      if (destination === backupPath && String(source).endsWith(".tmp.bak"))
+        throw Object.assign(new Error("Sharing violation"), { code: "EBUSY" });
+      return fs.rename(source, destination, ...args);
+    };
+
+    await assert.rejects(atomicWriteJson(filePath, { version: 3 }, { fileSystem, platform: "win32" }), /Sharing violation/);
+    assert.deepEqual(await readJsonWithBackup(filePath), { version: 2 });
+    assert.deepEqual(JSON.parse(await fs.readFile(backupPath, "utf8")), { version: 1 });
+    assert.deepEqual((await fs.readdir(directory)).sort(), ["state.json", "state.json.bak"].sort());
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Windows replacement fallback installs the new file without discarding the old copy first", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "noteboard-windows-replace-"));
+  try {
+    const filePath = path.join(directory, "state.json");
+    const backupPath = `${filePath}.bak`;
+    await atomicWriteJson(filePath, { version: 1 });
+    await atomicWriteJson(filePath, { version: 2 });
+    let firstFailure = true;
+    const fileSystem = Object.create(fs);
+    fileSystem.rename = async (source, destination, ...args) => {
+      if (firstFailure && destination === backupPath && String(source).endsWith(".tmp.bak")) {
+        firstFailure = false;
+        throw Object.assign(new Error("Transient sharing violation"), { code: "EACCES" });
+      }
+      return fs.rename(source, destination, ...args);
+    };
+
+    await atomicWriteJson(filePath, { version: 3 }, { fileSystem, platform: "win32" });
+    assert.deepEqual(await readJsonWithBackup(filePath), { version: 3 });
+    assert.deepEqual(JSON.parse(await fs.readFile(backupPath, "utf8")), { version: 2 });
+    assert.deepEqual((await fs.readdir(directory)).sort(), ["state.json", "state.json.bak"].sort());
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("corrupt previous JSON cannot replace the last good backup without a schema validator", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "noteboard-corrupt-backup-"));
   const filePath = path.join(directory, "presets.json");

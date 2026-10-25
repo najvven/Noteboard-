@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { FiltersEngine } from '@ghostery/adblocker';
-import { loadBundledFilters, createWebFilterService, decodeFilterSnapshot, adBlockingResponse, addFilterCsp } from '../shared/web-filter-engine.js';
+import { loadBundledFilters, createWebFilterService, decodeFilterSnapshot, adBlockingResponse, addFilterCsp, downloadFilterSnapshot, MAX_FILTER_RESPONSE_BYTES } from '../shared/web-filter-engine.js';
 import { isolateScriptlet } from '../shared/electron-ad-cosmetics.js';
 
 const snapshot = await loadBundledFilters();
@@ -69,12 +69,46 @@ test('offline startup and failed updates retain verified bundled blocking', asyn
   assert.equal(blocked(adBlockingResponse(service.engine, { url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', resourceType: 'script' }, 'https://example.org')), true);
 });
 
+test('filter downloads reject oversized declared bodies before allocating them', async () => {
+  let bodyReads = 0;
+  await assert.rejects(() => downloadFilterSnapshot(async () => ({
+    ok: true,
+    headers: { get: name => name.toLowerCase() === 'content-length' ? String(MAX_FILTER_RESPONSE_BYTES + 1) : null },
+    body: { getReader: () => { bodyReads += 1; return { read: async () => ({ done: true }), releaseLock() {} }; } },
+  })), /Invalid filter download size/);
+  assert.equal(bodyReads, 0);
+});
+
+test('concurrent filter downloads share a total byte budget and cancel overflow', async () => {
+  let cancellations = 0;
+  let calls = 0;
+  await assert.rejects(() => downloadFilterSnapshot(async () => {
+    const index = calls++;
+    if (index === 1) await new Promise(resolve => setTimeout(resolve, 10));
+    return {
+      ok: true,
+      headers: { get: () => null },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4));
+          if (index === 0) controller.close();
+        },
+        cancel() { cancellations += 1; },
+      }),
+    };
+  }, { maxTotalBytes: 6 }), /Invalid filter download size/);
+  assert.ok(cancellations >= 1);
+});
+
 test('filter refresh is cached atomically and corrupted caches fall back to bundled lists', async () => {
   const folder = await fs.mkdtemp(path.join(os.tmpdir(), 'noteboard-filter-test-'));
   const cacheFile = path.join(folder, 'filters.json');
   try {
     const sources = new Map(await Promise.all(snapshot.manifest.sources.map(async (source, index) => [source.url, await fs.readFile(new URL(`../build/web-filters/sources/${index}-${new URL(source.url).pathname.split('/').pop()}`, import.meta.url))])));
-    const fetchImpl = async url => ({ ok: true, arrayBuffer: async () => sources.get(url) });
+    const fetchImpl = async url => {
+      const bytes=sources.get(url);
+      return {ok:true,headers:{get:name=>name.toLowerCase()==='content-length'?String(bytes.byteLength):null},body:new ReadableStream({start(controller){controller.enqueue(bytes);controller.close();}})};
+    };
     const service = await createWebFilterService({ cacheFile, fetchImpl });
     assert.equal(await service.refresh(true), true);
     const cached = JSON.parse(await fs.readFile(cacheFile, 'utf8'));

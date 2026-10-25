@@ -38,18 +38,10 @@ export function resolveWebRequestPolicy(details, settings, currentTopLevelUrl) {
   };
 }
 
-export function shouldRememberMainFrameUrl(details, decision) {
-  return (
-    details.resourceType === "mainFrame" &&
-    isAllowedEmbeddedWebUrl(details.url) &&
-    decision?.cancel !== true &&
-    !decision?.redirectURL
-  );
-}
-
 export const normalizeWebSessionSettings = (settings = {}) => ({
   topLevelUrl:
     typeof settings.topLevelUrl === "string" &&
+    /^https?:\/\//i.test(settings.topLevelUrl) &&
     isAllowedEmbeddedWebUrl(settings.topLevelUrl)
       ? settings.topLevelUrl
       : "",

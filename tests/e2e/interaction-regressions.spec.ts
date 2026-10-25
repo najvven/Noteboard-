@@ -1,4 +1,4 @@
-import {test,expect,type Page} from '@playwright/test';
+import {test,expect,type Page} from './test';
 
 const seed=(title:string,tool='select',elements:any[]=[],settings={})=>({id:title.toLowerCase().replace(/[^a-z0-9_-]+/g,'-'),title,width:1100,height:700,boardX:64,boardY:0,workspaceWidth:1500,workspaceHeight:1000,viewportCenterX:640,viewportCenterY:328,zoom:1,updatedAt:Date.now(),elements,editorSettings:{activeTool:tool,keepToolActive:true,enableObjectSnapping:false,smartGuidesEnabled:false,...settings}});
 const shape=(id:string,x:number,y:number,more={})=>({id,type:'rectangle',position:{x,y},size:{width:80,height:60},content:'',color:'#dbeafe',zIndex:1,...more});

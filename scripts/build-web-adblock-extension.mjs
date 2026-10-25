@@ -8,7 +8,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export async function buildWebAdblockExtension(outdir='dist/web-adblock-extension') {
   outdir=path.resolve(root,outdir);
   await fs.mkdir(outdir,{recursive:true});
-  await build({absWorkingDir:root,entryPoints:['scripts/web-adblock-extension/background.js'],outfile:path.join(outdir,'background.js'),bundle:true,platform:'browser',format:'iife',target:'chrome145'});
+  await build({absWorkingDir:root,entryPoints:{background:'scripts/web-adblock-extension/background.js','filter-worker':'scripts/web-adblock-extension/filter-worker.js'},outdir,bundle:true,platform:'browser',format:'iife',target:'chrome145'});
   await fs.copyFile(path.join(root,'scripts/web-adblock-extension/manifest.json'),path.join(outdir,'manifest.json'));
 }
 

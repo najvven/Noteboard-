@@ -69,6 +69,9 @@ export function getSectionVisiblePolygons(element: BoardElement, elements: reado
   let polygons = [base];
   for (const section of elements) {
     if (section.type !== 'section' || section.id === element.id || !hierarchy.isVisible(section.id, true)) continue;
+    // A child section belongs to its parent's contents; it must not cut a hole
+    // in the parent's own visible geometry.
+    if (hierarchy.isDescendantOf(section.id, element.id)) continue;
     const boundary = elementPolygon(section);
     if (parents.has(section.id)) {
       polygons = polygons.map(p => intersect(p, boundary)).filter(p => p.length > 2);
@@ -77,6 +80,17 @@ export function getSectionVisiblePolygons(element: BoardElement, elements: reado
     }
   }
   return polygons;
+}
+
+export function isPointInVisibleElementArea(
+  element: BoardElement,
+  elements: readonly BoardElement[],
+  point: Position,
+  base = elementPolygon(element),
+  sceneHierarchy?: ElementHierarchy,
+) {
+  return getSectionVisiblePolygons(element, elements, base, sceneHierarchy)
+    .some(polygon => pointInPolygon(point, polygon));
 }
 
 export function getSectionClipPath(element: BoardElement, elements: readonly BoardElement[], base?: Polygon, sceneHierarchy?: ElementHierarchy): string {

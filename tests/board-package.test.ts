@@ -103,6 +103,52 @@ test("export rejects an asset larger than the import asset budget", async () => 
   await assert.rejects(() => createBoardArchive(source), /Board asset is too large/);
 });
 
+test("board export rejects malformed or noncanonical base64 instead of normalizing it", async () => {
+  for (const payload of ["AQ!ID", "AQI", "AB==", "AQ=ID"]) {
+    const source = { ...basePage(), updatedAt: Date.now(), isPinned: false };
+    source.elements[0].content = `data:image/png;base64,${payload}`;
+    await assert.rejects(() => createBoardArchive(source), /base64/);
+  }
+});
+
+test("shared asset restoration checks the resulting JSON size before duplicating base64", async () => {
+  const source = {
+    ...basePage(),
+    elements: Array.from({ length: 40 }, (_, index) => ({
+      ...basePage().elements[0],
+      id: `media-${index}`,
+      position: { x: index, y: 0 },
+      zIndex: index + 1,
+    })),
+  };
+  const zip = new JSZip();
+  zip.file("board.json", JSON.stringify(source));
+  zip.file("assets/media-1.png", new Uint8Array(2048));
+  const archive = await zip.generateAsync({ type: "uint8array" });
+  const baseJsonSize = new TextEncoder().encode(JSON.stringify(source)).byteLength;
+  await assert.rejects(
+    () => readBoardArchive(archive, {
+      limits: {
+        boardFileBytes: 1_000_000,
+        expandedArchiveBytes: 1_000_000,
+        boardJsonBytes: baseJsonSize + 20_000,
+        assetBytes: 4096,
+      },
+    }),
+    /Restored board JSON is too large/,
+  );
+});
+
+test("asset path MIME wins over stale metadata across archive round trips", async () => {
+  const source = { ...basePage(), updatedAt: Date.now(), isPinned: false };
+  source.elements[0].content = "data:image/png;base64,AQIDBA==";
+  source.elements[0].mediaMime = "text/plain";
+  const imported = await readBoardArchive(await createBoardArchive(source));
+  assert.ok(!Array.isArray(imported));
+  assert.equal(imported.elements[0].mediaMime, "image/png");
+  assert.match(imported.elements[0].content, /^data:image\/png;base64,/);
+});
+
 test("literal assets paths in non-media element content remain text", async () => {
   const page = {
     ...basePage(),

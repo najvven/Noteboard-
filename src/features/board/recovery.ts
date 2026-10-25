@@ -147,7 +147,7 @@ export const clearRecoveryEntry = (storage: Storage, entry: BoardRecoveryEntry) 
   }
 };
 
-const stableValue = (value: unknown): string => {
+export const stableValue = (value: unknown): string => {
   if (value === undefined) return "undefined";
   if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
   if (value && typeof value === "object") {

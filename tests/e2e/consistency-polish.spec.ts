@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Page, type APIRequestContext } from './test';
 
 async function openFixture(page: Page, request: APIRequestContext, elements: unknown[]) {
   for (const item of await (await request.get('/api/pages')).json()) await deleteFixtureBoard(request, `/api/pages/${item.id}`);

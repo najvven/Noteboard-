@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Page, type APIRequestContext } from './test';
 import fs from 'node:fs/promises';
 import JSZip from 'jszip';
 
@@ -102,6 +102,37 @@ test('Save as New Board reuses the same board after the disk write loses its res
   expect(afterRetry.map((item:any)=>item.id)).toEqual([originalId]);
 });
 
+test('a changed document resolves an uncertain Save as before saving the newer snapshot', async ({page,request}) => {
+  await open(page,request);
+  await page.getByRole('button',{name:'Save',exact:true}).click();
+  const firstDialog=page.getByRole('dialog',{name:'Save as',exact:true});
+  await firstDialog.getByLabel('Save as name').fill('Updated retry');
+  let loseAcknowledgment=true;
+  await page.route('**/api/pages/*',async route=>{
+    if(loseAcknowledgment&&route.request().method()==='PUT'&&route.request().postDataJSON()?.title==='Updated retry'){
+      loseAcknowledgment=false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await firstDialog.getByRole('button',{name:'Save as New Board'}).click();
+  await expect(firstDialog.getByRole('alert')).toContainText('Could not save');
+  await firstDialog.getByRole('button',{name:'Close save dialog'}).click();
+  await page.locator('[data-board-element-editor-id="text"]').fill('Latest content after the uncertain save');
+  await page.getByRole('button',{name:'Save',exact:true}).click();
+  const secondDialog=page.getByRole('dialog',{name:'Save as',exact:true});
+  await secondDialog.getByLabel('Save as name').fill('Updated retry');
+  await secondDialog.getByRole('button',{name:'Save as New Board'}).click();
+  await expect(secondDialog.getByRole('status')).toContainText('New board saved');
+  const copies=(await(await request.get('/api/pages')).json()).filter((item:any)=>item.title==='Updated retry');
+  expect(copies).toHaveLength(2);
+  expect(new Set(copies.map((item:any)=>item.id)).size).toBe(2);
+  expect(copies.some((item:any)=>item.elements.some((element:any)=>String(element.content).includes('Original words')))).toBe(true);
+  expect(copies.some((item:any)=>item.elements.some((element:any)=>String(element.content).includes('Latest content after the uncertain save')))).toBe(true);
+});
+
 test('Save board preset stays open and retries the same template after a lost response', async ({page,request}) => {
   await open(page,request);
   await page.locator('[data-toolbar-item="more"] > button').click();
@@ -126,11 +157,13 @@ test('Save board preset stays open and retries the same template after a lost re
   const afterLostAck=(await(await request.get('/api/presets')).json()).filter((item:any)=>item.name==='Uncertain preset');
   expect(afterLostAck).toHaveLength(1);
   const originalId=afterLostAck[0].id;
+  await request.patch('/api/presets',{data:{type:'rename',id:originalId,name:'Renamed in another window'}});
   await page.unroute('**/api/presets');
   await page.getByRole('button',{name:'Retry Save Preset',exact:true}).click();
   await expect(page.getByRole('button',{name:'Retry Save Preset',exact:true})).toHaveCount(0);
-  const afterRetry=(await(await request.get('/api/presets')).json()).filter((item:any)=>item.name==='Uncertain preset');
-  expect(afterRetry.map((item:any)=>item.id)).toEqual([originalId]);
+  const afterRetry=(await(await request.get('/api/presets')).json()).filter((item:any)=>item.id===originalId);
+  expect(afterRetry).toHaveLength(1);
+  expect(afterRetry[0].name).toBe('Renamed in another window');
 });
 
 test('a template removed in another process does not block later template changes', async ({page,request}) => {

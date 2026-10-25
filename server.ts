@@ -113,13 +113,17 @@ async function startServer() {
   // Individual Page Update (for real-time saving)
   app.put("/api/pages/:id", async (req, res) => {
     try {
+      // The resource precondition is part of the HTTP write contract and is
+      // checked before body/schema details so missing If-Match consistently
+      // returns 428 rather than leaking validation-order differences.
+      const baseRevision = requestBaseRevision(req);
       const page = req.body;
       try { assertValidBoard(page); }
       catch (error) { throw boardWriteError('INVALID_BOARD_DATA', (error as Error).message); }
       try {
         if (normalizeBoardId(req.params.id) !== normalizeBoardId(page.id)) throw new Error('Board id does not match the route');
       } catch (error) { throw boardWriteError('INVALID_BOARD_DATA', (error as Error).message); }
-      await saveStoredBoard(BOARDS_DIR, page, { baseRevision: requestBaseRevision(req) });
+      await saveStoredBoard(BOARDS_DIR, page, { baseRevision });
       res.json({ success: true });
     } catch (err) {
       const failure = boardWriteFailure(err);

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from './test';
 import { readBoardClipboard } from '../../src/features/board/clipboard';
 
 const board = (id: string, tool = 'select', elements: any[] = []) => ({

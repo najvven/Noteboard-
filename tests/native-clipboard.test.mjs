@@ -31,6 +31,9 @@ test("native clipboard keeps text, HTML, image, and readable files when another 
     assert.deepEqual(result.files, [
       { name: "valid.png", type: "image/png", base64: "AQIDBA==" },
     ]);
+    assert.deepEqual(result.fileErrors.map(({ name, code }) => ({ name, code })), [
+      { name: 'missing.png', code: 'FILE_MISSING' },
+    ]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -49,6 +52,29 @@ test('Explorer filenames skip oversized and unsupported files while keeping late
   });
   assert.equal(result.image,'');
   assert.deepEqual(result.files,[{name:'good.png',type:'image/png',base64:'CQgH'}]);
+  assert.deepEqual(result.fileErrors.map(({ name, code }) => ({ name, code })), [
+    { name: 'huge.png', code: 'FILE_TOO_LARGE' },
+    { name: 'unknown.bin', code: 'UNSUPPORTED_FILE_TYPE' },
+  ]);
+});
+
+test('clipboard checks the file type before opening an OS clipboard path', async () => {
+  let opened = false;
+  const clipboard = {
+    readText: () => 'keep this text', readHTML: () => '',
+    readImage: () => ({ isEmpty: () => true }),
+    availableFormats: () => ['FileNameW'],
+    readBuffer: () => Buffer.from('special.png\0', 'utf16le'),
+  };
+  const fileSystem = {
+    stat: async () => ({ isFile: () => false, size: 0 }),
+    open: async () => { opened = true; throw Error('A non-file should not be opened.'); },
+  };
+  const result = await readNativeClipboard(clipboard, { fileSystem });
+  assert.equal(opened, false);
+  assert.equal(result.text, 'keep this text');
+  assert.equal(result.files.length, 0);
+  assert.deepEqual(result.fileErrors.map(({ code }) => code), ['NOT_A_REGULAR_FILE']);
 });
 
 test('native editable-object copy validates the document and safely encodes its HTML payload',()=>{

@@ -1,4 +1,4 @@
-import {test,expect} from '@playwright/test';
+import {test,expect} from './test';
 import ExcelJS from 'exceljs';
 import fs from 'node:fs/promises';
 import {createWorkbookDocument} from '../../src/features/spreadsheet/workbook';

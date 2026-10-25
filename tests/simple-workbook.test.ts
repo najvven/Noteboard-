@@ -8,7 +8,7 @@ import {
   parseWorkbookDocument,
   withWorkbookCellSize,
 } from "../src/features/spreadsheet/workbook";
-import { gridObjectSize } from "../src/features/spreadsheet/grid-geometry";
+import { fitSimpleGridSize, gridObjectSize } from "../src/features/spreadsheet/grid-geometry";
 
 test("finite sheets contain exactly their displayed rows/columns and explicit headers", () => {
   const doc = createSimpleWorkbook(348, 142, { width: 100, height: 24 });
@@ -46,4 +46,15 @@ test("shrinking a finite sheet trims outside cells/merges while the original und
   assert.deepEqual(resized.workbook.sheets!["sheet-1"].mergeData, [
     { startRow: 0, endRow: 1, startColumn: 0, endColumn: 1 },
   ]);
+});
+
+test("simple placement floors whole cells within board bounds and rejects sub-cell surfaces",()=>{
+  assert.deepEqual(fitSimpleGridSize(248,46,{width:100,height:24}),{
+    width:248,height:46,rows:1,columns:2,
+  });
+  assert.deepEqual(fitSimpleGridSize(247,46,{width:100,height:24}),{
+    width:148,height:46,rows:1,columns:1,
+  });
+  assert.equal(fitSimpleGridSize(147,46,{width:100,height:24}),null);
+  assert.equal(fitSimpleGridSize(248,45,{width:100,height:24}),null);
 });

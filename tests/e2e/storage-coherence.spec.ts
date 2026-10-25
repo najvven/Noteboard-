@@ -1,5 +1,5 @@
 import { deleteFixtureBoard, putFixtureBoard } from './fixture-storage';
-import { test, expect, type Locator } from '@playwright/test';
+import { test, expect, type Locator } from './test';
 
 async function selectImportFile(input: Locator, file: {name: string; mimeType: string; buffer: Buffer}) {
   await input.evaluate((element, payload) => {
@@ -111,7 +111,7 @@ test('a failed first create keeps its settings and can be retried into a normall
   const dialog = page.getByRole('dialog', { name: 'Create New Noteboard', exact: true });
   await dialog.locator('#new-noteboard-name').fill('Retried creation');
   await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('Could not create');
+  await expect(page.getByRole('alert').filter({hasText:'Could not create'})).toContainText('Could not create');
   await expect(dialog).toBeVisible();
   await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
   await expect(page.locator('[data-board-root]')).toBeVisible();
@@ -119,6 +119,70 @@ test('a failed first create keeps its settings and can be retried into a normall
   await expect(page.getByRole('button', { name: 'Open Retried creation', exact: true })).toBeVisible();
   const stored = (await (await request.get('/api/pages')).json()).find((p: any) => p.title === 'Retried creation');
   expect(stored).toBeTruthy();
+});
+
+test('a create whose ACK is lost retries the same preset-board candidate exactly once', async ({ page, request }) => {
+  const pages = await (await request.get('/api/pages')).json();
+  for (const board of pages) await deleteFixtureBoard(request, `/api/pages/${board.id}`);
+  let loseAcknowledgment = true;
+  await page.route('**/api/pages/page-*', async route => {
+    if (loseAcknowledgment && route.request().method() === 'PUT' &&
+        route.request().postDataJSON()?.title === 'Lost acknowledgment create') {
+      loseAcknowledgment = false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New Noteboard', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create New Noteboard', exact: true });
+  await dialog.locator('#new-noteboard-name').fill('Lost acknowledgment create');
+  const firstRequest = page.waitForRequest(request => request.method() === 'PUT' &&
+    request.url().includes('/api/pages/page-') && request.postDataJSON()?.title === 'Lost acknowledgment create');
+  await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
+  const first = await firstRequest;
+  const originalId = first.url().split('/').pop();
+  await expect(page.getByRole('alert')).toContainText('Could not create');
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
+  await expect(page.locator('[data-board-root]')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const stored = (await (await request.get('/api/pages')).json()).filter((board: any) => board.title === 'Lost acknowledgment create');
+  expect(stored).toHaveLength(1);
+  expect(stored[0].id).toBe(originalId);
+});
+
+test('a changed create form resolves the earlier uncertain create before saving the new intent', async ({ page, request }) => {
+  const pages = await (await request.get('/api/pages')).json();
+  for (const board of pages) await deleteFixtureBoard(request, `/api/pages/${board.id}`);
+  let loseAcknowledgment = true;
+  await page.route('**/api/pages/page-*', async route => {
+    if (loseAcknowledgment && route.request().method() === 'PUT' &&
+        route.request().postDataJSON()?.title === 'Earlier board') {
+      loseAcknowledgment = false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'New Noteboard', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Create New Noteboard', exact: true });
+  const name = dialog.locator('#new-noteboard-name');
+  await name.fill('Earlier board');
+  await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Could not create');
+  await name.fill('Newer board');
+  await dialog.getByRole('button', { name: 'Create Noteboard', exact: true }).click();
+  await expect(page.locator('[data-board-root]')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const stored = (await (await request.get('/api/pages')).json()).filter((board: any) =>
+    ['Earlier board', 'Newer board'].includes(board.title));
+  expect(stored.map((board: any) => board.title).sort()).toEqual(['Earlier board', 'Newer board']);
+  expect(new Set(stored.map((board: any) => board.id)).size).toBe(2);
 });
 
 test('a failed first import keeps Home usable and retries the original file', async ({ page }) => {
@@ -136,7 +200,7 @@ test('a failed first import keeps Home usable and retries the original file', as
   await page.goto('/');
   const input = page.locator('input[type="file"]');
   await selectImportFile(input,file);
-  await expect(page.getByRole('alert')).toContainText('Could not import');
+  await expect(page.getByRole('alert').filter({hasText:'Could not import'})).toContainText('Could not import');
   await expect(page.locator('[data-board-root]')).toHaveCount(0);
   await selectImportFile(input,file);
   await expect(page.locator('[data-board-root]')).toBeVisible();
@@ -165,7 +229,7 @@ test('an import whose response is lost retries the same independent board copy',
   await page.goto('/');
   const input = page.locator('input[type="file"]');
   await selectImportFile(input,file);
-  await expect(page.getByRole('alert')).toContainText('Could not import');
+  await expect(page.getByRole('alert').filter({hasText:'Could not import'})).toContainText('Could not import');
   const afterLostAck = (await (await request.get('/api/pages')).json()).filter((board: any) => board.title === 'Lost acknowledgment import');
   expect(afterLostAck).toHaveLength(1);
   const originalId = afterLostAck[0].id;
@@ -176,6 +240,68 @@ test('an import whose response is lost retries the same independent board copy',
   await expect(page.getByRole('button', { name: 'Open Lost acknowledgment import', exact: true })).toHaveCount(1);
   const afterRetry = (await (await request.get('/api/pages')).json()).filter((board: any) => board.title === 'Lost acknowledgment import');
   expect(afterRetry.map((board: any) => board.id)).toEqual([originalId]);
+});
+
+test('different files with identical names and metadata do not reuse an earlier pending import', async ({ page, request }) => {
+  const pages = await (await request.get('/api/pages')).json();
+  for (const board of pages) await deleteFixtureBoard(request, `/api/pages/${board.id}`);
+  let failFirst = true;
+  await page.route('**/api/pages/page-*', route => {
+    if (failFirst && route.request().method() === 'PUT' && route.request().postDataJSON()?.title === 'Board A') {
+      failFirst = false;
+      return route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"Temporary storage failure"}' });
+    }
+    return route.continue();
+  });
+  const makeFile = (title: string, id: string) => ({
+    name: 'same-name.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+      id, title, width: 800, height: 600, updatedAt: 1, elements: [],
+    })),
+  });
+  const first = makeFile('Board A', 'source-a'), second = makeFile('Board B', 'source-b');
+  expect(first.buffer.length).toBe(second.buffer.length);
+  await page.goto('/');
+  const input = page.locator('input[type="file"]');
+  await selectImportFile(input, first);
+  await expect(page.locator('[data-pending-import]')).toContainText('same-name.json');
+  await selectImportFile(input, second);
+  await expect(page.locator('[data-board-root]')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const imported = (await (await request.get('/api/pages')).json()).filter((board: any) =>
+    ['Board A', 'Board B'].includes(board.title));
+  expect(imported.map((board: any) => board.title).sort()).toEqual(['Board A', 'Board B']);
+  expect(new Set(imported.map((board: any) => board.id)).size).toBe(2);
+});
+
+test('a new clipboard import resolves the previous uncertain import and reports its state', async ({ page, request }) => {
+  const pages = await (await request.get('/api/pages')).json();
+  for (const board of pages) await deleteFixtureBoard(request, `/api/pages/${board.id}`);
+  let failFirst = true;
+  await page.route('**/api/pages/page-*', route => {
+    if (failFirst && route.request().method() === 'PUT' && route.request().postDataJSON()?.title === 'Clipboard A') {
+      failFirst = false;
+      return route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"Temporary storage failure"}' });
+    }
+    return route.continue();
+  });
+  const pasteBoard = async (title: string, id: string) => page.evaluate(({ title, id }) => {
+    const data = new DataTransfer();
+    data.setData('text', JSON.stringify({ id, title, width: 800, height: 600, updatedAt: 1, elements: [] }));
+    const event = new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true });
+    document.body.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, { title, id });
+  await page.goto('/');
+  await page.getByRole('button', {name:'New Noteboard',exact:true}).waitFor();
+  expect(await pasteBoard('Clipboard A', 'source-a')).toBe(true);
+  await expect(page.locator('[data-pending-import]')).toContainText('Clipboard board');
+  expect(await pasteBoard('Clipboard B', 'source-b')).toBe(true);
+  await expect(page.locator('[data-board-root]')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  const imported = (await (await request.get('/api/pages')).json()).filter((board: any) =>
+    ['Clipboard A', 'Clipboard B'].includes(board.title));
+  expect(imported.map((board: any) => board.title).sort()).toEqual(['Clipboard A', 'Clipboard B']);
+  expect(new Set(imported.map((board: any) => board.id)).size).toBe(2);
 });
 
 test('a lost acknowledgment and immediate reload keep the latest draft without a self-conflict', async ({ page, request }) => {

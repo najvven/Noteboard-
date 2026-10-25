@@ -876,7 +876,7 @@ function applyTextLineViewport(editor: HTMLElement, layout: TextLineLayout) {
     if (row.listItemPath) listPaths.set(row.listItemPath.join('.'), row.listItemPath);
   });
   listPaths.forEach((path) => {
-    const item = resolveNodePath(editor, path);
+    const item = resolveTextLayoutNodePath(editor, path);
     if (!(item instanceof HTMLElement) || item.tagName !== 'LI') return;
     const itemRows = layout.rows.filter((row) => row.listItemPath?.length === path.length &&
       row.listItemPath.every((index, position) => index === path[position]),
@@ -886,7 +886,7 @@ function applyTextLineViewport(editor: HTMLElement, layout: TextLineLayout) {
     }
   });
   const overflowTargets = layout.overflowText.flatMap(({ path, offset }) => {
-    const node = resolveNodePath(editor, path);
+    const node = resolveTextLayoutNodePath(editor, path);
     return node instanceof Text && offset >= 0 && offset < node.length
       ? [{ node, offset }]
       : [];
@@ -960,7 +960,7 @@ function getNodePath(root: Node, node: Node) {
   return current === root ? path : null;
 }
 
-function resolveNodePath(root: Node, path: number[]) {
+function resolveTextLayoutNodePath(root: Node, path: number[]) {
   let current: Node = root;
   for (const index of path) {
     const child = current.childNodes[index];
@@ -974,8 +974,8 @@ function cloneRangeIntoEditor(source: HTMLElement, clone: HTMLElement, range: Ra
   const startPath = getNodePath(source, range.startContainer);
   const endPath = getNodePath(source, range.endContainer);
   if (!startPath || !endPath) return null;
-  const start = resolveNodePath(clone, startPath);
-  const end = resolveNodePath(clone, endPath);
+  const start = resolveTextLayoutNodePath(clone, startPath);
+  const end = resolveTextLayoutNodePath(clone, endPath);
   if (!start || !end) return null;
   const candidate = document.createRange();
   try {
@@ -1355,7 +1355,100 @@ export function fontSizeTextRange(editor: HTMLElement, range: Range, fontSizePx:
   return styleTextRange(editor, range, 'fontSize', `${fontSizePx}px`);
 }
 
-export function getTextSelectionOffsets(editor: HTMLElement) {
+export interface TextSelectionOffsets {
+  start: number;
+  end: number;
+  anchorPath?: number[];
+  anchorOffset?: number;
+  anchorNodeType?: number;
+  anchorSignature?: string;
+  focusPath?: number[];
+  focusOffset?: number;
+  focusNodeType?: number;
+  focusSignature?: string;
+  backward?: boolean;
+}
+
+function nodePath(root: Node, node: Node): number[] | null {
+  const path: number[] = [];
+  let current: Node | null = node;
+  while (current && current !== root) {
+    const parent: Node | null = current.parentNode;
+    if (!parent) return null;
+    const index = Array.prototype.indexOf.call(parent.childNodes, current) as number;
+    if (index < 0) return null;
+    path.push(index);
+    current = parent;
+  }
+  return current === root ? path.reverse() : null;
+}
+
+function resolveNodePath(root: Node, path: readonly number[] | undefined, nodeType: number | undefined) {
+  if (!path) return null;
+  let node = root;
+  for (const index of path) {
+    if (index < 0 || index >= node.childNodes.length) return null;
+    node = node.childNodes[index];
+  }
+  return node.nodeType === nodeType ? node : null;
+}
+
+function nodeSignature(node: Node | null, root: Node) {
+  if (!node || node === root) return node === root ? "root" : undefined;
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? "";
+    return `text:${text.length}:${text.slice(0, 24)}:${text.slice(-24)}`;
+  }
+  if (node instanceof Element) {
+    const text = node.textContent ?? "";
+    return `element:${node.tagName}:${text.length}:${text.slice(0, 24)}:${text.slice(-24)}`;
+  }
+  return `node:${node.nodeType}`;
+}
+
+function resolveFlatTextPosition(editor: HTMLElement, offset: number, affinity: "forward" | "backward") {
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let consumed = 0;
+  let last: Text | null = null;
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    const next = consumed + node.length;
+    if (offset < next) return { node, offset: Math.max(0, offset - consumed) };
+    if (offset === next) {
+      if (affinity === "forward") {
+        const following = walker.nextNode() as Text | null;
+        if (following) return { node: following, offset: 0 };
+      }
+      return { node, offset: node.length };
+    }
+    consumed = next;
+    last = node;
+  }
+  return last ? { node: last, offset: last.length } : { node: editor, offset: 0 };
+}
+
+function setSelectionEndpoints(
+  selection: Selection,
+  anchor: { node: Node; offset: number },
+  focus: { node: Node; offset: number },
+) {
+  selection.removeAllRanges();
+  if (typeof selection.setBaseAndExtent === "function") {
+    selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+    return selection.rangeCount ? selection.getRangeAt(0) : null;
+  }
+  const range = document.createRange();
+  try {
+    range.setStart(anchor.node, anchor.offset);
+    range.setEnd(focus.node, focus.offset);
+  } catch {
+    range.setStart(focus.node, focus.offset);
+    range.setEnd(anchor.node, anchor.offset);
+  }
+  selection.addRange(range);
+  return range;
+}
+
+export function getTextSelectionOffsets(editor: HTMLElement): TextSelectionOffsets | null {
   const selection = window.getSelection();
   if (!selection?.rangeCount) return null;
   const range = selection.getRangeAt(0);
@@ -1364,29 +1457,40 @@ export function getTextSelectionOffsets(editor: HTMLElement) {
   prefix.selectNodeContents(editor);
   prefix.setEnd(range.startContainer, range.startOffset);
   const start = prefix.toString().length;
-  return { start, end: start + range.toString().length };
+  const anchorPath = selection.anchorNode ? nodePath(editor, selection.anchorNode) : null;
+  const focusPath = selection.focusNode ? nodePath(editor, selection.focusNode) : null;
+  const backward = range.startContainer !== selection.anchorNode || range.startOffset !== selection.anchorOffset;
+  return {
+    start,
+    end: start + range.toString().length,
+    ...(anchorPath ? { anchorPath, anchorOffset: selection.anchorOffset, anchorNodeType: selection.anchorNode?.nodeType } : {}),
+    ...(focusPath ? { focusPath, focusOffset: selection.focusOffset, focusNodeType: selection.focusNode?.nodeType } : {}),
+    anchorSignature: nodeSignature(selection.anchorNode, editor),
+    focusSignature: nodeSignature(selection.focusNode, editor),
+    backward,
+  };
 }
 
-export function restoreTextSelection(editor: HTMLElement, offsets: { start: number; end: number }) {
-  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-  const range = document.createRange();
-  let count = 0;
-  let started = false;
-  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
-    const next = count + node.length;
-    if (!started && offsets.start <= next) {
-      range.setStart(node, Math.max(0, offsets.start - count));
-      started = true;
-    }
-    if (started && offsets.end <= next) {
-      range.setEnd(node, Math.max(0, offsets.end - count));
-      window.getSelection()?.removeAllRanges();
-      window.getSelection()?.addRange(range);
-      return range;
-    }
-    count = next;
+export function restoreTextSelection(editor: HTMLElement, offsets: TextSelectionOffsets) {
+  const selection = window.getSelection();
+  if (!selection) return null;
+  const anchorNode = resolveNodePath(editor, offsets.anchorPath, offsets.anchorNodeType);
+  const focusNode = resolveNodePath(editor, offsets.focusPath, offsets.focusNodeType);
+  if (anchorNode && focusNode &&
+      nodeSignature(anchorNode, editor) === offsets.anchorSignature &&
+      nodeSignature(focusNode, editor) === offsets.focusSignature) {
+    const anchorOffset = Math.min(offsets.anchorOffset ?? 0, anchorNode.nodeType === Node.TEXT_NODE ? (anchorNode as Text).length : anchorNode.childNodes.length);
+    const focusOffset = Math.min(offsets.focusOffset ?? 0, focusNode.nodeType === Node.TEXT_NODE ? (focusNode as Text).length : focusNode.childNodes.length);
+    return setSelectionEndpoints(selection, { node: anchorNode, offset: anchorOffset }, { node: focusNode, offset: focusOffset });
   }
-  return null;
+
+  const start = resolveFlatTextPosition(editor, offsets.start, "forward");
+  const end = offsets.start === offsets.end
+    ? start
+    : resolveFlatTextPosition(editor, offsets.end, "backward");
+  return offsets.backward
+    ? setSelectionEndpoints(selection, end, start)
+    : setSelectionEndpoints(selection, start, end);
 }
 
 /** Sanitization must not throw away a caret or selection inside edited markup. */

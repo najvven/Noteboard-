@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from './test';
 import sharp from 'sharp';
 
 const boardId = 'text-line-capacity';

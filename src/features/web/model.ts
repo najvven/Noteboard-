@@ -3,9 +3,12 @@ export const normalizeWebUrl = (value?: string) => {
   if (!trimmed) return "";
   if (trimmed.toLowerCase() === "about:blank") return "about:blank";
 
-  const candidate = /^[a-z][a-z\d+.-]*:/i.test(trimmed)
-    ? trimmed
-    : `https://${trimmed}`;
+  const hostWithPort = /^(?:[a-z\d-]+(?:\.[a-z\d-]+)*|\[[\da-f:]+\]):\d+(?:[/?#]|$)/i.test(trimmed);
+  const candidate = hostWithPort
+    ? `https://${trimmed}`
+    : /^[a-z][a-z\d+.-]*:/i.test(trimmed)
+      ? trimmed
+      : `https://${trimmed}`;
   try {
     const parsed = new URL(candidate);
     if (

@@ -1,6 +1,6 @@
 import type { BoardElement, Position, Size } from "../../types";
 import { createElementHierarchy } from "./element-hierarchy";
-import { elementPolygon, pointInPolygon } from "./section-clipping";
+import { resolveElementBoardOwner } from "./board-surfaces";
 
 export interface MainBoardGeometry {
   size: Size;
@@ -13,32 +13,11 @@ export function boardMemberIds(
   mainSize: Size,
 ) {
   const hierarchy = createElementHierarchy(elements);
-  const boards = elements
-    .filter((element) => element.type === "board")
-    .sort((a, b) => b.zIndex - a.zIndex);
   return new Set(
     elements
       .filter((element) => {
         if (element.type === "board" || element.type === "layer") return false;
-        const parent = hierarchy
-          .ancestors(element.id)
-          .slice(1)
-          .find((ancestor) => ancestor.type === "board");
-        if (parent) return parent.id === boardId;
-        const point = {
-          x: element.position.x + (element.size?.width ?? 100) / 2,
-          y: element.position.y + (element.size?.height ?? 40) / 2,
-        };
-        const owner = boards.find((board) =>
-          pointInPolygon(point, elementPolygon(board)),
-        );
-        return owner
-          ? owner.id === boardId
-          : boardId === "main-board" &&
-              point.x >= 0 &&
-              point.y >= 0 &&
-              point.x <= mainSize.width &&
-              point.y <= mainSize.height;
+        return resolveElementBoardOwner(element, elements, mainSize, hierarchy)?.id === boardId;
       })
       .map((element) => element.id),
   );

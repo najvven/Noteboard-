@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from './test';
 import os from 'node:os';
 import path from 'node:path';
 

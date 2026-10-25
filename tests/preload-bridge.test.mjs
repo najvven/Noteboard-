@@ -29,9 +29,16 @@ test("preload exposes the narrow NoteBoard bridge without Node runtime globals",
   };
 
   vm.runInNewContext(preloadSource, context, { filename: "preload.cjs" });
-
+  const assertNarrowExposure = () => {
+    assert.deepEqual([...exposed.keys()], ["noteboardAPI"]);
+    assert.equal(typeof exposed.get("noteboardAPI")?.configureWebSession, "function");
+    assert.equal(typeof exposed.get("noteboardAPI")?.invoke, "undefined");
+  };
   assert.equal(exposed.has("process"), false);
-  assert.equal(typeof exposed.get("noteboardAPI")?.configureWebSession, "function");
-  assert.equal("ipcRenderer" in exposed, false);
-  assert.equal("require" in exposed, false);
+  assertNarrowExposure();
+  exposed.set("require", () => {});
+  assert.throws(assertNarrowExposure);
+  exposed.delete("require");
+  exposed.set("ipcRenderer", ipcRenderer);
+  assert.throws(assertNarrowExposure);
 });

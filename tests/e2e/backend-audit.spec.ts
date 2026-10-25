@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 
 test('invalid bulk imports cannot partially replace an existing board', async ({request}) => {
   const original = {id:'bulk-audit',title:'Original',width:800,height:600,elements:[],updatedAt:1};

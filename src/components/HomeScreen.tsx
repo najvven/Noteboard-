@@ -8,6 +8,7 @@ import { filterAndSortPages } from '../features/home/page-search';
 import {
   BoardPackageCancelledError,
   downloadBoardArchive,
+  fingerprintBoardText,
   readBoardPackageFile,
 } from '../features/board/board-package';
 import {
@@ -23,7 +24,7 @@ interface Props {
   onRenamePage: (id: string, name: string) => void;
   onTogglePin: (id: string) => void;
   onMovePage: (sourceId: string, targetId: string) => void;
-  onImportPage: (page: Page) => Promise<void>;
+  onImportPage: (page: Page, options?: { openAfterImport?: boolean }) => Promise<void>;
   onRefreshPages: () => Promise<void>;
   globalBrightness: number;
   setGlobalBrightness: (val: number) => void;
@@ -39,7 +40,8 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
   const [fileOperation, setFileOperation] = useState<{ label: string; progress: number } | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const cancelFileOperationRef = useRef(false);
-  const pendingImportRef = useRef<{ key: string; page: Page } | null>(null);
+  const pendingImportRef = useRef<{ key: string; label: string; page: Page } | null>(null);
+  const [pendingImportState, setPendingImportState] = useState<{ label: string; message: string } | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const settingsDialogRef = useRef<HTMLDivElement>(null);
 
@@ -67,19 +69,66 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
     };
   }, [showSettingsMenu]);
 
-  const importPageWithRetry = async (key: string, createPage: () => Promise<Page>) => {
+  const importPageWithRetry = async (key: string, label: string, createPage: () => Promise<Page>) => {
     let pending = pendingImportRef.current;
     if (pending && pending.key !== key) {
-      throw new Error('Retry the previous board import before starting another one.');
+      try {
+        await onImportPage(pending.page, { openAfterImport: false });
+        if (pendingImportRef.current?.page === pending.page) pendingImportRef.current = null;
+        setPendingImportState(null);
+      } catch (error) {
+        const detail = error instanceof Error ? ` ${error.message}` : '';
+        setPendingImportState({
+          label: pending.label,
+          message: `The previous import is still unconfirmed.${detail} Retry it or discard it after refreshing your boards.`,
+        });
+        throw error;
+      }
+      pending = null;
     }
     const page = pending?.key === key ? pending.page : await createPage();
-    pendingImportRef.current = { key, page };
+    if (!pending || pending.key !== key) pendingImportRef.current = { key, label, page };
     try {
       await onImportPage(page);
       if (pendingImportRef.current?.page === page) pendingImportRef.current = null;
+      setPendingImportState(null);
     } catch (error) {
-      pendingImportRef.current = { key, page };
+      pendingImportRef.current = { key, label, page };
+      setPendingImportState({
+        label,
+        message: error instanceof Error ? error.message : 'The import was not confirmed. Retry or discard it after refreshing your boards.',
+      });
       throw error;
+    }
+  };
+
+  const retryPendingImport = async () => {
+    const pending = pendingImportRef.current;
+    if (!pending) return;
+    try {
+      await onImportPage(pending.page);
+      if (pendingImportRef.current?.page === pending.page) pendingImportRef.current = null;
+      setPendingImportState(null);
+    } catch (error) {
+      setPendingImportState({
+        label: pending.label,
+        message: error instanceof Error ? error.message : 'The import is still unconfirmed. Keep this window open and retry.',
+      });
+    }
+  };
+
+  const discardPendingImport = async () => {
+    const pending = pendingImportRef.current;
+    if (!pending) return;
+    try {
+      await onRefreshPages();
+      if (pendingImportRef.current?.page === pending.page) pendingImportRef.current = null;
+      setPendingImportState(null);
+    } catch (error) {
+      setPendingImportState({
+        label: pending.label,
+        message: error instanceof Error ? `Could not refresh saved boards. ${error.message}` : 'Could not refresh saved boards; the pending import is retained.',
+      });
     }
   };
 
@@ -87,9 +136,9 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
     cancelFileOperationRef.current = false;
     setFileOperation({ label: `Importing ${file.name}`, progress: 0 });
     try {
-      const importKey = `file:${file.name}\u0000${file.size}\u0000${file.lastModified}\u0000${file.type}`;
-      await importPageWithRetry(importKey, async () => {
-        const parsed = await readBoardPackageFile(file, {
+      let sourceFingerprint = '';
+      const parsed = await readBoardPackageFile(file, {
+        onSourceFingerprint: fingerprint => { sourceFingerprint = fingerprint; },
           createBoardId: () => `page-${generateId()}`,
           isCancelled: () => cancelFileOperationRef.current,
           onProgress: ({ stage, percent }) => {
@@ -107,15 +156,17 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
                   : `Reading ${file.name}`;
             setFileOperation({ label, progress });
           },
-        });
-        if (Array.isArray(parsed)) throw new Error('Invalid board package format.');
-        return parsed;
       });
+      if (Array.isArray(parsed)) throw new Error('Invalid board package format.');
+      if (!sourceFingerprint) throw new Error('The file content could not be verified for a safe retry.');
+      const importKey = `file:${file.name.toLowerCase()}:${sourceFingerprint}`;
+      await importPageWithRetry(importKey, file.name, async () => parsed);
       setFileOperation({ label: `Finishing ${file.name}`, progress: 100 });
     } catch (error) {
       if (
         !(error instanceof BoardPackageCancelledError) &&
-        !cancelFileOperationRef.current
+        !cancelFileOperationRef.current &&
+        !pendingImportRef.current
       ) {
         alert(error instanceof Error ? error.message : 'Could not import the board file.');
       }
@@ -129,24 +180,24 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
     const handlePaste = async (e: ClipboardEvent) => {
       if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return;
       const text = e.clipboardData?.getData('text');
-      if (text) {
-        try {
-          const importKey = `clipboard:${text}`;
-          const cachedPage = pendingImportRef.current?.key === importKey ? pendingImportRef.current.page : null;
-          const parsed = cachedPage ?? JSON.parse(text);
-          if (parsed && typeof parsed === 'object' && parsed.id && Array.isArray(parsed.elements)) {
-            e.preventDefault();
-            await importPageWithRetry(importKey, async () => {
-              const page = parsed;
-              if (!page.version) page.version = 1;
-              if (!cachedPage) page.id = `page-${generateId()}`;
-              assertValidBoard(page);
-              return page as Page;
-            });
-          }
-        } catch (err) {
-          // Ignore parse errors on paste, could be random text
-        }
+      if (!text) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(text); }
+      catch { return; }
+      if (!parsed || typeof parsed !== 'object' || !('id' in parsed) || !Array.isArray((parsed as {elements?: unknown}).elements)) return;
+      e.preventDefault();
+      try {
+        const importKey = `clipboard:${await fingerprintBoardText(text)}`;
+        await importPageWithRetry(importKey, 'Clipboard board', async () => {
+          const page = parsed as Page;
+          if (!page.version) page.version = 1;
+          page.id = `page-${generateId()}`;
+          assertValidBoard(page);
+          return page;
+        });
+      } catch (error) {
+        if (!pendingImportRef.current)
+          setPendingImportState({ label: 'Clipboard board', message: error instanceof Error ? error.message : 'Could not import the clipboard board.' });
       }
     };
 
@@ -180,7 +231,7 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
       window.removeEventListener('dragleave', handleDragLeave);
       window.removeEventListener('drop', handleDrop);
     };
-  }, [active, onImportPage]);
+  }, [active, onImportPage, onRefreshPages]);
 
   const handlePageClick = (id: string) => {
     if (movingPageId) {
@@ -321,6 +372,22 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
           >
             <X className="h-4 w-4" />
           </button>
+        </div>
+      )}
+      {pendingImportState && (
+        <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950" role="alert" data-pending-import>
+          <div className="font-bold">Import needs confirmation: {pendingImportState.label}</div>
+          <p className="mt-1">{pendingImportState.message}</p>
+          {pendingImportRef.current && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={() => void retryPendingImport()} className="rounded-md bg-amber-950 px-3 py-1.5 font-semibold text-white hover:bg-amber-900">
+                Retry previous import
+              </button>
+              <button type="button" onClick={() => void discardPendingImport()} className="rounded-md border border-amber-400 bg-white px-3 py-1.5 font-semibold text-amber-950 hover:bg-amber-100">
+                Discard after refresh
+              </button>
+            </div>
+          )}
         </div>
       )}
       {isDraggingFile && (

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 import JSZip from "jszip";
 import { createSimpleWorkbook } from "../../src/features/spreadsheet/simple-workbook";
 import { gridObjectSize } from "../../src/features/spreadsheet/grid-geometry";
@@ -204,7 +204,7 @@ test("placing a single Web object preset creates an independent session", async 
       objectPresets: [{
         id: "web-preset",
         name: "Web preset",
-        shortcut: "P",
+          shortcut: "Ctrl+P",
         element: {
           id: "preset-web",
           type: "embed",
@@ -220,13 +220,20 @@ test("placing a single Web object preset creates an independent session", async 
   });
   await openBoard(page, id);
   await page.locator('[data-board-root="true"]').click({ position: { x: 100, y: 100 } });
-  await page.keyboard.press("p");
+  await page.keyboard.press("Control+p");
   await expect(page.locator('[data-board-element-type="embed"]')).toHaveCount(1);
   await expect.poll(async () => {
     const pages = await (await request.get("/api/pages")).json();
     const saved = pages.find((item: any) => item.id === id);
-    return saved?.elements.find((element: any) => element.type === "embed")?.webSessionId;
-  }).not.toBe("shared-old-session");
+    const embeds = saved?.elements.filter((element: any) => element.type === "embed") ?? [];
+    const sessionIds = embeds.map((element: any) => element.webSessionId);
+    return {
+      exists: embeds.length > 0,
+      sessionId: sessionIds[0],
+      changed: sessionIds[0] !== "shared-old-session",
+      unique: sessionIds.every((value: unknown) => typeof value === "string" && value.length > 0) && new Set(sessionIds).size === sessionIds.length,
+    };
+  }).toMatchObject({ exists: true, sessionId: expect.stringMatching(/.+/), changed: true, unique: true });
 });
 
 test("workspace Background Grid changes are captured by Undo", async ({ page, request }) => {

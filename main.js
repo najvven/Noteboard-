@@ -24,7 +24,6 @@ import {
   normalizeWebSessionSettings,
   createWebSessionConfigurationQueue,
   resolveWebRequestPolicy,
-  shouldRememberMainFrameUrl,
   shouldBlockCookies,
   shouldBlockPopup
 } from './shared/electron-web-policy.js';
@@ -51,6 +50,7 @@ const configureWebSessionInOrder = createWebSessionConfigurationQueue();
 const webZoomStates = new WeakMap();
 const webPointerPositions = new WeakMap();
 const webNavigationUrls = new WeakMap();
+const webPendingNavigationUrls = new WeakMap();
 const guestPreload = path.join(__dirname, 'dist', 'web-privacy-preload.cjs');
 const blockingCounts = new Map();
 let filterServicePromise;
@@ -104,6 +104,16 @@ const getPartitionForWebContents = (contents) => {
   return null;
 };
 
+const getWebContentsTopLevelUrl = (contents) => {
+  if (!contents || contents.isDestroyed()) return undefined;
+  const pendingUrl = webPendingNavigationUrls.get(contents);
+  if (pendingUrl && /^https?:\/\//i.test(pendingUrl) && isAllowedEmbeddedWebUrl(pendingUrl)) return pendingUrl;
+  const committedUrl = webNavigationUrls.get(contents);
+  if (committedUrl && /^https?:\/\//i.test(committedUrl) && isAllowedEmbeddedWebUrl(committedUrl)) return committedUrl;
+  const currentUrl = contents.mainFrame?.url || contents.getURL();
+  return /^https?:\/\//i.test(currentUrl) && isAllowedEmbeddedWebUrl(currentUrl) ? currentUrl : undefined;
+};
+
 handleTrusted('clipboard:read', () => readNativeClipboard(clipboard));
 handleTrusted('clipboard:write-board', (_event, json) => writeNativeBoardClipboard(clipboard, json));
 
@@ -115,7 +125,11 @@ ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
   while (frame?.parent && /^about:(blank|srcdoc)/i.test(frame.url)) frame = frame.parent;
   // The trusted preload has the new document URL even before frame.url commits.
   const frameUrl = /^https?:\/\//i.test(documentUrl || '') ? documentUrl : frame?.url || '';
-  const topLevelUrl = webNavigationUrls.get(event.sender) || event.sender.mainFrame.url || settings.topLevelUrl;
+  const isMainFrame = event.senderFrame === event.sender.mainFrame;
+  const documentTopLevelUrl = isMainFrame && /^https?:\/\//i.test(documentUrl || '') && isAllowedEmbeddedWebUrl(documentUrl)
+    ? documentUrl
+    : undefined;
+  const topLevelUrl = documentTopLevelUrl || getWebContentsTopLevelUrl(event.sender) || settings.topLevelUrl;
   const host = event.sender.getType() === 'webview' ? event.sender.hostWebContents : null;
   const boardZoom = host && !host.isDestroyed() ? webZoomStates.get(host) || { shortcut: 'Ctrl', active: false } : null;
   event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }), boardZoom };
@@ -165,7 +179,7 @@ const requestPolicy = (details, settings) => {
     ? webContents.fromId(details.webContentsId)
     : undefined;
   const source = candidate && !candidate.isDestroyed() ? candidate : undefined;
-  const currentUrl = source ? webNavigationUrls.get(source) || source.getURL() : undefined;
+  const currentUrl = source ? getWebContentsTopLevelUrl(source) : undefined;
   return { ...resolveWebRequestPolicy(details, settings, currentUrl), source };
 };
 
@@ -184,6 +198,21 @@ const applyWebSessionConfiguration = async (partition, normalized) => {
     await webSession.clearStorageData({ storages: ['cookies'] });
   }
   if (configuredWebSessions.has(partition)) {
+    const pagePolicyChanged = previous && (
+      previous.cookieBlocker !== normalized.cookieBlocker ||
+      previous.adBlock !== normalized.adBlock
+    );
+    if (pagePolicyChanged) {
+      // Cookie guards are installed before the first page script and cannot be
+      // replaced in a live renderer. Reload only popups in this field so they
+      // receive the new guard and cosmetic-filter policy; the main guest has
+      // its own renderer lifecycle and reloads through the board component.
+      for (const contents of webContents.getAllWebContents()) {
+        if (contents.isDestroyed() || contents.session !== webSession || contents.getType() === 'webview') continue;
+        try { contents.reload(); }
+        catch (error) { console.warn('Could not refresh an open Web popup policy.', error.message); }
+      }
+    }
     return true;
   }
 
@@ -198,7 +227,7 @@ const applyWebSessionConfiguration = async (partition, normalized) => {
     // shares the originating field's session and blocking preferences.
     const isOpenFirstParty = current.cookieBlocker === 'third-party' && webContents.getAllWebContents().some(contents => {
       if (contents.session !== webSession) return false;
-      const topLevelUrl = webNavigationUrls.get(contents) || contents.getURL();
+      const topLevelUrl = getWebContentsTopLevelUrl(contents) || current.topLevelUrl;
       return /^https?:\/\//i.test(topLevelUrl) && !shouldBlockCookies(url, { ...current, topLevelUrl });
     });
     if (!isOpenFirstParty && shouldBlockCookies(url, current)) {
@@ -214,13 +243,8 @@ const applyWebSessionConfiguration = async (partition, normalized) => {
   // there is no separate request matcher or internal fallback here.
   webSession.webRequest.onBeforeRequest(requestFilter,async (details,callback)=>{
     const policy=requestPolicy(details,webSessionSettings.get(partition)||normalizeWebSessionSettings());
-    const applyDecision=decision=>{
-      if(policy.source&&policy.mainFrameUrl&&shouldRememberMainFrameUrl(details,decision))
-        webNavigationUrls.set(policy.source,policy.mainFrameUrl);
-      callback(decision);
-    };
-    if(!policy.settings.adBlock){applyDecision({cancel:false});return;}
-    try {applyDecision(await adExtensions.filterRequest(webSession,details,policy.settings.topLevelUrl));}
+    if(!policy.settings.adBlock){callback({cancel:false});return;}
+    try {callback(await adExtensions.filterRequest(webSession,details,policy.settings.topLevelUrl));}
     catch(error){console.error('Web ad-block extension could not filter the request.',error);callback({cancel:true});}
   });
 
@@ -496,16 +520,35 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('will-navigate', (navigateEvent, url) => {
     if (!isAllowedEmbeddedWebUrl(url)) {
       navigateEvent.preventDefault();
+      return;
+    }
+    if (/^https?:\/\//i.test(url)) webPendingNavigationUrls.set(contents, url);
+  });
+  contents.on('will-redirect', (redirectEvent, url, _isInPlace, isMainFrame) => {
+    if (!isAllowedEmbeddedWebUrl(url)) redirectEvent.preventDefault();
+    else if (isMainFrame === true && /^https?:\/\//i.test(url)) webPendingNavigationUrls.set(contents, url);
+  });
+  contents.on('did-start-navigation', (_navigationEvent, url, isInPlace, isMainFrame) => {
+    if (isMainFrame === true && isInPlace !== true && /^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) {
+      webPendingNavigationUrls.set(contents, url);
     }
   });
-  contents.on('will-redirect', (redirectEvent, url) => {
-    if (!isAllowedEmbeddedWebUrl(url)) redirectEvent.preventDefault();
-  });
-  contents.on('did-navigate', (_navigateEvent, url) => {
+  contents.on('did-frame-navigate', (_navigateEvent, url, _status, _statusText, isMainFrame) => {
+    if (isMainFrame !== true) return;
+    if (/^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) webNavigationUrls.set(contents, url);
+    webPendingNavigationUrls.delete(contents);
     if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
-  contents.on('did-navigate-in-page', (_navigateEvent, url) => {
+  contents.on('did-navigate-in-page', (_navigateEvent, url, isMainFrame) => {
+    if (isMainFrame !== true) return;
+    if (/^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) webNavigationUrls.set(contents, url);
+    webPendingNavigationUrls.delete(contents);
     if (isGuest) updateWebSessionTopLevelUrl(contents, url);
+  });
+  contents.on('did-fail-load', (_loadEvent, _errorCode, _errorDescription, validatedUrl, isMainFrame) => {
+    if (isMainFrame === true && webPendingNavigationUrls.get(contents) === validatedUrl) {
+      webPendingNavigationUrls.delete(contents);
+    }
   });
 });
 

@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page } from './test';
 import sharp from 'sharp';
 import ExcelJS from 'exceljs';
 import fs from 'node:fs/promises';

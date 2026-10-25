@@ -208,3 +208,15 @@ export function snapGridObjectSize(
     columns,
   };
 }
+
+/** Return whole-cell dimensions that fit entirely within a constrained surface. */
+export function fitSimpleGridSize(
+  width: number,
+  height: number,
+  cellSize: { width: number; height: number },
+) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0)
+    return null;
+  const size = snapGridObjectSize(width, height, cellSize, { rounding: "floor" });
+  return size.width <= width + 1e-7 && size.height <= height + 1e-7 ? size : null;
+}

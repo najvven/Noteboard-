@@ -14,7 +14,7 @@ async function fixture(t){
     await fs.rm(resolved,{recursive:true,force:true});
   });
   const source=path.join(directory,'source');await fs.mkdir(source);
-  for(const name of ['manifest.json','background.js'])await fs.writeFile(path.join(source,name),'fixture');
+  for(const name of ['manifest.json','background.js','filter-worker.js'])await fs.writeFile(path.join(source,name),'fixture');
   const contents=[],requests=[],counts={loads:0,serialization:0,configuration:0,removal:0};
   let decideRequest=()=>({cancel:true});
   const runtime={isPersistent:()=>true,extensions:new EventEmitter()};

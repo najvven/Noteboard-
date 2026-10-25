@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 import { createWorkbookDocument } from "../../src/features/spreadsheet/workbook";
 
 const board = (id: string, elements: any[] = [], settings = {}) => ({

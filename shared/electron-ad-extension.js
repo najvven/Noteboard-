@@ -7,7 +7,7 @@ export function createAdExtensionManager({webContents,sourceDirectory,targetDire
   let preparing,shared;
   const prepare=()=>preparing??=(async()=>{
     await fs.mkdir(targetDirectory,{recursive:true});
-    for(const name of ['manifest.json','background.js']) {
+    for(const name of ['manifest.json','background.js','filter-worker.js']) {
       const bytes=await fs.readFile(path.join(sourceDirectory,name));
       const destination=path.join(targetDirectory,name);
       const previous=await fs.readFile(destination).catch(()=>null);

@@ -67,6 +67,14 @@ test("desktop archive loading leaves literal assets paths in text elements untou
   assert.equal(loaded.elements[1].content, "assets/asset-1.png");
 });
 
+test("desktop archive restores MIME from the asset path instead of stale element metadata", async () => {
+  const source = page();
+  source.elements[0].mediaMime = "text/plain";
+  const loaded = await loadDesktopBoardArchive(await archive(source));
+  assert.equal(loaded.elements[0].mediaMime, "image/png");
+  assert.match(loaded.elements[0].content, /^data:image\/png;base64,/);
+});
+
 test("desktop archive loading enforces JSON and asset expansion limits", async () => {
   await assert.rejects(
     async () =>

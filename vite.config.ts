@@ -8,6 +8,8 @@ import {runtimeFsDeny} from './shared/local-file-access.js';
 
 export default defineConfig({
   base: './',
+  // Runtime data must never be reachable through Vite's separate public/ URL mapping.
+  publicDir: false,
   worker: { format: 'es' },
   build: { rollupOptions: { input: { main: path.resolve(__dirname,'index.html'), sheet: path.resolve(__dirname,'sheet.html') } } },
   plugins: [univerHostPopovers(), react(), reactRefreshCspPlugin(), tailwindcss()],

@@ -19,6 +19,13 @@ export interface ClipboardContents {
   text: string;
   html: string;
   files: File[];
+  diagnostics?: ClipboardDiagnostic[];
+}
+
+export interface ClipboardDiagnostic {
+  name: string;
+  code: string;
+  message: string;
 }
 
 export class ClipboardLimitError extends Error {
@@ -147,19 +154,39 @@ export async function readCurrentClipboard(): Promise<ClipboardContents> {
   if (window.noteboardAPI?.readClipboard) {
     const value = await window.noteboardAPI.readClipboard();
     const files: File[] = [];
+    const diagnostics: ClipboardDiagnostic[] = [...(value.fileErrors ?? [])];
     let totalBytes = getNativeClipboardTextBytes(value.text, value.html);
     for (const file of value.files) {
-      if (!isClipboardMediaType(file.type)) continue;
-      const decoded = decodeNativeClipboardMedia(file.base64, file.name, file.type, totalBytes);
-      files.push(decoded.file);
-      totalBytes = decoded.totalBytes;
+      if (!isClipboardMediaType(file.type)) {
+        diagnostics.push({ name: file.name, code: 'UNSUPPORTED_MEDIA_TYPE', message: 'This clipboard item is not a supported image, audio, or video file.' });
+        continue;
+      }
+      try {
+        const decoded = decodeNativeClipboardMedia(file.base64, file.name, file.type, totalBytes);
+        files.push(decoded.file);
+        totalBytes = decoded.totalBytes;
+      } catch (error) {
+        diagnostics.push({
+          name: file.name,
+          code: error instanceof ClipboardLimitError ? 'CLIPBOARD_SIZE_LIMIT' : 'CLIPBOARD_DECODE_FAILED',
+          message: error instanceof Error ? error.message : 'This clipboard file could not be decoded.',
+        });
+      }
     }
     if (value.image && !files.length) {
       const separator = value.image.indexOf(",");
       const encoded = separator >= 0 ? value.image.slice(separator + 1) : value.image;
-      files.push(decodeNativeClipboardMedia(encoded, "clipboard.png", "image/png", totalBytes).file);
+      try {
+        files.push(decodeNativeClipboardMedia(encoded, "clipboard.png", "image/png", totalBytes).file);
+      } catch (error) {
+        diagnostics.push({
+          name: 'Clipboard image',
+          code: error instanceof ClipboardLimitError ? 'CLIPBOARD_SIZE_LIMIT' : 'CLIPBOARD_DECODE_FAILED',
+          message: error instanceof Error ? error.message : 'The clipboard image could not be decoded.',
+        });
+      }
     }
-    return {text:value.text,html:value.html,files};
+    return {text:value.text,html:value.html,files,...(diagnostics.length ? { diagnostics } : {})};
   }
   const items = await navigator.clipboard.read();
   return readBrowserClipboardItems(items);

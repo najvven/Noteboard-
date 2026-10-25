@@ -1,5 +1,5 @@
 import { deleteFixtureBoard } from './fixture-storage';
-import { test, expect } from '@playwright/test';
+import { test, expect } from './test';
 
 test('a board with 1000 objects and a Section stays editable through resize, undo and save', async ({page,request}) => {
   const objects = Array.from({length:1000},(_,i)=>({

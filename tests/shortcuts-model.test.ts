@@ -15,6 +15,12 @@ test("shortcuts are normalized into a stable modifier order", () => {
   assert.equal(normalizeShortcut("shift + ctrl + a"), "Ctrl+Shift+A");
   assert.equal(normalizeShortcut("control+alt+arrowdown"), "Ctrl+Alt+ArrowDown");
   assert.equal(normalizeShortcut("  "), "");
+  assert.equal(normalizeShortcut("Ctrl++"), "Ctrl++");
+  assert.equal(normalizeShortcut("Meta++"), "Meta++");
+  assert.equal(normalizeShortcut("Shift+Ctrl++"), "Ctrl+Shift++");
+  assert.equal(normalizeShortcut("Ctrl + +"), "Ctrl++");
+  assert.equal(normalizeShortcut("Ctrl+="), "Ctrl+=");
+  assert.equal(normalizeShortcut("+"), "+");
 });
 
 test("keyboard events can be recorded and matched consistently", () => {
@@ -29,6 +35,9 @@ test("keyboard events can be recorded and matched consistently", () => {
   assert.equal(shortcutFromEvent(event), "Ctrl+Shift+D");
   assert.equal(shortcutMatchesEvent("shift+ctrl+d", event), true);
   assert.equal(shortcutMatchesEvent("Ctrl+D", event), false);
+  assert.equal(shortcutFromEvent({ key: "+", ctrlKey: true }), "Ctrl++");
+  assert.equal(shortcutFromEvent({ key: "+", shiftKey: true, metaKey: true }), "Shift+Meta++");
+  assert.equal(shortcutMatchesEvent("Ctrl++", { key: "+", ctrlKey: true }), true);
 });
 
 test("shortcut conflicts ignore disabled bindings and report the existing command", () => {
@@ -75,4 +84,6 @@ test("structural shortcuts require a strong modifier and reject typing keys", ()
   assert.equal(isSafeStructuralShortcut("Ctrl+Shift+A"), true);
   assert.equal(isSafeStructuralShortcut("Alt+Shift+ArrowDown"), true);
   assert.equal(isSafeStructuralShortcut("Meta+K"), true);
+  assert.equal(isSafeStructuralShortcut("Ctrl+Shift"), false);
+  assert.equal(isSafeStructuralShortcut("Ctrl++"), true);
 });

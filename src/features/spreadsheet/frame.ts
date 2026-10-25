@@ -26,6 +26,7 @@ import {
   MAX_WORKBOOK_CHARACTERS,
   parseWorkbookDocument,
   normalizeCellSize,
+  workbookCellDimensionsMatch,
   renameFormulaSheetReferences,
   type WorkbookDocument,
 } from "./workbook";
@@ -56,8 +57,12 @@ const documentId = crypto.randomUUID();
 let reloadDraftObserver: ((draft: SpreadsheetReloadDraft) => void) | undefined;
 let token = "",
   timer = 0,
+  formulaWatchdog = 0,
   lastSent = "",
   initialized = false;
+let formulaWorker: Worker | undefined;
+let formulaRecoveryPending = false;
+let reloadDraftCaptured = false;
 let expandedMode: boolean | undefined;
 let mode: WorkbookDocument['mode'];
 let interactive = false;
@@ -70,6 +75,75 @@ let historyBaseline = "",
   historyDirty = false,
   viewDirty = false,
   ready = false;
+const FORMULA_CALCULATION_DEADLINE_MS = 5_000;
+
+class FormulaCalculationTimeoutError extends Error {
+  constructor() {
+    super("A spreadsheet formula exceeded its calculation time limit.");
+    this.name = "FormulaCalculationTimeoutError";
+  }
+}
+
+const waitForFormulaCalculation = async () => {
+  const formula = api?.getFormula();
+  if (!formula) return;
+  let timeout = 0;
+  try {
+    await Promise.race([
+      formula.onCalculationResultApplied(15_000),
+      new Promise<never>((_resolve, reject) => {
+        timeout = window.setTimeout(
+          () => reject(new FormulaCalculationTimeoutError()),
+          FORMULA_CALCULATION_DEADLINE_MS,
+        );
+      }),
+    ]);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+};
+
+const preserveSpreadsheetDraftBeforeUnload = () => {
+  if (reloadDraftCaptured || !ready || !reloadDraftObserver) return;
+  const book = api?.getActiveWorkbook();
+  const cell = book?.getActiveSheet().getActiveCell();
+  const content = snapshot(false);
+  if (!content) return;
+  reloadDraftCaptured = true;
+  reloadDraftObserver({
+    content,
+    ...(book?.isCellEditing() && cell ? {
+      editingCell: { sheetId: book.getActiveSheet().getSheetId(), address: cell.getA1Notation() },
+    } : {}),
+  });
+};
+
+const recoverFromFormulaTimeout = (error: FormulaCalculationTimeoutError) => {
+  if (formulaRecoveryPending) return;
+  formulaRecoveryPending = true;
+  window.clearTimeout(formulaWatchdog);
+  formulaWorker?.terminate();
+  formulaWorker = undefined;
+  if (!ready) {
+    send("error", { message: "A formula did not finish in time. The saved spreadsheet data was preserved." });
+    return;
+  }
+  preserveSpreadsheetDraftBeforeUnload();
+  send("formula-timeout", { message: "A formula took too long; the spreadsheet was saved and its calculation restarted." });
+  console.warn(error.message);
+  window.setTimeout(() => window.location.reload(), 0);
+};
+
+const scheduleFormulaCalculationWatchdog = () => {
+  if (!ready || !interactive || formulaRecoveryPending) return;
+  window.clearTimeout(formulaWatchdog);
+  formulaWatchdog = window.setTimeout(() => {
+    void waitForFormulaCalculation().catch((error) => {
+      if (error instanceof FormulaCalculationTimeoutError) recoverFromFormulaTimeout(error);
+      else console.warn("Spreadsheet formula calculation failed.", error);
+    });
+  }, 120);
+};
 const send = (type: string, payload: Record<string, unknown> = {}) => {
   if (type === "changed" && !interactive) return;
   parent.postMessage(
@@ -148,15 +222,27 @@ function snapshot(includePreview = true) {
   applyView(value);
   // Include the current draft in autosave without ending the user's cell edit.
   if (book.isCellEditing()) {
-    const draft = api?.getDocument("__INTERNAL_EDITOR__DOCS_NORMAL")?.getBody(),
-      range = book.getActiveSheet().getActiveCell();
+    const editor = api?.getDocument("__INTERNAL_EDITOR__DOCS_NORMAL") as
+      | {
+          getBody?: () => { dataStream?: string };
+          getDocumentDataModel?: () => { getSnapshot?: () => unknown };
+        }
+      | undefined;
+    const draft = editor?.getBody?.();
+    const richTextSnapshot = editor?.getDocumentDataModel?.().getSnapshot?.();
+    const range = book.getActiveSheet().getActiveCell();
     if (draft && range) {
       const sheet = value.workbook.sheets![value.activeSheetId!],
         r = range.getRow(),
         c = range.getColumn(),
-        row = (sheet.cellData[r] ??= {});
-      const text = draft.dataStream.replace(/\r\n$/, "");
-      row[c] = { s: row[c]?.s, ...cellFromInput(text) };
+        row = (sheet.cellData[r] ??= {}),
+        text = draft.dataStream?.replace(/\r\n$/, "") ?? "",
+        draftCell = cellFromInput(text);
+      row[c] = {
+        ...draftCell,
+        s: row[c]?.s,
+        ...(!draftCell.f && richTextSnapshot ? { p: structuredClone(richTextSnapshot) as any } : {}),
+      };
     }
   }
   if (!includePreview) return JSON.stringify(value);
@@ -170,18 +256,18 @@ function snapshot(includePreview = true) {
 // waiting for the debounced changed message from a context that may disappear.
 window.addEventListener('pagehide', () => {
   clearTimeout(timer);
-  if (!ready || !reloadDraftObserver) return;
-  const book=api?.getActiveWorkbook(),cell=book?.getActiveSheet().getActiveCell();
-  const content=snapshot(false);
-  if (content) reloadDraftObserver({content,...(book?.isCellEditing() && cell ? {
-    editingCell:{sheetId:book.getActiveSheet().getSheetId(),address:cell.getA1Notation()},
-  } : {})});
+  preserveSpreadsheetDraftBeforeUnload();
 });
 
 async function flush() {
   clearTimeout(timer);
   await api?.getActiveWorkbook()?.endEditingAsync(true);
-  await api?.getFormula().onCalculationResultApplied(15000);
+  try {
+    await waitForFormulaCalculation();
+  } catch (error) {
+    if (error instanceof FormulaCalculationTimeoutError) recoverFromFormulaTimeout(error);
+    throw error;
+  }
   await repaint();
   const content = historySnapshot() || snapshot();
   if (content && !parseWorkbookDocument(content))
@@ -397,10 +483,17 @@ async function setCellDimensions(width: number, height: number) {
   await book.endEditingAsync(true);
   const sheet = book.getActiveSheet(),
     size = normalizeCellSize(width, height);
-  if (sheet.getColumnWidth(0) !== size.width)
-    sheet.setColumnWidths(0, sheet.getSheet().getColumnCount(), size.width);
-  if (sheet.getRowHeight(0) !== size.height)
-    sheet.setRowHeightsForced(0, sheet.getSheet().getRowCount(), size.height);
+  const savedSheet = book.save().sheets?.[sheet.getSheetId()];
+  if (!workbookCellDimensionsMatch(savedSheet, size)) {
+    if (sheet.getColumnWidth(0) !== size.width ||
+        Object.values(savedSheet?.columnData ?? {}).some(column =>
+          column?.w !== undefined && column.w !== size.width))
+      sheet.setColumnWidths(0, sheet.getSheet().getColumnCount(), size.width);
+    if (sheet.getRowHeight(0) !== size.height ||
+        Object.values(savedSheet?.rowData ?? {}).some(row =>
+          (row?.h !== undefined && row.h !== size.height) || row?.ah !== undefined || row?.ia === 1))
+      sheet.setRowHeightsForced(0, sheet.getSheet().getRowCount(), size.height);
+  }
   // Capture this property transaction before another cell input can start.
   // The scheduled mutation snapshot paints its thumbnail after layout settles.
   const content = snapshot(false);
@@ -484,6 +577,7 @@ async function action(action: SpreadsheetAction) {
 
 (window as any).noteboardSheet = {
   documentId,
+  isReady: () => ready,
   observeReloadDraft: (observer:(draft:SpreadsheetReloadDraft)=>void) => {reloadDraftObserver=observer;},
   snapshot,
   historySnapshot,
@@ -516,6 +610,11 @@ window.addEventListener("message", async (event) => {
     initialized = true;
     setInteractive(message.interactive === true);
     try {
+      const calculationWorker = new Worker(
+        new URL("./formula.worker.ts", import.meta.url),
+        { type: "module" },
+      );
+      formulaWorker = calculationWorker;
       const created = createUniver({
         locale: LocaleType.EN_US,
         locales: {
@@ -529,10 +628,7 @@ window.addEventListener("message", async (event) => {
         },
         presets: [
           sheetCorePreset({
-            workerURL: new Worker(
-              new URL("./formula.worker.ts", import.meta.url),
-              { type: "module" },
-            ),
+            workerURL: calculationWorker,
             container: "sheet-root",
             // Focus belongs to the user's cell click, never a background preview.
             disableAutoFocus: message.interactive === true ? undefined : true,
@@ -574,6 +670,9 @@ window.addEventListener("message", async (event) => {
           void repaint().then(restoreView);
         }
         if (!ready || !interactive) return;
+        if (event.type === CommandType.MUTATION && event.id.startsWith("sheet.") &&
+            !/formula-calculation|row-auto-height/.test(event.id))
+          scheduleFormulaCalculationWatchdog();
         renderRevision++;
         const viewChange = event.id === SetScrollOperation.id || event.id === SetZoomRatioOperation.id || event.id === SetWorksheetActiveOperation.id;
         if (viewChange) {
@@ -618,7 +717,17 @@ window.addEventListener("message", async (event) => {
       });
       api.addEvent(api.Event.SelectionChanged, () => sendSelection());
       api.getFormula().executeCalculation();
-      await api.getFormula().onCalculationResultApplied(15000);
+      try {
+        await waitForFormulaCalculation();
+      } catch (error) {
+        if (error instanceof FormulaCalculationTimeoutError) {
+          recoverFromFormulaTimeout(error);
+          return;
+        }
+        throw error;
+      }
+      formulaRecoveryPending = false;
+      reloadDraftCaptured = false;
       await setExpanded(message.expanded === true);
       await restoreView();
       await repaint();
@@ -654,6 +763,10 @@ window.addEventListener("message", async (event) => {
 });
 window.addEventListener("beforeunload", () => {
   clearTimeout(timer);
+  window.clearTimeout(formulaWatchdog);
+  preserveSpreadsheetDraftBeforeUnload();
+  formulaWorker?.terminate();
+  formulaWorker = undefined;
   api?.dispose();
 });
 send("ready");

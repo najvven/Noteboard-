@@ -11,4 +11,6 @@ export const displayedTextFontSize = (element: Partial<BoardElement>, type = ele
 
 /** Keep the layout's coordinate system fixed; CSS scales all rich-text descendants together. */
 export const resizedTextScale = (element: Partial<BoardElement>, initialWidth: number, width: number) =>
-  getTextScale(element) * width / initialWidth;
+  Number.isFinite(initialWidth) && initialWidth > 0 && Number.isFinite(width) && width > 0
+    ? getTextScale(element) * width / initialWidth
+    : getTextScale(element);

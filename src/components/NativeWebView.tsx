@@ -30,6 +30,7 @@ export default function NativeWebView(props: Props) {
   const latest = useRef(props);
   latest.current = props;
   const requestNavigation = useRef<(() => void) | null>(null);
+  const committedUrl = useRef('');
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -45,6 +46,8 @@ export default function NativeWebView(props: Props) {
       const url = latest.current.src;
       if (!url || normalizeWebUrl(lastRequested) === normalizeWebUrl(url)) return;
       lastRequested = url;
+      guest.setAttribute('data-web-requested-url', url);
+      guest.setAttribute('data-web-navigation-pending', 'true');
       failedNavigation = false;
       guest.loadURL(url).catch(error => {
         // A newer navigation or unmount may cancel a pending load.
@@ -81,15 +84,42 @@ export default function NativeWebView(props: Props) {
       cancelAnimationFrame(pendingFrame);
       pendingFrame = requestAnimationFrame(() => { void configure().catch(reportError); });
     };
-    const navigated = (event: any) => {
-      if (!initialized || !event.url || event.url === 'about:blank') return;
-      lastRequested = event.url;
-      latest.current.onNavigate(event.url);
+    const navigated = (event: any, eventUrl?: string, isMainFrame?: boolean) => {
+      if (!initialized || event?.isMainFrame === false || isMainFrame === false) return;
+      if (event?.type === 'did-navigate-in-page' && event?.isMainFrame !== true && isMainFrame !== true) return;
+      const url = normalizeWebUrl(typeof eventUrl === 'string' ? eventUrl : event?.url);
+      if (!url || url === 'about:blank') return;
+      if (guest.getAttribute('data-web-navigation-pending') === 'true' &&
+          normalizeWebUrl(lastRequested) !== url) return;
+      lastRequested = url;
+      committedUrl.current = url;
+      guest.setAttribute('data-web-requested-url', url);
+      guest.removeAttribute('data-web-navigation-pending');
+      latest.current.onNavigate(url);
     };
     const started = () => { if (initialized) latest.current.onLoading(); };
-    const navigationStarted = (event: any) => { if (event.isMainFrame && !event.isInPlace) failedNavigation = false; };
+    const navigationStarted = (event: any) => {
+      if (!event.isMainFrame || event.isInPlace) return;
+      const url = normalizeWebUrl(event.url);
+      if (url && url !== 'about:blank') {
+        lastRequested = url;
+        guest.setAttribute('data-web-requested-url', url);
+        guest.setAttribute('data-web-navigation-pending', 'true');
+      }
+      failedNavigation = false;
+    };
+    const navigationRedirected = (event: any) => {
+      if (!event.isMainFrame) return;
+      const url = normalizeWebUrl(event.url);
+      if (!url || url === 'about:blank') return;
+      lastRequested = url;
+      guest.setAttribute('data-web-requested-url', url);
+      guest.setAttribute('data-web-navigation-pending', 'true');
+    };
     const failed = (event: any) => {
       if (event.isMainFrame !== false && event.errorCode !== -3 && initialized) {
+        const url = normalizeWebUrl(event.url);
+        if (url && normalizeWebUrl(lastRequested) && url !== normalizeWebUrl(lastRequested)) return;
         failedNavigation = true;
         reportError(event.errorDescription || 'The page could not be loaded.');
       }
@@ -102,6 +132,7 @@ export default function NativeWebView(props: Props) {
     guest.addEventListener('did-navigate-in-page', navigated);
     guest.addEventListener('did-start-loading', started);
     guest.addEventListener('did-start-navigation', navigationStarted);
+    guest.addEventListener('did-redirect-navigation', navigationRedirected);
     guest.addEventListener('did-fail-load', failed);
     guest.addEventListener('render-process-gone', crashed);
     guest.addEventListener('enter-html-full-screen', enterFullscreen);
@@ -122,6 +153,7 @@ export default function NativeWebView(props: Props) {
       guest.removeEventListener('did-navigate-in-page', navigated);
       guest.removeEventListener('did-start-loading', started);
       guest.removeEventListener('did-start-navigation', navigationStarted);
+      guest.removeEventListener('did-redirect-navigation', navigationRedirected);
       guest.removeEventListener('did-fail-load', failed);
       guest.removeEventListener('render-process-gone', crashed);
       guest.removeEventListener('enter-html-full-screen', enterFullscreen);
@@ -135,6 +167,8 @@ export default function NativeWebView(props: Props) {
     {React.createElement('webview', {
       ref: props.guestRef, src: 'about:blank', partition: props.partition, allowpopups: 'true',
       'data-web-element-id': props.elementId, 'data-web-requested-url': props.src,
+      'data-web-navigation-pending': normalizeWebUrl(props.src) &&
+        normalizeWebUrl(props.src) !== normalizeWebUrl(committedUrl.current) ? 'true' : undefined,
       className: props.interactive ? 'pointer-events-auto' : 'pointer-events-none',
       // Electron sizes guests in host DIPs, unlike iframes. Cancel host zoom in
       // layout, then restore it at compositing so app/board zoom never reflows a page.

@@ -14,7 +14,9 @@ import {
 import {
   assertSafeAssetPath,
   bytesToBase64,
-  mimeFromAssetPath,
+  assertCanonicalBase64,
+  estimateRestoredBoardJsonBytes,
+  restoredAssetMime,
   readZipEntryBytes,
 } from "../../../shared/board-package-stream.js";
 import { repairLegacyBoard } from "../../../shared/board-migration.js";
@@ -60,14 +62,28 @@ const assertExportedArchiveFitsLimits = async (bytes: Uint8Array) => {
 export async function createBoardArchive(page: Page): Promise<Uint8Array> {
   assertValidBoard(page);
   const zip = new JSZip();
+  const assetByPath = new Map<string, { mime: string; base64: string; byteLength: number }>();
   const elements = page.elements.map(element => {
     if ((element.type !== 'image' && element.type !== 'media') || typeof element.content !== 'string') return element;
-    const data = element.content.match(/^data:([^;]+);base64,(.+)$/);
-    if (!data) return element;
-    const assetPath = `assets/${element.id}.${extensionFromMime(data[1])}`;
-    zip.file(assetPath, data[2], { base64: true });
-    return { ...element, mediaMime: element.type === 'media' ? element.mediaMime || data[1] : element.mediaMime, content: assetPath };
+    if (!element.content.startsWith('data:')) return element;
+    const comma = element.content.indexOf(',');
+    if (comma < 5) throw new Error('Board asset data URL is invalid.');
+    const parts = element.content.slice(5, comma).split(';');
+    if (parts.pop()?.toLowerCase() !== 'base64') return element;
+    const mime = parts.shift() || 'text/plain';
+    if (!/^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/i.test(mime))
+      throw new Error('Board asset MIME type is invalid.');
+    const base64 = element.content.slice(comma + 1);
+    if (base64.length > Math.ceil(MAX_ARCHIVE_ASSET_BYTES / 3) * 4)
+      throw new Error('Board asset is too large.');
+    const byteLength = assertCanonicalBase64(base64, 'Board asset');
+    assertFileSize(byteLength, MAX_ARCHIVE_ASSET_BYTES, 'Board asset');
+    const assetPath = `assets/${element.id}.${extensionFromMime(mime)}`;
+    assetByPath.set(assetPath, { mime, base64, byteLength });
+    return { ...element, ...(element.type === 'media' ? { mediaMime: mime } : {}), content: assetPath };
   });
+  for (const [assetPath, asset] of assetByPath)
+    zip.file(assetPath, asset.base64, { base64: true });
   zip.file('board.json', JSON.stringify({ ...page, version: page.version || 3, elements }, null, 2));
   const bytes = await zip.generateAsync({ type: 'uint8array' });
   await assertExportedArchiveFitsLimits(bytes);
@@ -114,6 +130,7 @@ export interface ReadBoardPackageOptions {
   limits?: BoardPackageLimits;
   isCancelled?: () => boolean;
   onProgress?: (progress: BoardPackageProgress) => void;
+  onSourceFingerprint?: (fingerprint: string) => void;
 }
 
 export type BoardPackageData = Page | BoardElement[];
@@ -140,6 +157,14 @@ const inputByteLength = (input: Blob | ArrayBuffer | Uint8Array | string) => {
   if (ArrayBuffer.isView(input)) return input.byteLength;
   return input.size;
 };
+
+const fingerprintBytes = async (bytes: Uint8Array): Promise<string> => {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+};
+
+export const fingerprintBoardText = (text: string): Promise<string> =>
+  fingerprintBytes(new TextEncoder().encode(text));
 
 export const extensionFromMime = (mime: string) => {
   if (mime === "image/jpeg") return "jpg";
@@ -210,7 +235,14 @@ const restorePackagedAssets = async (
         ),
     ),
   ];
+  const sourceElementsByPath = new Map<string, BoardElement>();
+  for (const element of packageElements(data)) {
+    if (isPackagedAssetElement(element) && typeof element.content === "string" && element.content.startsWith("assets/"))
+      sourceElementsByPath.set(element.content, element);
+  }
   const encodedAssets = new Map<string, string>();
+  const assetBytes = new Map<string, Uint8Array>();
+  const assetInfoByPath = new Map<string, { mime: string; byteLength: number }>();
 
   for (let index = 0; index < referencedPaths.length; index += 1) {
     assertNotCancelled(options);
@@ -238,8 +270,14 @@ const restorePackagedAssets = async (
       });
       },
     );
-    encodedAssets.set(path, bytesToBase64(bytes));
+    const sourceElement = sourceElementsByPath.get(path);
+    const mime = restoredAssetMime(path, sourceElement?.mediaMime || 'application/octet-stream');
+    assetBytes.set(path, bytes);
+    assetInfoByPath.set(path, { mime, byteLength: bytes.byteLength });
   }
+
+  estimateRestoredBoardJsonBytes(data, assetInfoByPath, limits.boardJsonBytes);
+  for (const [path, bytes] of assetBytes) encodedAssets.set(path, bytesToBase64(bytes));
 
   const elements = packageElements(data).map((element) => {
     if (!isPackagedAssetElement(element)) return element;
@@ -247,11 +285,11 @@ const restorePackagedAssets = async (
     if (typeof path !== "string" || !path.startsWith("assets/")) return element;
     const encoded = encodedAssets.get(path);
     if (encoded === undefined) throw new Error(`Board package asset is missing: ${path}`);
-    const mime = element.mediaMime || mimeFromAssetPath(path);
+    const mime = assetInfoByPath.get(path)?.mime || restoredAssetMime(path);
     return {
       ...element,
       content: `data:${mime};base64,${encoded}`,
-      ...(element.type === "media" && !element.mediaMime ? { mediaMime: mime } : {}),
+      ...(element.type === "media" ? { mediaMime: mime } : {}),
     };
   });
 
@@ -286,7 +324,9 @@ export const readBoardArchive = async (
       ? new Uint8Array(await input.arrayBuffer())
       : typeof input === "string"
         ? new TextEncoder().encode(input)
-        : input;
+        : input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+  if (options.onSourceFingerprint)
+    options.onSourceFingerprint(await fingerprintBytes(archiveInput));
   assertNotCancelled(options);
   assertSafeZipDirectory(archiveInput);
   const zip = await JSZip.loadAsync(archiveInput);
@@ -340,6 +380,7 @@ export const readBoardPackageFile = async (
   options.onProgress?.({ stage: "board", percent: 0 });
   const text = await file.text();
   assertNotCancelled(options);
+  if (options.onSourceFingerprint) options.onSourceFingerprint(await fingerprintBoardText(text));
   assertFileSize(
     new TextEncoder().encode(text).byteLength,
     limits.boardJsonBytes,

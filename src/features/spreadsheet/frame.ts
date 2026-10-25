@@ -753,6 +753,10 @@ window.addEventListener("message", async (event) => {
           typeof savedInput === "string" || typeof savedInput === "number"
             ? String(savedInput)
             : undefined;
+        // startEditing() is a no-op if Univer retained its editor-bridge
+        // visibility across a browsing-context reload. Reopen the persisted
+        // cell draft so the normal edit-start path places the cursor at its end.
+        await book.endEditingAsync(false);
         book.startEditing();
         // Wait for the active edit document to contain the restored input before
         // declaring the frame loaded. On slower renderers the document unit can

@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  path_filters:
+    - "!build/web-filters/**"
+    - "!package-lock.json"
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Evaluate correctness against docs/REVIEW_REQUIREMENTS.md. Focus on
+        reproducible behavior, data integrity, state transitions, native Web
+        isolation and regressions. Preserve the established UI design.
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - docs/REVIEW_REQUIREMENTS.md

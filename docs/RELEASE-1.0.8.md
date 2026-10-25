@@ -22,6 +22,6 @@ This release applies the final fixes from the 1.0.7 technical report and keeps t
 - Focused browser scenarios pass for Save as, lost acknowledgments, template retries and hidden-text recovery.
 - The formula draft browser scenario passes after an iframe reload and subsequent typing.
 - The Electron Web test confirms cosmetic ad rules hide a test slot in both the page and its iframe, and that both become visible when the blocker is switched off.
-- The existing coverage thresholds remain unchanged. Current coverage is 61.62% lines, 77.42% branches and 54.58% functions; the 80% coverage gate remains open.
+- The existing coverage thresholds remain unchanged. Current coverage is 61.62% lines, 77.47% branches and 54.58% functions; the 80% coverage gate remains open.
 
 No installer was run against the user's normal Windows profile. The packaged app is checked for user data and stable application identity before delivery.

@@ -79,6 +79,8 @@ export default function App() {
   }), []);
 
   const [globalBrightness, setGlobalBrightness] = useState<number>(100);
+  const pendingImportCandidatesRef = useRef(new WeakMap<Page, Page>());
+  const importRequiresFreshIdRef = useRef(new WeakSet<Page>());
 
   const refreshPagesFromStorage = useCallback(async () => {
     if (pendingHomeActionsRef.current) return;
@@ -228,17 +230,31 @@ export default function App() {
     if (initialSavePendingRef.current) return;
     initialSavePendingRef.current = true;
     try {
-      const source = migratePage(importedPage);
-      const document = cloneBoardDocument(source.elements, source.sectionSheets ?? [], generateId);
-      const id = pagesRef.current.some(p => p.id === source.id) ? `page-${generateId()}` : source.id;
-      const migratedPage: Page = { ...source, id, elements: document.elements, sectionSheets: document.sheets, updatedAt: nextBoardRevision(id) };
+      let migratedPage = pendingImportCandidatesRef.current.get(importedPage);
+      if (!migratedPage) {
+        const source = migratePage(importedPage);
+        const document = cloneBoardDocument(source.elements, source.sectionSheets ?? [], generateId);
+        const needsFreshId = importRequiresFreshIdRef.current.has(importedPage) || pagesRef.current.some(p => p.id === source.id);
+        const id = needsFreshId ? `page-${generateId()}` : source.id;
+        migratedPage = { ...source, id, elements: document.elements, sectionSheets: document.sheets, updatedAt: nextBoardRevision(id) };
+        pendingImportCandidatesRef.current.set(importedPage, migratedPage);
+      }
       await savePage(migratedPage, { baseRevision: null });
+      pendingImportCandidatesRef.current.delete(importedPage);
+      importRequiresFreshIdRef.current.delete(importedPage);
       updatePages((prev) => [migratedPage, ...prev]);
       setStorageError(null);
       setActivePageId(migratedPage.id);
       setCurrentScreen('editor');
     } catch (error) {
-      setStorageError('Could not import the board. The original file was not changed; please retry.');
+      if (error instanceof BoardConflictError) {
+        pendingImportCandidatesRef.current.delete(importedPage);
+        importRequiresFreshIdRef.current.add(importedPage);
+        await refreshPagesFromStorage().catch(() => undefined);
+        setStorageError('A board with this ID was saved elsewhere. Retry the import to create an independent copy.');
+      } else {
+        setStorageError('Could not import the board. The original file was not changed; please retry.');
+      }
       throw error;
     } finally { initialSavePendingRef.current = false; }
   };

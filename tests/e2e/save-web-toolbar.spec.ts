@@ -133,6 +133,26 @@ test('Save board preset stays open and retries the same template after a lost re
   expect(afterRetry.map((item:any)=>item.id)).toEqual([originalId]);
 });
 
+test('a template removed in another process does not block later template changes', async ({page,request}) => {
+  const pages=await(await request.get('/api/pages')).json();
+  for(const item of pages)await deleteFixtureBoard(request,`/api/pages/${item.id}`);
+  const existing=(await(await request.get('/api/presets')).json()) as any[];
+  for(const preset of existing)await request.patch('/api/presets',{data:{type:'delete',id:preset.id}});
+  await request.patch('/api/presets',{data:{type:'add',preset:{id:'deleted-in-other-window',name:'First template',elements:[],isBuiltIn:false}}});
+  await request.patch('/api/presets',{data:{type:'add',preset:{id:'surviving-template',name:'Second template',elements:[],isBuiltIn:false}}});
+  await request.post('/api/pages',{data:[fixture()]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Save source',exact:true}).click();
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await page.getByRole('button',{name:'New Noteboard',exact:true}).click();
+  const names=page.locator('input[title="Edit name"]');await expect(names).toHaveCount(2);
+  await request.patch('/api/presets',{data:{type:'delete',id:'deleted-in-other-window'}});
+  await names.nth(0).fill('Stale rename');
+  await expect(names).toHaveCount(1);
+  await names.first().fill('Second template renamed');
+  await expect.poll(async()=>(await(await request.get('/api/presets')).json()).find((item:any)=>item.id==='surviving-template')?.name).toBe('Second template renamed');
+  expect((await(await request.get('/api/presets')).json()).map((item:any)=>item.id)).toEqual(['surviving-template']);
+});
+
 test('template names remain responsive and persist every character during slow writes', async ({page,request}) => {
   await open(page,request);
   await page.getByRole('button',{name:'Save',exact:true}).click();

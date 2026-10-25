@@ -35,7 +35,10 @@ export function updateStoredPreset(directory, operation) {
       if (typeof operation.id !== 'string' || !operation.id || typeof operation.name !== 'string')
         throw new Error('The template rename is invalid.');
       const index = current.findIndex(preset => preset?.id === operation.id);
-      if (index < 0) throw new Error('This template was removed in another window. Refresh the template list and try again.');
+      // Another process may have deleted this template after the client read
+      // it. Treat that stale rename as resolved by the deletion so it cannot
+      // permanently block later queued template operations.
+      if (index < 0) return current;
       if (current[index].name === operation.name) return current;
       next = current.map((preset, itemIndex) => itemIndex === index
         ? { ...preset, name: operation.name }

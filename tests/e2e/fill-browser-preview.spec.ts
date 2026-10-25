@@ -1,48 +1,102 @@
 import { expect, test } from './test';
+import sharp from 'sharp';
 
-test('Fill Tool captures visible board pixels in browser preview', async ({ page, request }) => {
-  test.setTimeout(60000);
-  const id = 'browser-fill-preview';
-  const board = {
-    id,
-    title: id,
-    width: 700,
-    height: 500,
-    workspaceWidth: 1400,
-    workspaceHeight: 900,
-    boardX: 350,
-    boardY: 200,
-    viewportCenterX: 700,
-    viewportCenterY: 450,
-    zoom: 1,
-    boardColor: '#ffffff',
-    updatedAt: Date.now(),
-    elements: [{
-      id: 'browser-fill-square',
-      type: 'rectangle',
-      position: { x: 250, y: 170 },
-      size: { width: 180, height: 120 },
-      content: '',
-      color: '#ffffff',
-      borderColor: '#000000',
-      borderWidth: 8,
-      zIndex: 1,
-    }],
-    editorSettings: { activeTool: 'select', keepToolActive: true, fillToolColor: '#ff0000' },
-  };
+const createBoard = (id: string, elements: unknown[]) => ({
+  id,
+  title: id,
+  width: 700,
+  height: 500,
+  workspaceWidth: 1400,
+  workspaceHeight: 900,
+  boardX: 350,
+  boardY: 200,
+  viewportCenterX: 700,
+  viewportCenterY: 450,
+  zoom: 1,
+  boardColor: '#ffffff',
+  updatedAt: Date.now(),
+  elements,
+  editorSettings: { activeTool: 'select', keepToolActive: true, fillToolColor: '#ff0000' },
+});
+
+test('Fill Tool changes a simple editable shape without requiring native capture', async ({ page, request }) => {
+  const id = 'browser-fill-semantic';
+  const board = createBoard(id, [{
+    id: 'outlined-square',
+    type: 'rectangle',
+    position: { x: 250, y: 170 },
+    size: { width: 180, height: 120 },
+    content: '',
+    color: '#ffffff',
+    borderColor: '#000000',
+    borderWidth: 8,
+    zIndex: 1,
+  }]);
   const created = await request.post('/api/pages', { data: [board] });
   expect(created.ok()).toBe(true);
 
   await page.goto('/');
   await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
-  const square = page.locator('[data-board-element-id="browser-fill-square"]');
+  const square = page.locator('[data-board-element-id="outlined-square"]');
   await expect(square).toBeVisible();
   const bounds = await square.boundingBox();
   expect(bounds).not.toBeNull();
-  const interior = { x: bounds!.x + bounds!.width / 2, y: bounds!.y + bounds!.height / 2 };
 
   await page.getByTitle('Fill Tool').click();
-  await page.mouse.click(interior.x, interior.y);
+  await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  await expect.poll(async () => {
+    const response = await request.get('/api/pages');
+    const pages = await response.json() as Array<{ id: string; elements: Array<{ id: string; color?: string; isPixelFill?: boolean }> }>;
+    return pages.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.color;
+  }).toBe('#ff0000');
+
+  const rendered = await sharp(await square.screenshot()).raw().toBuffer({ resolveWithObject: true });
+  const pixel = (x: number, y: number) => {
+    const offset = (y * rendered.info.width + x) * rendered.info.channels;
+    return [...rendered.data.subarray(offset, offset + 4)];
+  };
+  expect(pixel(Math.floor(rendered.info.width / 2), Math.floor(rendered.info.height / 2))).toEqual([255, 0, 0, 255]);
+  const response = await request.get('/api/pages');
+  const pages = await response.json() as Array<{ id: string; boardColor?: string; elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean }> }>;
+  const saved = pages.find(candidate => candidate.id === id)!;
+  const squareData = saved.elements.find(element => element.id === 'outlined-square')!;
+  expect(squareData).toMatchObject({ color: '#ff0000', borderColor: '#000000' });
+  expect(saved.elements.some(element => element.isPixelFill)).toBe(false);
+  await page.keyboard.press('Control+z');
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages');
+    const documents = await current.json() as Array<{ id: string; elements: Array<{ id: string; color?: string }> }>;
+    return documents.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.color;
+  }).toBe('#ffffff');
+});
+
+test('Fill Tool uses a scene raster for a closed freehand contour in browser preview', async ({ page, request }) => {
+  test.setTimeout(60000);
+  const id = 'browser-fill-drawing-region';
+  const board = createBoard(id, [{
+    id: 'closed-drawing',
+    type: 'draw',
+    position: { x: 250, y: 170 },
+    size: { width: 180, height: 120 },
+    points: [{ x: 0, y: 0 }, { x: 180, y: 0 }, { x: 180, y: 120 }, { x: 0, y: 120 }, { x: 0, y: 0 }],
+    content: '',
+    color: 'transparent',
+    borderColor: '#000000',
+    borderWidth: 8,
+    zIndex: 1,
+  }]);
+  const created = await request.post('/api/pages', { data: [board] });
+  expect(created.ok()).toBe(true);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+  const drawing = page.locator('[data-board-element-id="closed-drawing"]');
+  await expect(drawing).toBeVisible();
+  const bounds = await drawing.boundingBox();
+  expect(bounds).not.toBeNull();
+
+  await page.getByTitle('Fill Tool').click();
+  await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
   await expect.poll(async () => {
     const response = await request.get('/api/pages');
     const pages = await response.json() as Array<{ id: string; elements: Array<{ isPixelFill?: boolean; content: string }> }>;
@@ -50,18 +104,6 @@ test('Fill Tool captures visible board pixels in browser preview', async ({ page
   }, { timeout: 45000 }).toBe(true);
   const pagesResponse = await request.get('/api/pages');
   const pages = await pagesResponse.json() as Array<{ id: string; elements: Array<{ isPixelFill?: boolean; content: string }> }>;
-  const content = pages.find(candidate => candidate.id === id)?.elements.find(element => element.isPixelFill)?.content;
-  expect(content).toMatch(/^data:image\/png;base64,/);
-  const centerPixel = await page.evaluate(async dataUrl => {
-    const image = new Image();
-    image.src = dataUrl;
-    await image.decode();
-    const canvas = document.createElement('canvas');
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
-    const context = canvas.getContext('2d', { willReadFrequently: true })!;
-    context.drawImage(image, 0, 0);
-    return [...context.getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1).data];
-  }, content!);
-  expect(centerPixel).toEqual([255, 0, 0, 255]);
+  const fill = pages.find(candidate => candidate.id === id)?.elements.find(element => element.isPixelFill);
+  expect(fill?.content).toMatch(/^data:image\/png;base64,/);
 });

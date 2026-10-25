@@ -59,7 +59,7 @@ import {
   freezeTextLineDefaultsOnEdit,
   resolveTextLineSettings,
 } from "../features/board/text-lines";
-import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary } from "../features/board/board-surfaces";
+import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner } from "../features/board/board-surfaces";
 import { elementPolygon, getPlacementSection, getSectionClipPath, isPointInVisibleElementArea } from "../features/board/section-clipping";
 import { getElementPermissions } from "../features/board/interaction-permissions";
 import { isFlippableElementType } from "../features/board/flip";
@@ -121,6 +121,7 @@ import {
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import { fillConnectedPixels } from "../features/board/pixel-fill";
+import { elementContainsFillTargetPoint } from "../features/board/fill-target";
 import { isPixelFillOpaqueAtPoint, rememberPixelFillAlphaMask } from "../features/board/pixel-fill-hit-test";
 import { captureBoardRegionFromDOM } from "../features/board/browser-region-capture";
 import {
@@ -2016,9 +2017,77 @@ export default function BoardEditor({
     if (fillInProgressRef.current) return;
     fillInProgressRef.current = true;
     try {
-      const nativeCapture = window.noteboardAPI?.captureBoardRegion;
       if (currentLayerView && elementHierarchy.isLocked(currentLayerView)) {
         showFillNotice("The current layer is locked.");
+        return;
+      }
+
+      const sourceElements = elementsRef.current;
+      const layerAtStart = currentLayerView;
+      const fillColorAtStart = fillToolColor;
+      const targetSurface = getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]);
+      if (!targetSurface) return;
+      if (targetSurface.id !== mainSurface.id && elementHierarchy.isLocked(targetSurface.id)) {
+        showFillNotice("The selected board is locked.");
+        return;
+      }
+      const surfaceBounds = getInteractionBoundsAtPoint(point);
+      if (!surfaceBounds) return;
+      const targetBoardAtStart = targetSurface.id;
+      const boardColorAtStart = boardColor;
+
+      const fillSurfaceBackground = (surface: BoardElement, color: string) => {
+        if (surface.id === mainSurface.id) {
+          if (boardColor === color) return;
+          presentationRef.current = { ...presentationRef.current, boardColor: color };
+          setBoardColor(color);
+          pushDocument(elementsRef.current, sectionSheetsRef.current);
+        } else if (surface.color !== color) {
+          updateElement(surface.id, { color });
+        }
+      };
+
+      const fillProperty = (element: BoardElement): Partial<BoardElement> | undefined => {
+        if (element.type === "line" || element.type === "arrow" || element.type === "draw")
+          return { borderColor: fillColorAtStart };
+        if (["rectangle", "ellipse", "triangle", "diamond", "hexagon", "sticky", "section",
+          "text", "h1", "h2", "h3", "bullet-list", "numbered-list", "quote", "code", "checklist"]
+          .includes(element.type))
+          return { color: fillColorAtStart };
+        return undefined;
+      };
+      const semanticTarget = sourceElements
+        .filter((element) => {
+          const property = fillProperty(element);
+          const owner = resolveElementBoardOwner(element, sourceElements, pageDimensions, elementHierarchy);
+          return Boolean(
+            property && element.type !== "board" && element.type !== "layer" && element.type !== "group" &&
+            !element.isEraser && !element.isPixelFill && !isMergedGroupMember(element, elementHierarchy) &&
+            elementHierarchy.isVisible(element.id, respectLayerVisibility) && !elementHierarchy.isLocked(element.id) &&
+            (!layerAtStart || element.parentId === layerAtStart || elementHierarchy.isDescendantOf(element.id, layerAtStart)) &&
+            owner?.id === targetBoardAtStart && elementContainsFillTargetPoint(element, point) &&
+            isElementHitAtPoint(element, point)
+          );
+        })
+        .sort((a, b) => elementHierarchy.compare(b, a))[0];
+      if (semanticTarget) {
+        const updates = fillProperty(semanticTarget);
+        if (updates && (updates.color !== semanticTarget.color || updates.borderColor !== semanticTarget.borderColor))
+          updateElement(semanticTarget.id, updates);
+        return;
+      }
+
+      // Empty board surfaces are cheap semantic fills. Capture only when the
+      // same board contains content whose visible pixels can form a region.
+      const hasRasterBoundaries = sourceElements.some((element) => {
+        if (element.type === "board" || element.type === "layer" || element.type === "group" || element.isEraser ||
+            !elementHierarchy.isVisible(element.id, respectLayerVisibility)) return false;
+        const owner = resolveElementBoardOwner(element, sourceElements, pageDimensions, elementHierarchy);
+        return owner?.id === targetBoardAtStart &&
+          ["line", "arrow", "draw", "image", "media", "embed", "table"].includes(element.type);
+      });
+      if (!hasRasterBoundaries) {
+        fillSurfaceBackground(targetSurface, fillColorAtStart);
         return;
       }
 
@@ -2026,14 +2095,12 @@ export default function BoardEditor({
       const viewport = containerRef.current;
       const boardRect = captureRoot?.getBoundingClientRect();
       const viewportRect = viewport?.getBoundingClientRect();
-      const surfaceBounds = getInteractionBoundsAtPoint(point);
+      const nativeCapture = window.noteboardAPI?.captureBoardRegion;
       const boardScale = zoomRef.current;
-      if (!boardRect || !viewportRect || !surfaceBounds || !Number.isFinite(boardScale) || boardScale <= 0) return;
+      if (!boardRect || !viewportRect || !surfaceBounds || !Number.isFinite(boardScale) || boardScale <= 0) {
+        return;
+      }
 
-      const sourceElements = elementsRef.current;
-      const layerAtStart = currentLayerView;
-      const fillColorAtStart = fillToolColor;
-      const targetBoardAtStart = (getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]))?.id;
       const scrollAtStart = { left: viewport!.scrollLeft, top: viewport!.scrollTop };
       const rectAtStart = {
         board: { x: boardRect.x, y: boardRect.y, width: boardRect.width, height: boardRect.height },
@@ -2128,6 +2195,7 @@ export default function BoardEditor({
         zoomRef.current !== boardScale || activeToolRef.current !== "fill" ||
         currentLayerViewRef.current !== layerAtStart || fillToolColorRef.current !== fillColorAtStart ||
         elementsRef.current !== sourceElements ||
+        boardColor !== boardColorAtStart ||
         viewport!.scrollLeft !== scrollAtStart.left || viewport!.scrollTop !== scrollAtStart.top ||
         !sameRect(latestBoardRect, rectAtStart.board) || !sameRect(latestViewportRect, rectAtStart.viewport) ||
         activeBoardNow !== targetBoardAtStart
@@ -2165,6 +2233,10 @@ export default function BoardEditor({
       if (!result) return;
       if (result.touchesEdge && !wholeSurfaceVisible) {
         showFillNotice("This color continues beyond the visible area. Zoom out to show the whole region before filling.");
+        return;
+      }
+      if (result.touchesEdge) {
+        fillSurfaceBackground(targetSurface, fillColorAtStart);
         return;
       }
 
@@ -2209,7 +2281,8 @@ export default function BoardEditor({
           height: Math.max(0.1, result.bounds.height * cssPerPixelY / boardScale),
         },
         zIndex: latestElements.reduce((highest, element) => Math.max(highest, element.zIndex), 0) + 1,
-        parentId: creationParentId(point),
+        parentId: creationParentId(point) ??
+          (targetBoardAtStart !== mainSurface.id ? targetBoardAtStart : undefined),
       };
       pushElements([...latestElements, filledElement]);
     } catch {
@@ -6480,7 +6553,11 @@ export default function BoardEditor({
     }
 
     // Only capture on the board surface or main board for other tools
-    if (!isBoardSurface || !interactionBounds) return;
+    // Additional-board objects are rendered as siblings of their surface, so
+    // their DOM target is not necessarily nested under a board-surface marker.
+    // Fill resolves the visible surface from the world point and may proceed
+    // even when the clicked target itself is one of those sibling objects.
+    if ((!isBoardSurface && activeTool !== "fill") || !interactionBounds) return;
     activeSurfaceBoundsRef.current = interactionBounds;
     // Keep the active gesture alive when the pointer crosses the board edge.
     // Without capture, Select receives a synthetic pointer-up/leave and the
@@ -8750,7 +8827,13 @@ export default function BoardEditor({
                       : "crosshair",
                 }}
                 onPointerDown={handlePointerDown}
-                onPointerDownCapture={startSelectionMove}
+                onPointerDownCapture={(event) => {
+                  startSelectionMove(event);
+                  if (activeTool === "fill") {
+                    handlePointerDown(event);
+                    event.stopPropagation();
+                  }
+                }}
                 onContextMenu={(e) => e.preventDefault()}
                 onDragOver={(e) => {
                   e.preventDefault();

@@ -754,13 +754,15 @@ window.addEventListener("message", async (event) => {
         // Univer 1.0.2 may restore an active edit at offset zero after the
         // browsing context reloads. Resume after the restored draft so the
         // next keystroke continues the formula/text instead of prefixing it.
-        const editor = api.getDocument("__INTERNAL_EDITOR__DOCS_NORMAL") as
-          | { getBody?: () => { dataStream?: string }; setSelection?: (start: number, end: number) => void }
-          | undefined;
-        const dataStream = editor?.getBody?.().dataStream;
-        if (typeof dataStream === "string" && editor?.setSelection) {
-          const caret = dataStream.replace(/\r\n$/, "").length;
-          editor.setSelection(caret, caret);
+        for (const editorId of ["__INTERNAL_EDITOR__DOCS_NORMAL", "__INTERNAL_EDITOR__DOCS_FORMULA_BAR"]) {
+          const editor = api.getDocument(editorId) as
+            | { getBody?: () => { dataStream?: string }; setSelection?: (start: number, end: number) => void }
+            | undefined;
+          const dataStream = editor?.getBody?.().dataStream;
+          if (typeof dataStream === "string" && editor?.setSelection) {
+            const caret = dataStream.replace(/\r\n$/, "").length;
+            editor.setSelection(caret, caret);
+          }
         }
       }
       send("loaded");

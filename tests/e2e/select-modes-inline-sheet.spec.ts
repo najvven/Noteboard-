@@ -71,11 +71,9 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
   await grid.click({ position: { x: 90, y: 32 } });
   await page.keyboard.type("12");
   await page.keyboard.press("Enter");
-  const gridBounds = (await grid.boundingBox())!;
-  await page.mouse.move(gridBounds.x + 190, gridBounds.y + 56);
-  await page.mouse.down();
-  await page.mouse.move(gridBounds.x + 90, gridBounds.y + 32, { steps: 6 });
-  await page.mouse.up();
+  // Enter advances from A1 to A2; move to B2 with the same keyboard navigation
+  // a spreadsheet user can use, independent of device scaling and canvas bounds.
+  await page.keyboard.press("ArrowRight");
   const panel = page.getByRole("complementary", {
     name: "Spreadsheet settings",
   });

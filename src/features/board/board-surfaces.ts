@@ -19,7 +19,7 @@ export function findBoardSurface(point: Position, boards: readonly BoardElement[
 
 /** Resolve implicit ownership from the placement origin; explicit board ancestry wins. */
 export function resolveElementBoardOwner(
-  element: Pick<BoardElement, 'parentId' | 'position'>,
+  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill'>,
   boards: readonly BoardElement[],
   mainSize: Size,
   hierarchy: ElementHierarchy = createElementHierarchy(boards),
@@ -33,7 +33,16 @@ export function resolveElementBoardOwner(
     if (parent.type === 'board') return parent;
     parentId = parent.parentId;
   }
-  const owner = findBoardSurface(element.position, boards);
+  // Fill rasters are cropped to the visible region. Capture pixel rounding can
+  // put their top-left just outside a surface, so resolve their owner from the
+  // raster's interior instead of treating that rounded crop origin as intent.
+  const ownerPoint = element.isPixelFill && element.size
+    ? {
+        x: element.position.x + element.size.width / 2,
+        y: element.position.y + element.size.height / 2,
+      }
+    : element.position;
+  const owner = findBoardSurface(ownerPoint, boards);
   if (owner) return owner;
   const point = element.position;
   if (point.x >= 0 && point.y >= 0 && point.x <= mainSize.width && point.y <= mainSize.height)
@@ -44,7 +53,7 @@ export function resolveElementBoardOwner(
 
 /** Preview and placed objects use the same owner and polygon clipping boundary. */
 export function elementBoardBoundary(
-  element: Pick<BoardElement, 'parentId' | 'position' | 'size'>,
+  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill'>,
   boards: readonly BoardElement[],
   mainSize: Size,
   hierarchy?: ElementHierarchy,

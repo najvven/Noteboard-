@@ -694,7 +694,36 @@ test('Fill Tool captures an additional board beyond the Main Board bounds', {tim
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements.some(element=>element.isPixelFill)??false;
   })).toBe(true);
-  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior)).toBe('#ff0000');
+  try {
+    await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior)).toBe('#ff0000');
+  } catch (error) {
+    const renderState=await window.evaluate(async point=>{
+      const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+      const fill=page?.elements.find(element=>element.isPixelFill);
+      const node=fill&&document.querySelector(`[data-board-element-id="${fill.id}"]`);
+      const board=document.querySelector('[data-board-element-id="far-board"]');
+      const bounds=(element)=>element?.getBoundingClientRect().toJSON()??null;
+      const fillBounds=bounds(node),image=node?.querySelector('img'),imageBounds=bounds(image);
+      const imageCenter=imageBounds&&{x:imageBounds.x+imageBounds.width/2,y:imageBounds.y+imageBounds.height/2};
+      const style=node?getComputedStyle(node):null;
+      return {
+        fill:fill&&{position:fill.position,size:fill.size,parentId:fill.parentId,zIndex:fill.zIndex,content:fill.content},
+        board:bounds(board),fillBounds,imageBounds,imageComplete:image?.complete,imageSize:image&&[image.naturalWidth,image.naturalHeight],
+        fillStyle:style&&{zIndex:style.zIndex,clipPath:style.clipPath,display:style.display,visibility:style.visibility,opacity:style.opacity},
+        pageZoom:window.noteboardAPI.getWebHostZoom(),clickedPixel:await window.noteboardAPI.sampleBoardColor(point),
+        imageCenter,imageCenterPixel:imageCenter?await window.noteboardAPI.sampleBoardColor(imageCenter):null,
+      };
+    },interior);
+    let rasterPixel=null;
+    const fillContent=renderState?.fill?.content;
+    if(typeof fillContent==='string'){
+      const sample=await sharp(Buffer.from(fillContent.split(',')[1]??'','base64')).resize(1,1).raw().toBuffer();
+      rasterPixel=[...sample].join(',');
+    }
+    const safeState={...renderState,fill:renderState?.fill&&{...renderState.fill,content:undefined},rasterPixel};
+    t.diagnostic(`Additional-board Fill render state: ${JSON.stringify(safeState)}`);
+    throw error;
+  }
   const filled=await window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements.find(element=>element.isPixelFill);

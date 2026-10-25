@@ -21,6 +21,18 @@ test('preview and element rendering share the board selected by placement origin
   ]);
 });
 
+test('cropped pixel-fill ownership uses the interior when capture rounding puts its origin outside a board',()=>{
+  const secondary=createBoardSurface('secondary',{x:200,y:120},{width:180,height:160});
+  const roundedFill={position:{x:199.5,y:120},size:{width:120,height:100},isPixelFill:true};
+  const ordinaryElement={position:roundedFill.position,size:roundedFill.size};
+  assert.deepEqual(elementBoardBoundary(roundedFill,[secondary],{width:1000,height:700}),[
+    {x:200,y:120},{x:380,y:120},{x:380,y:280},{x:200,y:280},
+  ]);
+  assert.deepEqual(elementBoardBoundary(ordinaryElement,[secondary],{width:1000,height:700}),[
+    {x:0,y:0},{x:1000,y:0},{x:1000,y:700},{x:0,y:700},
+  ]);
+});
+
 test('explicit board ancestry wins, while hidden implicit boards do not claim content',()=>{
   const first=createBoardSurface('first',{x:0,y:0},{width:200,height:200},'#fff',1);
   const overlapping=createBoardSurface('overlap',{x:100,y:0},{width:200,height:200},'#fff',5);

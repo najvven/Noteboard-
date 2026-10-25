@@ -27,3 +27,32 @@ Weryfikacja końcowa — pełny agregat z 2026-10-25, `.tmp/coverage-aggregate/2
 - Nie uruchomiono zdalnego CI ani weryfikacji macOS/Linux. PR #10 jest otwarty i nie scalony; package version to nadal `1.0.0` / publiczna etykieta `1.0`, a instalator, NoteboardWork i dane użytkownika nie były zmieniane.
 
 Instalator pozostał niezmieniony: SHA-256 `8B98076C2847505168B7CADEC55F4255203722AAC6F739583A7B18E91617BA5C`. Lokalny opublikowany mirror nadal wskazuje `904eb62157a3910c9a674204fc1a5909a151cee2` i nie ma zmian w drzewie roboczym.
+
+## PR #10 — follow-up do audytu agenta
+
+Poniższe poprawki uzupełniają audyt PR #10; publiczna wersja pozostaje `1.0.0` / `1.0`, bez zmian instalatora i danych użytkownika.
+
+| Źródło | Rozwiązanie |
+|---|---|
+| Fill Q1, CR2 | Przechwycenie na czas klatki ukrywa siatkę i nakładki wyboru przez tymczasowe style, nie zmieniając ustawień ani historii. Wynik odrzucany jest, gdy w czasie asynchronicznego capture zmienią się viewport, zoom, aktywne narzędzie, warstwa albo elementy. |
+| Fill Q4, G1 | Obszar Fill ogranicza się do rzeczywistej powierzchni klikniętej dodatkowej Board i widocznego viewportu, także poza prostokątem Main Board. Nowy raster dostaje rodzica z `creationParentId`, więc zachowuje najbliższy Section/layer; istniejące wypełnienie pozostaje osobnym, edytowalnym rasterem. |
+| Fill Q5 | Bez Electron IPC przeglądarka renderuje DOM planszy do PNG dla elementów aplikacji. W przeglądarce nie da się odczytać pikseli z obcej ramki, dlatego kliknięcie wewnątrz embedded Web pokazuje jawny komunikat. Desktop używa natywnego capture, które obejmuje również widoczne Web. |
+| Fill Q7, CR3 | Main process ogranicza rozmiar capture przed alokacją, uwzględniając skalę monitora; komunikat nie sugeruje już bezpodstawnie, że samo przybliżenie zmniejszy przechwycenie. |
+| CR7 | Raster Fill przechowuje spakowaną maskę alfa w ograniczonym cache. Context menu i obie ścieżki gumki trafiają tylko w nieprzezroczyste piksele oraz respektują widoczne granice Section. Testy obejmują obrót, odbicie i crop. |
+| XLSX A–D | Wstępna walidacja jest jednokrotnym, ograniczonym tokenizatorem XML; komórki, wiersze, scalenia i liczba arkuszy mają limity przed ExcelJS. Szerokie domyślne/ukryte zakresy kolumn nie rozciągają Simple view, zachowane są rzeczywiste komórki XFD, jawne custom columns i końce scaleń. Pierwsza komórka bez `r` dziedziczy kolumnę A z jawnego numeru wiersza; plik wejściowy nie jest mutowany. Limit archiwum 128 MiB pozostaje zgodny wstecz. |
+| COV-A–E, Q2/Q3, G2/G3/G4, CR1/CR-N | Profil Electron ma per-test JSONL i wymagany udany renderer; agregat kończy się błędem przy braku profilu lub błędzie collect. Inwentarz zachowuje marker ✔/✖/﹣, snapshot obejmuje strony HTML/CSS, wszystkie skrypty buildu, testy i konfigurację Sonar, a raport-only przerywa się po nieudanym rebuildzie. Fixture E2E słucha `context` i nowych stron bez wymuszania dodatkowej strony. |
+| CI i Sonar | CI coverage uruchamia teraz pełny agregat Node/Chromium/Electron na Node 24/Xvfb, zachowując cztery progi 80%, i publikuje artefakty po sukcesie lub błędzie. Sonar dostaje LCOV z tej samej mapy pod `coverage/lcov.info`; przypięty skan uruchomi się, gdy istnieją `SONAR_TOKEN` i `SONAR_ORGANIZATION`. |
+| Windows check | Test zapisu Web czyta plik z już zweryfikowanego profilu tymczasowego zamiast wykonywać IPC do kontekstu podczas `expect.poll`. Wprowadzanie testowych danych do Web używa jednego `insertText`, by uniknąć niestabilnych, osobnych zdarzeń klawiszy. |
+
+### Weryfikacja tego follow-upu
+
+Pełny agregat `20261025T195051958Z-d85b96ea` oraz jego report-only rerun przeszedł na migawce źródła `5eb3aa45c4e52203b5d838b26d38128e19fceda698ed5d4e204a786ef8eb5161`:
+
+- Typecheck i production build: PASS. Build nadal zgłasza znane duplikaty sourcemapów i chunk arkusza około 7,5 MB.
+- Source tests 417/417; browser tests 11/11; Playwright 154/154; Electron 36 zaliczonych, 1 opcjonalny live-YouTube pominięty, 0 błędów.
+- Połączone pokrycie: **85,68% lines/statements, 85,42% branches, 80,29% functions**; wszystkie dotychczasowe progi 80% spełnione.
+- Profile: Node 142, Chromium 152, Electron renderer 42 (35 uruchomień z profilem i 1 oczekiwane zamknięcie). Błędy collect: 0, nieudane suite’y: 0, nieznane statusy: 0.
+- `coverage/lcov.info`: 112 oryginalnych plików źródłowych, 565 905 bajtów; brak `dist` i plików testów. Report-only odtworzył te same sumy.
+- Nowy browser E2E potwierdził wypełnienie lokalnej planszy bez Electron API. Zewnętrzny embedded Web w browser preview pozostaje niedostępny z powodu izolacji ramek; natywny desktopowy capture działa dla niego.
+- SonarCloud skan nie został zweryfikowany z tego komputera: nie mam dostępu do repozytoryjnego sekretu, klucza organizacji ani ustawień projektu. Aktualny Quality Gate zgłaszał osobny problem Reliability D; raportowanie coverage samo go nie usuwa. Właściciel projektu musi ustawić `SONAR_TOKEN`, `SONAR_ORGANIZATION` i włączyć CI-based analysis.
+- Uruchomiono lokalnie na Windows; zdalne GitHub Actions i macOS/Linux nie są jeszcze potwierdzone. PR #10 pozostaje niezmergowany do `main`.

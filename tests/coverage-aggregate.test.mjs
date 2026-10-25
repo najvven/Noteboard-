@@ -5,10 +5,15 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   COVERAGE_TOOL_FILES,
+  assertCoverageBuildSucceeded,
   assertCoverageSuitesKnown,
   assertCoveragePhaseInventory,
   coverageSuiteStatus,
+  collectCoverageSourceInventory,
+  electronCoverageCollectionErrors,
   hashCoverageToolFiles,
+  parseNodeTestStatuses,
+  validateLcovSourcePaths,
   REQUIRED_COVERAGE_PHASES,
   validateReportOnlySnapshot,
 } from '../scripts/coverage-aggregate-helpers.mjs';
@@ -48,6 +53,101 @@ test('report-only accepts matching fingerprints and hashes, and rejects stale so
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('coverage snapshot includes page, style, source, test, and build-script inputs and changes when files are added or removed', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'noteboard-coverage-inputs-'));
+  const required = [
+    'index.html', 'sheet.html', 'src/index.css', 'main.js', 'preload.cjs',
+    'web-privacy-preload.cjs', 'server.ts', 'package.json', 'package-lock.json',
+    'playwright.config.ts', 'vite.config.ts', 'tsconfig.json', 'sonar-project.properties',
+  ];
+  try {
+    await fs.mkdir(path.join(root, 'shared'), { recursive: true });
+    for (const relative of [...required, 'src/app.tsx', 'scripts/build-native-assets.mjs', 'scripts/univer-host-popovers.mjs', 'tests/e2e/test.ts']) {
+      const absolute = path.join(root, relative);
+      await fs.mkdir(path.dirname(absolute), { recursive: true });
+      await fs.writeFile(absolute, `initial ${relative}`);
+    }
+    const initial = await collectCoverageSourceInventory(root);
+    const paths = new Set(initial.files.map(file => file.path));
+    for (const relative of ['index.html', 'sheet.html', 'src/index.css', 'scripts/build-native-assets.mjs', 'scripts/univer-host-popovers.mjs', 'tests/e2e/test.ts'])
+      assert.ok(paths.has(relative), `${relative} must be part of the source snapshot`);
+
+    for (const relative of ['index.html', 'sheet.html', 'src/index.css', 'scripts/build-native-assets.mjs']) {
+      const absolute = path.join(root, relative);
+      const original = await fs.readFile(absolute, 'utf8');
+      await fs.writeFile(absolute, `${original} changed`);
+      const changed = await collectCoverageSourceInventory(root);
+      assert.notEqual(changed.fingerprint, initial.fingerprint, `changing ${relative} must stale report-only coverage`);
+      await fs.writeFile(absolute, original);
+    }
+
+    const added = path.join(root, 'scripts/new-build-step.mjs');
+    await fs.writeFile(added, 'new build step');
+    assert.notEqual((await collectCoverageSourceInventory(root)).fingerprint, initial.fingerprint, 'added build inputs must change the snapshot');
+    await fs.rm(added);
+    const removed = path.join(root, 'scripts/univer-host-popovers.mjs');
+    await fs.rm(removed);
+    assert.notEqual((await collectCoverageSourceInventory(root)).fingerprint, initial.fingerprint, 'removed build inputs must change the snapshot');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('coverage inventory preserves each Node test result marker instead of guessing from its title', () => {
+  const statuses = parseNodeTestStatuses([
+    '✔ a passing test (2.5ms)',
+    '✖ a test with an unfortunate failing title (1s)',
+    '﹣ a skipped test (0.1ms)',
+  ].join('\n'));
+  assert.deepEqual(statuses, [
+    { title: 'a passing test', status: 'passed' },
+    { title: 'a test with an unfortunate failing title', status: 'failed' },
+    { title: 'a skipped test', status: 'skipped' },
+  ]);
+});
+
+test('report-only source-map rebuild rejects a nonzero build result with its log path', () => {
+  assert.doesNotThrow(() => assertCoverageBuildSucceeded(0, 'coverage.log'));
+  assert.throws(
+    () => assertCoverageBuildSucceeded(17, '.tmp/coverage-aggregate/run/logs/coverage-source-maps.log'),
+    /exited with code 17.*coverage-source-maps\.log/,
+  );
+});
+
+test('Sonar LCOV must be nonempty and point only to existing original source files', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'noteboard-lcov-'));
+  try {
+    await fs.mkdir(path.join(root, 'src'), { recursive: true });
+    await fs.mkdir(path.join(root, 'tests'), { recursive: true });
+    await fs.mkdir(path.join(root, 'dist'), { recursive: true });
+    await fs.writeFile(path.join(root, 'src', 'board.ts'), 'export const board = 1;');
+    await fs.writeFile(path.join(root, 'tests', 'board.test.ts'), 'test();');
+    await fs.writeFile(path.join(root, 'dist', 'board.js'), '');
+    const lcov = `TN:\nSF:${path.join(root, 'src', 'board.ts')}\nDA:1,1\nend_of_record\n`;
+    assert.deepEqual(await validateLcovSourcePaths(lcov, root), [path.join(root, 'src', 'board.ts')]);
+    await assert.rejects(validateLcovSourcePaths('', root), /LCOV is empty/);
+    await assert.rejects(validateLcovSourcePaths('SF:tests/board.test.ts\n', root), /non-source or external/);
+    await assert.rejects(validateLcovSourcePaths('SF:dist/board.js\n', root), /non-source or external/);
+    await assert.rejects(validateLcovSourcePaths('SF:src/missing.ts\n', root), /missing source file/);
+    await assert.rejects(validateLcovSourcePaths('SF:../outside.ts\n', root), /non-source or external/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Electron coverage requires a saved host renderer profile and rejects profiler errors', () => {
+  assert.deepEqual(electronCoverageCollectionErrors([]), [
+    'Electron coverage status is missing; no instrumented host renderer was reported.',
+  ]);
+  assert.deepEqual(electronCoverageCollectionErrors([
+    { testName: 'fixture', status: 'collected', hostRenderersStarted: 1, rendererProfilesSaved: 1, errors: [] },
+    { testName: 'closed app', status: 'expected-shutdown' },
+  ]), []);
+  assert.match(electronCoverageCollectionErrors([
+    { testName: 'fixture', status: 'collected', hostRenderersStarted: 0, rendererProfilesSaved: 0, errors: ['Profiler.start failed'] },
+  ]).join(' '), /no host renderer profiler started.*no host renderer profile was saved.*Profiler.start failed/);
 });
 
 test('coverage suite status distinguishes passed, failed, unknown and skipped metadata', () => {

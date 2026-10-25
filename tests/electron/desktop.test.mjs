@@ -37,8 +37,47 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
     process.on('unhandledRejection',error=>app.__qaMainErrors.push(String(error)));
     app.on('will-quit',()=>require('node:fs').writeFileSync(require('node:path').join(process.env.NOTEBOARD_QA_PROFILE,'main-errors.json'),JSON.stringify(app.__qaMainErrors)));
     app.__qaCoverageTargets=new Map();app.__qaCoverageErrors=[];
-    const startRendererCoverage=contents=>{if(process.env.NOTEBOARD_COVERAGE!=='1')return;try{if(!contents.debugger.isAttached())contents.debugger.attach('1.3');const target={contents,started:Promise.resolve().then(()=>contents.debugger.sendCommand('Profiler.enable')).then(()=>contents.debugger.sendCommand('Profiler.startPreciseCoverage',{callCount:false,detailed:true}))};target.started.catch(error=>app.__qaCoverageErrors.push(error.message));app.__qaCoverageTargets.set(contents,target);}catch(error){app.__qaCoverageErrors.push(error.message);}};
-    app.__qaSaveRendererCoverage=async()=>{let saved=0;const dir=process.env.NOTEBOARD_ELECTRON_COVERAGE;for(const target of app.__qaCoverageTargets.values()){const contents=target.contents;try{await target.started;if(contents.isDestroyed())continue;const coverage=await contents.debugger.sendCommand('Profiler.takePreciseCoverage');if(coverage.result?.length){const output=require('node:path').join(dir,'electron-renderer-'+contents.id+'-'+process.pid+'.json');require('node:fs').mkdirSync(dir,{recursive:true});require('node:fs').writeFileSync(output,JSON.stringify({result:coverage.result,timestamp:Date.now()}));saved+=coverage.result.length;}}catch(error){app.__qaCoverageErrors.push(error.message);}}return {saved,errors:[...app.__qaCoverageErrors]};};
+    const startRendererCoverage=contents=>{
+      if(process.env.NOTEBOARD_COVERAGE!=='1')return;
+      const status={contentsId:contents.id,attempted:true,started:false,profilesSaved:0,error:null,attachedByProfiler:false};
+      const target={contents,status,started:null};
+      app.__qaCoverageTargets.set(contents,target);
+      target.started=Promise.resolve().then(()=>{
+        if(!contents.debugger.isAttached()){contents.debugger.attach('1.3');status.attachedByProfiler=true;}
+        return contents.debugger.sendCommand('Profiler.enable');
+      }).then(()=>contents.debugger.sendCommand('Profiler.startPreciseCoverage',{callCount:false,detailed:true}))
+        .then(()=>{status.started=true;return true;})
+        .catch(error=>{status.error=error.message;app.__qaCoverageErrors.push(error.message);return false;});
+    };
+    app.__qaSaveRendererCoverage=async()=>{
+      const result={hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:[...app.__qaCoverageErrors],targets:[]};
+      const dir=process.env.NOTEBOARD_ELECTRON_COVERAGE;
+      for(const target of app.__qaCoverageTargets.values()){
+        const {contents,status}=target;
+        const started=await target.started;
+        if(started)result.hostRenderersStarted++;
+        if(!started||contents.isDestroyed()){
+          if(status.error)result.errors.push(status.error);
+          result.targets.push(status);continue;
+        }
+        try{
+          const coverage=await contents.debugger.sendCommand('Profiler.takePreciseCoverage');
+          if(coverage.result?.length){
+            const output=require('node:path').join(dir,'electron-renderer-'+contents.id+'-'+process.pid+'.json');
+            require('node:fs').mkdirSync(dir,{recursive:true});
+            require('node:fs').writeFileSync(output,JSON.stringify({result:coverage.result,timestamp:Date.now()}));
+            status.profilesSaved=1;result.rendererProfilesSaved++;result.scriptEntriesSaved+=coverage.result.length;
+          }
+        }catch(error){status.error=error.message;result.errors.push(error.message);}
+        try{await contents.debugger.sendCommand('Profiler.stopPreciseCoverage');}
+        catch(error){status.error=status.error||error.message;result.errors.push(error.message);}
+        if(status.attachedByProfiler&&contents.debugger.isAttached()){
+          try{contents.debugger.detach();}catch(error){status.error=status.error||error.message;result.errors.push(error.message);}
+        }
+        result.targets.push(status);
+      }
+      return result;
+    };
     app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();startRendererCoverage(win.webContents);});
     app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);/* test-only timer stability: this makes memory diagnostics unlike normal app behavior */if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
     import(${JSON.stringify(pathToFileURL(process.env.NOTEBOARD_TEST_APP_ENTRY || path.join(root,'main.js')).href)});`);
@@ -54,10 +93,17 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
   assert.equal(await app.evaluate(({app})=>app.getPath('userData')),profile);
   t.after(async()=>{
     try {
-      if(process.env.NOTEBOARD_COVERAGE==='1'&&child.exitCode===null){
-        const coverage=await app.evaluate(({app})=>app.__qaSaveRendererCoverage()).catch(error=>({saved:0,errors:[error.message]}));
+      if(process.env.NOTEBOARD_COVERAGE==='1'){
+        const coverage=child.exitCode===null
+          ? await app.evaluate(({app})=>app.__qaSaveRendererCoverage()).catch(error=>({hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:[error.message],targets:[]}))
+          : {hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:expectClosed?[]:['Electron app exited before renderer coverage could be collected.'],targets:[]};
+        const status=child.exitCode!==null&&expectClosed?'expected-shutdown'
+          :coverage.hostRenderersStarted>0&&coverage.rendererProfilesSaved>0&&coverage.errors.length===0?'collected':'failed';
+        const record={testName:t.name,status,hostRenderersStarted:coverage.hostRenderersStarted,rendererProfilesSaved:coverage.rendererProfilesSaved,scriptEntriesSaved:coverage.scriptEntriesSaved,errors:coverage.errors,targets:coverage.targets};
+        const statusFile=process.env.NOTEBOARD_ELECTRON_COVERAGE_STATUS;
+        if(statusFile){await fs.mkdir(path.dirname(statusFile),{recursive:true});await fs.appendFile(statusFile,JSON.stringify(record)+String.fromCharCode(10),'utf8');}
         if(coverage.errors.length)t.diagnostic('COVERAGE_COLLECTION_ERROR '+JSON.stringify(coverage.errors));
-        else t.diagnostic(`COVERAGE_ELECTRON_RENDERER ${coverage.saved}`);
+        else t.diagnostic(`COVERAGE_ELECTRON_RENDERER ${coverage.scriptEntriesSaved}`);
       }
       if (expectClosed && child.exitCode !== null) {
         assert.deepEqual(JSON.parse(await fs.readFile(path.join(profile,'main-errors.json'),'utf8')),[], 'Closing must not throw in Electron main');
@@ -387,7 +433,7 @@ test('a shared actual ad-block extension keeps opposite settings in isolated Web
 test('Web Select and Hand controls operate the existing native guest and persist independently', {timeout:45000}, async t => {
   const {url}=await responsiveServer(t),board=seed('select',url);
   Object.assign(board.editorSettings,{autoToolOnSelect:false});
-  const {app,window,errors}=await launch(t,board);
+  const {app,window,errors,profile}=await launch(t,board);
   await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(0);
   const identity=(await guestState(app))[0].id;
   await clickWebControl(app,window,'#target');assert.equal((await responsiveState(app)).clicks,0);
@@ -402,7 +448,7 @@ test('Web Select and Hand controls operate the existing native guest and persist
   await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(2);
   assert.equal((await guestState(app))[0].id,identity);
   await expect.poll(async()=>{
-    const saved=JSON.parse(await fs.readFile(path.join((await app.evaluate(({app})=>app.getPath('userData'))),'data','boards','native-source.json'),'utf8'));
+    const saved=JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8'));
     return saved.editorSettings.toolMenuSettingsOverrides?.embed?.pageInteractionWithSelect;
   }).toBe(true);
   assert.deepEqual(errors,[]);
@@ -614,12 +660,12 @@ test('Fill Tool clicked on background beside a line fills the visible pixels ins
   await window.mouse.click(nearbyBackground.x,nearbyBackground.y);
   const fillLayer=window.locator('[data-board-element-type="image"]');
   await expect(fillLayer).toHaveCount(1);
-  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground),'#ff0000');
-  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),stroke),'#000000');
   await expect.poll(async()=>window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements.some(element=>element.isPixelFill)??false;
   })).toBe(true);
+  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground)).toBe('#ff0000');
+  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),stroke)).toBe('#000000');
 
   const saved=await window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
@@ -627,6 +673,74 @@ test('Fill Tool clicked on background beside a line fills the visible pixels ins
   });
   assert.equal(saved.find(element=>element.id==='horizontal-line').borderColor,'#000000');
   assert.equal(saved.filter(element=>element.isPixelFill).length,1);
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool captures an additional board beyond the Main Board bounds', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1800,workspaceHeight:1000,boardX:0,boardY:0,viewportCenterX:900,viewportCenterY:400,zoom:1,boardColor:'#ffffff',showGrid:true,gridSize:24});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'far-board',type:'board',position:{x:800,y:100},size:{width:240,height:180},content:'',color:'#ffffff',zIndex:5}];
+  const {window,errors}=await launch(t,board);
+  const extra=window.locator('[data-board-element-id="far-board"]');
+  await expect(extra).toBeVisible();
+  const box=await extra.boundingBox();assert.ok(box);
+  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ffffff');
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(interior.x,interior.y);
+  await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(1);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill)??false;
+  })).toBe(true);
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
+  const filled=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.find(element=>element.isPixelFill);
+  });
+  assert.ok(filled);
+  assert.ok(filled.position.x>=800,'fill coordinates should remain on the additional board outside Main Board bounds');
+  assert.ok(filled.size.width>200&&filled.size.height>150,`the capture must ignore the visual grid lines (found ${JSON.stringify(filled.size)})`);
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool discards a capture when the board scrolls before pixel processing completes', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1800,workspaceHeight:2400,boardX:350,boardY:200,viewportCenterX:900,viewportCenterY:500,zoom:1,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[];
+  const {window,errors}=await launch(t,board);
+  const root=window.locator('[data-board-root]'),box=await root.boundingBox();assert.ok(box);
+  const point={x:box.x+box.width/2,y:box.y+box.height/2};
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(point.x,point.y);
+  await window.waitForTimeout(1);
+  await window.locator('.workspace-scroll').evaluate(node=>{node.scrollTop+=80;});
+  await expect(window.getByRole('status')).toContainText('board view changed');
+  await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(0);
+  assert.deepEqual(errors,[]);
+});
+
+test('whole-element Eraser skips transparent pixel-fill regions and removes opaque ones', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1});
+  const rgba=Buffer.from([255,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0]);
+  const content=`data:image/png;base64,${(await sharp(rgba,{raw:{width:2,height:2,channels:4}}).png().toBuffer()).toString('base64')}`;
+  board.elements=[
+    {id:'underlying',type:'rectangle',position:{x:250,y:170},size:{width:100,height:100},content:'',color:'#00ff00',zIndex:1},
+    {id:'alpha-fill',type:'image',position:{x:250,y:170},size:{width:100,height:100},content,isPixelFill:true,zIndex:2},
+  ];
+  const {window,errors}=await launch(t,board);
+  await window.waitForTimeout(100);
+  await window.getByRole('button',{name:'Eraser tool',exact:true}).click();
+  const root=await window.locator('[data-board-root]').boundingBox();assert.ok(root);
+  const opaque={x:root.x+275,y:root.y+195},transparent={x:root.x+325,y:root.y+195};
+  await window.mouse.click(transparent.x,transparent.y);
+  await expect(window.locator('[data-board-element-id="underlying"]')).toHaveCount(0);
+  await expect(window.locator('[data-board-element-id="alpha-fill"]')).toHaveCount(1);
+  await window.mouse.click(opaque.x,opaque.y);
+  await expect(window.locator('[data-board-element-id="alpha-fill"]')).toHaveCount(0);
   assert.deepEqual(errors,[]);
 });
 
@@ -1317,7 +1431,7 @@ test('Web reflows without reload, keeps page input and matches clicks through ho
   await expect.poll(async()=>(await responsiveState(app)).width).toBe(1000);
   const initial=await responsiveState(app);
   assert.equal(initial.first.width,1000);assert.equal(initial.columns,3);
-  await clickWebControl(app,window,'#state');await window.keyboard.type('Keep this page input');
+  await clickWebControl(app,window,'#state');await window.keyboard.insertText('Keep this page input');
   await expect.poll(async()=>(await responsiveState(app)).note).toBe('Keep this page input');
   await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(1);
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();await window.locator('[data-board-element-id="web"]').click();
@@ -1352,7 +1466,7 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   const partition=await window.locator('webview').getAttribute('partition');
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.cookie="remember=1; path=/"'));
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
-  await clickWebControl(app,window,'#state');await window.keyboard.type('Desktop draft');
+  await clickWebControl(app,window,'#state');await window.keyboard.insertText('Desktop draft');
   const desktopState=await responsiveState(app);
   assert.equal(desktopState.note,'Desktop draft');
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
@@ -1370,7 +1484,7 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(390);
   let state=await responsiveState(app);assert.match(state.cookie,/remember=1/);assert.equal(await window.locator('webview').getAttribute('partition'),partition);assert.deepEqual(state.screen,[390,700]);assert.equal(state.orientation,'portrait-primary');assert.equal(state.touch,5);assert.equal(state.coarse,true);assert.equal(state.hover,false);assert.equal(state.hints.mobile,true);assert.equal(state.hints.platform,'Android');assert.equal(state.first.touch,5);assert.match(requests.at(-1).ua,/Chrome.*Mobile/);if(requests.at(-1).mobile) assert.equal(requests.at(-1).mobile,'?1');
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
-  await clickWebControl(app,window,'#state');await window.keyboard.type('Phone input');
+   await clickWebControl(app,window,'#state');await window.keyboard.insertText('Phone input');
   await expect.poll(async()=>(await responsiveState(app)).note).toBe('Phone input');assert.equal((await responsiveState(app)).lastClick.target,'state');
   await nativeScreenshot(app,'web-responsive-phone.png');
   assert.deepEqual((await responsiveState(app)).screen,[390,700]);

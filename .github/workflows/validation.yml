@@ -40,15 +40,56 @@ jobs:
       - run: npm run test:desktop
 
   coverage:
-    # Keep the declared gate visible. Its pre-existing source-coverage deficit
-    # is documented; do not silently lower thresholds or ignore this job.
+    # Aggregate source, Chromium, and Electron profiles against the same 80% gate.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run test:coverage
+      - run: npx playwright install --with-deps chromium chrome
+      - name: Collect multi-runtime coverage and interaction inventory
+        run: xvfb-run -a npm run test:coverage:all
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: combined-coverage-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            .tmp/coverage-aggregate/**/coverage-inventory.json
+            .tmp/coverage-aggregate/**/electron-coverage-status.json
+            .tmp/coverage-aggregate/**/playwright-tests.json
+            .tmp/coverage-aggregate/**/suite-results.json
+            .tmp/coverage-aggregate/**/README.md
+            .tmp/coverage-aggregate/**/logs/*.log
+            .tmp/coverage-aggregate/**/report/coverage-summary.json
+            .tmp/coverage-aggregate/**/report/lcov.info
+            coverage/lcov.info
+      - name: Check SonarCloud configuration
+        id: sonar-config
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
+          SONAR_CI_BASED: ${{ vars.SONAR_CI_BASED }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ] && [ -n "$SONAR_ORGANIZATION" ] && [ "$SONAR_CI_BASED" = "true" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "SonarCloud scan skipped. Configure SONAR_TOKEN and SONAR_ORGANIZATION, switch the project to CI-based analysis, then set SONAR_CI_BASED=true."
+          fi
+      - name: SonarCloud scan
+        if: steps.sonar-config.outputs.configured == 'true'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ vars.SONAR_ORGANIZATION }}

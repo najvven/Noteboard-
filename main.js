@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net, clipboard, dialog } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, shell, session, webContents, net, clipboard, dialog, screen } from 'electron';
 import { installDocumentCloseGuard } from './shared/electron-document-close.js';
 import fs from 'fs/promises';
 import { watch as watchDirectory } from 'fs';
@@ -397,14 +397,16 @@ handleTrusted('board:capture-region', async (event, rect = {}) => {
   const height = Math.min(bounds.height, bottom) - y;
   if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > bounds.width || y + height > bounds.height)
     throw Error('Choose a visible area inside the board window.');
-  if (width * height > 10_000_000)
-    throw Error('The visible area is too large to fill at once. Zoom in and try a smaller area.');
+  const displayScale = screen.getDisplayMatching(win.getBounds()).scaleFactor || 1;
+  const estimatedPhysicalPixels = width * height * displayScale * displayScale;
+  if (!Number.isFinite(estimatedPhysicalPixels) || estimatedPhysicalPixels > 10_000_000)
+    throw Error('The captured area is too large. Reduce the visible area and try again.');
 
   const image = await event.sender.capturePage({ x, y, width, height });
   if (image.isEmpty()) throw Error('Could not read the visible board pixels.');
   const png = image.toPNG({ scaleFactor: 1 });
   if (png.byteLength > 40 * 1024 * 1024)
-    throw Error('The visible area is too large to fill at once. Zoom in and try a smaller area.');
+    throw Error('The captured image is too large. Reduce the visible area and try again.');
 
   return {
     dataUrl: `data:image/png;base64,${png.toString('base64')}`,

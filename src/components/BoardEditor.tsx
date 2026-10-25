@@ -121,6 +121,8 @@ import {
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import { fillConnectedPixels } from "../features/board/pixel-fill";
+import { isPixelFillOpaqueAtPoint, rememberPixelFillAlphaMask } from "../features/board/pixel-fill-hit-test";
+import { captureBoardRegionFromDOM } from "../features/board/browser-region-capture";
 import {
   resolveObjectPlacementProps,
   type PendingPropsBaseline,
@@ -1760,6 +1762,12 @@ export default function BoardEditor({
   const [respectLayerVisibility, setRespectLayerVisibility] = useState(true);
   const [mainBoardHidden] = useState(false);
   const [currentLayerView, setCurrentLayerView] = useState<string | null>(null);
+  const currentLayerViewRef = useRef(currentLayerView);
+  currentLayerViewRef.current = currentLayerView;
+  const activeToolRef = useRef(activeTool);
+  activeToolRef.current = activeTool;
+  const fillToolColorRef = useRef(fillToolColor);
+  fillToolColorRef.current = fillToolColor;
 
   const [dragOverLayerId, setDragOverLayerId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
@@ -1981,6 +1989,18 @@ export default function BoardEditor({
     return boardSurfaceBounds(board);
   };
 
+  const isElementHitAtPoint = (element: BoardElement, point: { x: number; y: number }) => {
+    const sourceElements = elementsRef.current;
+    if (!isPointInVisibleElementArea(
+      element,
+      sourceElements,
+      point,
+      elementBoardBoundary(element, sourceElements, pageDimensions, elementHierarchy),
+      elementHierarchy,
+    )) return false;
+    return !element.isPixelFill || isPixelFillOpaqueAtPoint(element, point);
+  };
+
   const clampPointToBounds = (
     point: { x: number; y: number },
     bounds: { minX: number; minY: number; maxX: number; maxY: number },
@@ -1996,21 +2016,29 @@ export default function BoardEditor({
     if (fillInProgressRef.current) return;
     fillInProgressRef.current = true;
     try {
-      const captureBoardRegion = window.noteboardAPI?.captureBoardRegion;
-      if (!captureBoardRegion) {
-        showFillNotice("Visible pixel filling is available in the desktop app.");
-        return;
-      }
+      const nativeCapture = window.noteboardAPI?.captureBoardRegion;
       if (currentLayerView && elementHierarchy.isLocked(currentLayerView)) {
         showFillNotice("The current layer is locked.");
         return;
       }
 
-      const boardRect = boardSurfaceRef.current?.getBoundingClientRect();
-      const viewportRect = containerRef.current?.getBoundingClientRect();
+      const captureRoot = boardSurfaceRef.current;
+      const viewport = containerRef.current;
+      const boardRect = captureRoot?.getBoundingClientRect();
+      const viewportRect = viewport?.getBoundingClientRect();
       const surfaceBounds = getInteractionBoundsAtPoint(point);
       const boardScale = zoomRef.current;
       if (!boardRect || !viewportRect || !surfaceBounds || !Number.isFinite(boardScale) || boardScale <= 0) return;
+
+      const sourceElements = elementsRef.current;
+      const layerAtStart = currentLayerView;
+      const fillColorAtStart = fillToolColor;
+      const targetBoardAtStart = (getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]))?.id;
+      const scrollAtStart = { left: viewport!.scrollLeft, top: viewport!.scrollTop };
+      const rectAtStart = {
+        board: { x: boardRect.x, y: boardRect.y, width: boardRect.width, height: boardRect.height },
+        viewport: { x: viewportRect.x, y: viewportRect.y, width: viewportRect.width, height: viewportRect.height },
+      };
 
       const surfaceRect = {
         left: boardRect.left + surfaceBounds.minX * boardScale,
@@ -2019,10 +2047,10 @@ export default function BoardEditor({
         bottom: boardRect.top + surfaceBounds.maxY * boardScale,
       };
       const requestedRect = {
-        left: Math.max(viewportRect.left, boardRect.left, surfaceRect.left),
-        top: Math.max(viewportRect.top, boardRect.top, surfaceRect.top),
-        right: Math.min(viewportRect.right, boardRect.right, surfaceRect.right),
-        bottom: Math.min(viewportRect.bottom, boardRect.bottom, surfaceRect.bottom),
+        left: Math.max(viewportRect.left, surfaceRect.left),
+        top: Math.max(viewportRect.top, surfaceRect.top),
+        right: Math.min(viewportRect.right, surfaceRect.right),
+        bottom: Math.min(viewportRect.bottom, surfaceRect.bottom),
       };
       if (
         requestedRect.right <= requestedRect.left ||
@@ -2031,25 +2059,86 @@ export default function BoardEditor({
         clientPoint.y < requestedRect.top || clientPoint.y >= requestedRect.bottom
       ) return;
 
+      if (!nativeCapture) {
+        const pointTarget = document.elementFromPoint(clientPoint.x, clientPoint.y);
+        if (pointTarget instanceof HTMLElement && pointTarget.closest('webview, iframe')) {
+          showFillNotice("The browser preview cannot capture pixels inside embedded Web content.");
+          return;
+        }
+      }
+
       const wholeSurfaceVisible =
         requestedRect.left <= surfaceRect.left + 1 &&
         requestedRect.top <= surfaceRect.top + 1 &&
         requestedRect.right >= surfaceRect.right - 1 &&
         requestedRect.bottom >= surfaceRect.bottom - 1;
-      const capture = await captureBoardRegion({
-        x: requestedRect.left,
-        y: requestedRect.top,
-        width: requestedRect.right - requestedRect.left,
-        height: requestedRect.bottom - requestedRect.top,
-      });
+      const captureStyle = document.createElement("style");
+      captureStyle.textContent = `
+        html[data-noteboard-fill-capture="true"] [data-selection-tool],
+        html[data-noteboard-fill-capture="true"] [data-selection-outline],
+        html[data-noteboard-fill-capture="true"] [data-multi-selection],
+        html[data-noteboard-fill-capture="true"] [data-selection-region],
+        html[data-noteboard-fill-capture="true"] [data-selection-area-toolbar],
+        html[data-noteboard-fill-capture="true"] [data-board-placement-preview],
+        html[data-noteboard-fill-capture="true"] [data-new-board-preview],
+        html[data-noteboard-fill-capture="true"] [data-main-board-resize],
+        html[data-noteboard-fill-capture="true"] [data-element-preview],
+        html[data-noteboard-fill-capture="true"] [data-resize-handle],
+        html[data-noteboard-fill-capture="true"] [data-smart-guides] { visibility: hidden !important; }
+      `;
+      const documentRoot = document.documentElement;
+      const previousCaptureFlag = documentRoot.getAttribute("data-noteboard-fill-capture");
+      documentRoot.setAttribute("data-noteboard-fill-capture", "true");
+      document.head.appendChild(captureStyle);
+      const backgroundTargets = [
+        ...(document.querySelector<HTMLElement>("#workspace-bg") ? [document.querySelector<HTMLElement>("#workspace-bg")!] : []),
+        ...Array.from(document.querySelectorAll<HTMLElement>('[data-board-surface="true"]')),
+      ];
+      const originalBackgrounds = backgroundTargets.map(node => node.style.backgroundImage);
+      backgroundTargets.forEach(node => { node.style.backgroundImage = "none"; });
+      let capture;
+      try {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+        await new Promise<void>(resolve => window.setTimeout(resolve, 50));
+        capture = nativeCapture
+          ? await nativeCapture({
+              x: requestedRect.left,
+              y: requestedRect.top,
+              width: requestedRect.right - requestedRect.left,
+              height: requestedRect.bottom - requestedRect.top,
+            })
+          : await captureBoardRegionFromDOM(captureRoot, requestedRect, boardScale);
+      } finally {
+        backgroundTargets.forEach((node, index) => { node.style.backgroundImage = originalBackgrounds[index]; });
+        captureStyle.remove();
+        if (previousCaptureFlag === null) documentRoot.removeAttribute("data-noteboard-fill-capture");
+        else documentRoot.setAttribute("data-noteboard-fill-capture", previousCaptureFlag);
+      }
 
       const sourceImage = new Image();
       sourceImage.src = capture.dataUrl;
       await sourceImage.decode();
+      const latestBoardRect = captureRoot.getBoundingClientRect();
+      const latestViewportRect = viewport!.getBoundingClientRect();
+      const sameRect = (a: DOMRect, b: { x: number; y: number; width: number; height: number }) =>
+        a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+      const activeBoardNow = (getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]))?.id;
+      if (
+        boardSurfaceRef.current !== captureRoot || containerRef.current !== viewport ||
+        zoomRef.current !== boardScale || activeToolRef.current !== "fill" ||
+        currentLayerViewRef.current !== layerAtStart || fillToolColorRef.current !== fillColorAtStart ||
+        elementsRef.current !== sourceElements ||
+        viewport!.scrollLeft !== scrollAtStart.left || viewport!.scrollTop !== scrollAtStart.top ||
+        !sameRect(latestBoardRect, rectAtStart.board) || !sameRect(latestViewportRect, rectAtStart.viewport) ||
+        activeBoardNow !== targetBoardAtStart
+      ) {
+        showFillNotice("The board view changed while Fill was preparing. Try again.");
+        return;
+      }
       const pixelWidth = sourceImage.naturalWidth;
       const pixelHeight = sourceImage.naturalHeight;
       if (!pixelWidth || !pixelHeight || pixelWidth * pixelHeight > 10_000_000) {
-        showFillNotice("The visible area is too large to fill. Zoom in and try a smaller area.");
+        showFillNotice("The captured area is too large. Reduce the visible area and try again.");
         return;
       }
 
@@ -2071,7 +2160,7 @@ export default function BoardEditor({
         pixelHeight,
         seedX,
         seedY,
-        fillToolColor,
+        fillColorAtStart,
       );
       if (!result) return;
       if (result.touchesEdge && !wholeSurfaceVisible) {
@@ -2088,6 +2177,13 @@ export default function BoardEditor({
         return;
       }
       fillContext.putImageData(sourcePixels, -result.bounds.x, -result.bounds.y);
+      const fillContent = fillCanvas.toDataURL("image/png");
+      rememberPixelFillAlphaMask(
+        fillContent,
+        fillContext.getImageData(0, 0, result.bounds.width, result.bounds.height).data,
+        result.bounds.width,
+        result.bounds.height,
+      );
 
       const cssPerPixelX = capture.rect.width / pixelWidth;
       const cssPerPixelY = capture.rect.height / pixelHeight;
@@ -2098,7 +2194,7 @@ export default function BoardEditor({
         id: generateId(),
         type: "image",
         name: "Filled region",
-        content: fillCanvas.toDataURL("image/png"),
+        content: fillContent,
         color: "transparent",
         borderColor: "transparent",
         borderWidth: 0,
@@ -2113,11 +2209,11 @@ export default function BoardEditor({
           height: Math.max(0.1, result.bounds.height * cssPerPixelY / boardScale),
         },
         zIndex: latestElements.reduce((highest, element) => Math.max(highest, element.zIndex), 0) + 1,
-        parentId: currentLayerView || undefined,
+        parentId: creationParentId(point),
       };
       pushElements([...latestElements, filledElement]);
     } catch {
-      showFillNotice("Could not fill this visible region. Try a smaller area or zoom out.");
+      showFillNotice("Could not fill this visible region. Reduce the captured area and try again.");
     } finally {
       fillInProgressRef.current = false;
     }
@@ -6373,14 +6469,8 @@ export default function BoardEditor({
         .slice()
         .reverse()
         .find((el) => {
-          const ew = el.size?.width || 100;
-          const eh = el.size?.height || 40;
-          return (
-            exactX >= el.position.x &&
-            exactX <= el.position.x + ew &&
-            exactY >= el.position.y &&
-            exactY <= el.position.y + eh
-          );
+          if (el.type === "layer" || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
+          return isElementHitAtPoint(el, { x: exactX, y: exactY });
         });
       if (el) {
         setSelectedId(el.id);
@@ -6418,14 +6508,7 @@ export default function BoardEditor({
            .reverse()
            .find((el) => {
              if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
-             const ew = el.size?.width || 100;
-             const eh = el.size?.height || 40;
-             return (
-               exactX >= el.position.x &&
-               exactX <= el.position.x + ew &&
-               exactY >= el.position.y &&
-               exactY <= el.position.y + eh
-             );
+              return isElementHitAtPoint(el, { x: exactX, y: exactY });
            });
          if (el) removeElement(el.id);
       }
@@ -6502,14 +6585,7 @@ export default function BoardEditor({
            .reverse()
            .find((el) => {
              if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
-             const ew = el.size?.width || 100;
-             const eh = el.size?.height || 40;
-             return (
-               exactX >= el.position.x &&
-               exactX <= el.position.x + ew &&
-               exactY >= el.position.y &&
-               exactY <= el.position.y + eh
-             );
+              return isElementHitAtPoint(el, { x: exactX, y: exactY });
            });
          if (el) removeElement(el.id);
       }
@@ -11141,6 +11217,14 @@ function BoardElementNode({
   >(null);
   const activePointerGestureCleanupRef = useRef<(() => void) | null>(null);
   const resolvedPreviewMode = element.previewMode ?? globalPreviewMode;
+
+  useEffect(() => {
+    if (!element.isPixelFill || !element.content) return;
+    void isPixelFillOpaqueAtPoint(element, {
+      x: element.position.x + (element.size?.width ?? 0) / 2,
+      y: element.position.y + (element.size?.height ?? 0) / 2,
+    });
+  }, [element.content, element.isPixelFill]);
 
   const captureElementPointer = (event: React.PointerEvent) => {
     const pointerId = event.pointerId;

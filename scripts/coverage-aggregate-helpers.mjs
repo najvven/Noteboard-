@@ -11,6 +11,47 @@ export const REQUIRED_COVERAGE_PHASES = [
   'typecheck', 'source-tests', 'browser-tests', 'build', 'playwright', 'electron',
 ];
 
+const REQUIRED_COVERAGE_INPUTS = [
+  'index.html', 'sheet.html', 'src/index.css', 'main.js', 'preload.cjs',
+  'web-privacy-preload.cjs', 'server.ts', 'package.json', 'package-lock.json',
+  'playwright.config.ts', 'vite.config.ts', 'tsconfig.json', 'sonar-project.properties',
+];
+const COVERAGE_SOURCE_DIRECTORIES = [
+  'src', 'shared', 'scripts', 'tests',
+];
+const COVERAGE_INPUT_EXTENSION = /\.(?:[cm]?[jt]sx?|css|html)$/i;
+
+const toPosix = value => value.replaceAll(path.sep, '/');
+
+/** Build a deterministic snapshot of source, test, page, style, and build inputs. */
+export async function collectCoverageSourceInventory(root) {
+  const files = new Set(REQUIRED_COVERAGE_INPUTS);
+  const visit = async relativeDirectory => {
+    const absoluteDirectory = path.join(root, relativeDirectory);
+    const entries = await fs.readdir(absoluteDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = path.join(relativeDirectory, entry.name);
+      if (entry.isDirectory()) await visit(relative);
+      else if (entry.isFile() && COVERAGE_INPUT_EXTENSION.test(entry.name)) files.add(toPosix(relative));
+    }
+  };
+
+  for (const input of REQUIRED_COVERAGE_INPUTS) {
+    const stat = await fs.stat(path.join(root, ...input.split('/')));
+    if (!stat.isFile()) throw new Error(`Required coverage input is not a file: ${input}`);
+  }
+  for (const directory of COVERAGE_SOURCE_DIRECTORIES) await visit(directory);
+
+  const entries = [];
+  const digest = createHash('sha256');
+  for (const relative of [...files].sort()) {
+    const content = await fs.readFile(path.join(root, ...relative.split('/')));
+    entries.push({ path: relative, sha256: createHash('sha256').update(content).digest('hex') });
+    digest.update(relative).update('\0').update(content).update('\0');
+  }
+  return { fingerprint: digest.digest('hex'), files: entries };
+}
+
 export async function hashCoverageToolFiles(root) {
   const digest = createHash('sha256');
   for (const relative of COVERAGE_TOOL_FILES) {
@@ -72,6 +113,56 @@ export function coverageSuiteStatus({ exitCode, skipReason } = {}) {
   if (exitCode === 0) return 'passed';
   if (skipReason) return 'skipped';
   return 'unknown';
+}
+
+export function parseNodeTestStatuses(log) {
+  return [...log.matchAll(/^[✔✖﹣]\s+(.+?)\s+\((\d+(?:\.\d+)?)(ms|s)\)$/gm)]
+    .map(match => ({
+      title: match[1],
+      status: match[0][0] === '✔' ? 'passed' : match[0][0] === '✖' ? 'failed' : 'skipped',
+    }));
+}
+
+export function assertCoverageBuildSucceeded(exitCode, logPath) {
+  if (exitCode !== 0)
+    throw new Error(`Could not recreate coverage source maps: npm run build exited with code ${exitCode}. See ${logPath}.`);
+}
+
+export async function validateLcovSourcePaths(lcov, root) {
+  const sources = [...lcov.matchAll(/^SF:(.+)$/gm)].map(match => match[1].trim());
+  if (sources.length === 0) throw new Error('Combined LCOV is empty and contains no source files.');
+  for (const source of sources) {
+    const absolute = path.resolve(root, source);
+    const relative = path.relative(root, absolute);
+    if (relative.startsWith('..') || path.isAbsolute(relative) ||
+        /(^|[\\/])(tests|node_modules|dist|release|\.tmp)([\\/]|$)/i.test(relative))
+      throw new Error(`Combined LCOV references a non-source or external file: ${source}`);
+    if (!(await fs.stat(absolute).then(stat => stat.isFile()).catch(() => false)))
+      throw new Error(`Combined LCOV references a missing source file: ${source}`);
+  }
+  return sources;
+}
+
+export function electronCoverageCollectionErrors(statuses) {
+  if (!Array.isArray(statuses) || statuses.length === 0)
+    return ['Electron coverage status is missing; no instrumented host renderer was reported.'];
+  const errors = [];
+  for (const [index, status] of statuses.entries()) {
+    if (status?.status === 'expected-shutdown') continue;
+    if (status?.status !== 'collected') {
+      errors.push(`Electron test ${status?.testName || index + 1}: renderer coverage status is ${status?.status || 'unknown'}.`);
+      continue;
+    }
+    if (!Number.isInteger(status.hostRenderersStarted) || status.hostRenderersStarted < 1)
+      errors.push(`Electron test ${status.testName || index + 1}: no host renderer profiler started.`);
+    if (!Number.isInteger(status.rendererProfilesSaved) || status.rendererProfilesSaved < 1)
+      errors.push(`Electron test ${status.testName || index + 1}: no host renderer profile was saved.`);
+    if (Array.isArray(status.errors) && status.errors.length)
+      errors.push(`Electron test ${status.testName || index + 1}: ${status.errors.join('; ')}`);
+  }
+  if (!statuses.some(status => status?.status === 'collected' && status.rendererProfilesSaved > 0))
+    errors.push('Electron produced no host renderer coverage profile.');
+  return errors;
 }
 
 export function assertCoverageSuitesKnown(suites) {

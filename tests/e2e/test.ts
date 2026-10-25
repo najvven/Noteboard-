@@ -1,4 +1,4 @@
-import { test as base, expect } from '@playwright/test';
+import { test as base, expect, type Page } from '@playwright/test';
 import { clearFixtureBoards } from './fixture-storage';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -6,21 +6,23 @@ import { mkdir, appendFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 type E2EFixtures = {fixtureStoreIsolation: undefined; fixtureCoverageCapture: undefined};
+type CoverageEntries = Awaited<ReturnType<Page['coverage']['stopJSCoverage']>>;
+type CoverageState = {started: Promise<void>; stop?: Promise<void>; entries: CoverageEntries};
 
 export const test = base.extend<E2EFixtures>({
   fixtureStoreIsolation: [async ({request}, use) => {
     await clearFixtureBoards(request);
     await use(undefined);
   }, {auto: true}],
-  fixtureCoverageCapture: [async ({context, page}, use, testInfo) => {
+  fixtureCoverageCapture: [async ({context}, use, testInfo) => {
     const outputDirectory = process.env.NOTEBOARD_BROWSER_COVERAGE;
     if (!outputDirectory) { await use(undefined); return; }
 
-    const tracked = new Map<typeof page, { started: Promise<void>; stop?: Promise<void>; entries: Awaited<ReturnType<typeof page.coverage.stopJSCoverage>> }>();
+    const tracked = new Map<Page, CoverageState>();
     let collectionError: string | undefined;
-    const start = (target: typeof page) => {
+    const start = (target: Page) => {
       if (tracked.has(target)) return;
-      const state: { started: Promise<void>; stop?: Promise<void>; entries: Awaited<ReturnType<typeof page.coverage.stopJSCoverage>> } = {
+      const state: CoverageState = {
         started: target.coverage.startJSCoverage({ resetOnNavigation: false }),
         entries: [],
       };
@@ -36,7 +38,7 @@ export const test = base.extend<E2EFixtures>({
       };
     };
     for (const target of context.pages()) start(target);
-    const onPage = (target: typeof page) => start(target);
+    const onPage = (target: Page) => start(target);
     context.on('page', onPage);
     await Promise.all([...tracked.values()].map(state => state.started));
     let scriptCount = 0;

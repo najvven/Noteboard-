@@ -1,14 +1,19 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import {
   assertCoverageSuitesKnown,
+  assertCoverageBuildSucceeded,
   assertCoveragePhaseInventory,
+  collectCoverageSourceInventory,
   coverageSuiteStatus,
+  electronCoverageCollectionErrors,
   hashCoverageToolFiles,
+  parseNodeTestStatuses,
+  validateLcovSourcePaths,
   validateReportOnlySnapshot,
 } from './coverage-aggregate-helpers.mjs';
 
@@ -38,7 +43,7 @@ const reportOptions = {
   ],
   excludeAfterRemap: true,
   extension: ['.js', '.cjs', '.mjs', '.ts', '.tsx'],
-  reporter: ['text-summary', 'json', 'json-summary', 'html'],
+  reporter: ['text-summary', 'json', 'json-summary', 'html', 'lcov'],
   omitRelative: true,
   resolve: root,
   excludeNodeModules: true,
@@ -50,27 +55,9 @@ const slash = value => value.replaceAll(path.sep, '/');
 const runId = () => new Date().toISOString().replaceAll(/[-:.]/g, '') + `-${randomUUID().slice(0, 8)}`;
 
 async function collectSourceInventory() {
-  const candidates = ['main.js', 'preload.cjs', 'web-privacy-preload.cjs', 'server.ts'];
-  const directories = ['src', 'shared', 'scripts/web-adblock-extension', 'tests', 'tests/browser', 'tests/electron', 'tests/e2e'];
-  const visit = async directory => {
-    for (const entry of await fs.readdir(path.join(root, directory), { withFileTypes: true })) {
-      const relative = path.join(directory, entry.name);
-      if (entry.isDirectory()) await visit(relative);
-      else if (/\.(?:[cm]?js|tsx?)$/.test(entry.name)) candidates.push(relative);
-    }
-  };
-  for (const directory of directories) await visit(directory);
-  candidates.push('package.json', 'package-lock.json', 'playwright.config.ts', 'vite.config.ts', 'tsconfig.json');
-  const entries = [...new Set(candidates)].sort().map(relative => ({ path: slash(relative), absolutePath: path.join(root, relative) }));
-  const digest = createHash('sha256');
-  for (const entry of entries) {
-    const content = await fs.readFile(entry.absolutePath);
-    entry.sha256 = createHash('sha256').update(content).digest('hex');
-    digest.update(entry.path).update('\0').update(content).update('\0');
-    delete entry.absolutePath;
-  }
+  const { fingerprint, files } = await collectCoverageSourceInventory(root);
   const coverageToolSha256 = await hashCoverageToolFiles(root);
-  return { fingerprint: digest.digest('hex'), coverageToolSha256, files: entries };
+  return { fingerprint, coverageToolSha256, files };
 }
 
 async function streamCommand(label, executable, args, env, logFile) {
@@ -108,12 +95,16 @@ async function buildCoverage(runDirectory, sourceInventory) {
   const coverageMap = createCoverageMap(await nodeReporter.getCoverageMapFromAllCoverageFiles());
   const profileErrors = [];
   const browserProfiles = [];
+  let electronProfileFiles = 0;
   for (const directoryName of ['browser-v8', 'electron-v8']) {
     const directory = path.join(runDirectory, directoryName);
     const profileFiles = await fs.readdir(directory).catch(() => []);
     for (const profileFile of profileFiles.filter(name => name.endsWith('.json'))) {
       const profile = JSON.parse(await fs.readFile(path.join(directory, profileFile), 'utf8'));
-      if (Array.isArray(profile.result)) browserProfiles.push(profile);
+      if (Array.isArray(profile.result)) {
+        browserProfiles.push(profile);
+        if (directoryName === 'electron-v8' && profile.result.length) electronProfileFiles++;
+      }
     }
   }
   const mergedProfiles = browserProfiles.length ? mergeProcessCovs(browserProfiles) : { result: [] };
@@ -155,6 +146,13 @@ async function buildCoverage(runDirectory, sourceInventory) {
     functions: Number(totals.functions.pct),
     statements: Number(totals.statements.pct),
   };
+  const phases = JSON.parse(await fs.readFile(path.join(runDirectory, 'suite-results.json'), 'utf8'));
+  assertCoveragePhaseInventory(phases);
+  const electronCoverageStatus = await fs.readFile(path.join(runDirectory, 'electron-coverage-status.json'), 'utf8')
+    .then(text => JSON.parse(text)).catch(() => []);
+  const electronCoverageErrors = electronCoverageCollectionErrors(electronCoverageStatus);
+  if (electronProfileFiles === 0 && !electronCoverageErrors.includes('Electron produced no host renderer coverage profile.'))
+    electronCoverageErrors.push('Electron produced no host renderer coverage profile file.');
   const rows = Object.entries(summary).filter(([key]) => key !== 'total');
   const inventory = {
     schemaVersion: 1,
@@ -167,6 +165,12 @@ async function buildCoverage(runDirectory, sourceInventory) {
     metrics,
     thresholdPercent: 80,
     testSuites: [],
+    electronCoverage: {
+      rendererProfiles: electronProfileFiles,
+      instrumentedTestRuns: electronCoverageStatus.filter(item => item?.status === 'collected').length,
+      expectedShutdowns: electronCoverageStatus.filter(item => item?.status === 'expected-shutdown').length,
+      collectionErrors: electronCoverageErrors,
+    },
     sourceMapProfilesConverted: mergedProfiles.result.length,
     sourceMapProfileErrors: profileErrors,
     metricNotes: [
@@ -176,8 +180,6 @@ async function buildCoverage(runDirectory, sourceInventory) {
       'Chromium extension service-worker files are included, but these runs do not attach a profiler to that worker; they remain uncovered unless a worker profile is available.',
     ],
   };
-  const phases = JSON.parse(await fs.readFile(path.join(runDirectory, 'suite-results.json'), 'utf8'));
-  assertCoveragePhaseInventory(phases);
   const playwrightTests = JSON.parse(await fs.readFile(path.join(runDirectory, 'playwright-tests.json'), 'utf8'));
   const playwrightCaptureFailures = playwrightTests.filter(item => item.collectionError);
   for (const phase of phases) {
@@ -191,7 +193,7 @@ async function buildCoverage(runDirectory, sourceInventory) {
       ? (await fs.readFile(path.join(runDirectory, phase.log), 'utf8').catch(() => '')).replaceAll(/\u001b\[[0-9;]*m/g, '')
       : '';
     const counts = log.match(/ℹ tests (\d+)\s*\r?\nℹ suites (\d+)\s*\r?\nℹ pass (\d+)\s*\r?\nℹ fail (\d+)\s*\r?\nℹ cancelled (\d+)\s*\r?\nℹ skipped (\d+)/);
-    const titles = [...log.matchAll(/^[✔✖﹣]\s+(.+?)\s+\(\d+(?:\.\d+)?(?:ms|s)\)$/gm)].map(match => match[1]);
+    const testStatuses = parseNodeTestStatuses(log);
     const browserCases = phase.name === 'playwright' ? playwrightTests : [];
     const browserPassed = browserCases.filter(item => item.status === 'passed').length;
     const browserFailed = browserCases.filter(item => item.status === 'failed').length;
@@ -207,7 +209,7 @@ async function buildCoverage(runDirectory, sourceInventory) {
       ...(skipReason ? { skipReason } : {}),
       tests: phase.name === 'playwright'
         ? browserCases.map(item => ({ title: item.title, file: item.file, status: item.status, applicationScripts: item.applicationScripts }))
-        : titles.map(title => ({ title, status: title.startsWith('﹣') ? 'skipped' : title.startsWith('✖') ? 'failed' : 'passed' })),
+        : testStatuses,
     });
   }
   inventory.playwrightCoverage = {
@@ -219,6 +221,18 @@ async function buildCoverage(runDirectory, sourceInventory) {
   inventory.failedSuites = inventory.testSuites.filter(suite => suite.status !== 'skipped' && (suite.failed > 0 || (suite.exitCode !== undefined && suite.exitCode !== null && suite.exitCode !== 0)))
     .map(suite => ({ name: suite.name, exitCode: suite.exitCode ?? null, failedTests: suite.failed }));
   await fs.writeFile(path.join(runDirectory, 'coverage-inventory.json'), JSON.stringify(inventory, null, 2));
+  await fs.mkdir(path.join(root, 'coverage'), { recursive: true });
+  const reportLcovPath = path.join(runDirectory, 'report', 'lcov.info');
+  const lcov = await fs.readFile(reportLcovPath, 'utf8');
+  await validateLcovSourcePaths(lcov, root);
+  const stableLcovPath = path.join(root, 'coverage', 'lcov.info');
+  const pendingLcovPath = `${stableLcovPath}.${path.basename(runDirectory)}.tmp`;
+  try {
+    await fs.copyFile(reportLcovPath, pendingLcovPath);
+    await fs.rename(pendingLcovPath, stableLcovPath);
+  } finally {
+    await fs.rm(pendingLcovPath, { force: true });
+  }
   const markdown = [
     '# Combined code coverage and executed tests', '',
     `Run: ${inventory.runId}`,
@@ -228,6 +242,12 @@ async function buildCoverage(runDirectory, sourceInventory) {
     ...Object.entries(metrics).map(([name, value]) => `| ${name} | ${value}% | 80% |`), '',
     `Application files measured: ${rows.length}`, '', '## Test suites', '',
   ];
+  markdown.push('## Electron renderer coverage', '',
+    `Renderer profiles: ${inventory.electronCoverage.rendererProfiles}`,
+    `Instrumented test runs: ${inventory.electronCoverage.instrumentedTestRuns}`,
+    `Expected shutdowns before profile collection: ${inventory.electronCoverage.expectedShutdowns}`,
+    ...(inventory.electronCoverage.collectionErrors.length ? inventory.electronCoverage.collectionErrors.map(error => `- ${error}`) : ['Collection errors: none']), '',
+  );
   for (const suite of inventory.testSuites) {
     if (suite.passed === null) { markdown.push('### ' + suite.name + ' validation: ' + suite.status, ''); continue; }
     markdown.push(`### ${suite.name}: ${suite.status} — ${suite.passed} passed, ${suite.skipped} skipped, ${suite.failed} failed`, '');
@@ -237,6 +257,8 @@ async function buildCoverage(runDirectory, sourceInventory) {
   markdown.push('## Reports and reruns', '', '- report/index.html contains source-mapped per-file detail.', '- report/coverage-final.json is the machine-readable combined result.', '- coverage-inventory.json lists the exact source snapshot and executed tests.', '- Raw profiles are saved by runtime; npm run test:coverage:report regenerates totals without rerunning the test suites.', '');
   await fs.writeFile(path.join(runDirectory, 'README.md'), markdown.join('\n'));
   if (profileErrors.length) throw new Error('Could not map ' + profileErrors.length + ' Chromium/Electron scripts to source. See ' + path.relative(root, runDirectory) + '.');
+  if (inventory.electronCoverage.collectionErrors.length)
+    throw new Error('Electron renderer coverage collection failed: ' + inventory.electronCoverage.collectionErrors.join(' ') + ` See ${path.relative(root, runDirectory)}.`);
   const failed = Object.entries(metrics).filter(([, pct]) => pct < 80);
   if (playwrightCaptureFailures.length) throw new Error(`Chromium coverage collection failed for ${playwrightCaptureFailures.length} tests. See ${path.relative(root, runDirectory)}.`);
   if (!inventory.playwrightCoverage.applicationScriptsCaptured) throw new Error(`Chromium produced no application-script profiles. See ${path.relative(root, runDirectory)}.`);
@@ -273,8 +295,10 @@ async function main() {
       const npmCli = process.env.npm_execpath;
       if (!npmCli) throw new Error('Cannot recreate the matching source maps outside npm.');
       await fs.mkdir(path.join(runDirectory, 'logs'), { recursive: true });
-      await streamCommand('coverage-source-maps', process.execPath, [npmCli, 'run', 'build'],
-        { ...process.env, NOTEBOARD_COVERAGE: '1' }, path.join(runDirectory, 'logs', 'coverage-source-maps.log'));
+      const logPath = path.join(runDirectory, 'logs', 'coverage-source-maps.log');
+      const exitCode = await streamCommand('coverage-source-maps', process.execPath, [npmCli, 'run', 'build'],
+        { ...process.env, NOTEBOARD_COVERAGE: '1' }, logPath);
+      assertCoverageBuildSucceeded(exitCode, path.relative(root, logPath));
     }
   }
   if (!reportOnly) {
@@ -295,6 +319,7 @@ async function main() {
       NOTEBOARD_BROWSER_COVERAGE: path.join(runDirectory, 'browser-v8'),
       NOTEBOARD_BROWSER_COVERAGE_INDEX: path.join(runDirectory, 'browser-index', 'playwright.jsonl'),
       NOTEBOARD_ELECTRON_COVERAGE: path.join(runDirectory, 'electron-v8'),
+      NOTEBOARD_ELECTRON_COVERAGE_STATUS: path.join(runDirectory, 'electron-coverage-status.jsonl'),
       NOTEBOARD_COVERAGE_ORIGIN: 'http://127.0.0.1:3100',
     };
     const phases = [
@@ -327,6 +352,10 @@ async function main() {
       if (phase.name === 'build' && exitCode !== 0) buildSucceeded = false;
     }
     await fs.writeFile(path.join(runDirectory, 'suite-results.json'), JSON.stringify(phaseResults, null, 2));
+    const electronStatusPath = path.join(runDirectory, 'electron-coverage-status.jsonl');
+    const electronStatuses = await fs.readFile(electronStatusPath, 'utf8')
+      .then(text => text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))).catch(() => []);
+    await fs.writeFile(path.join(runDirectory, 'electron-coverage-status.json'), JSON.stringify(electronStatuses, null, 2));
     const playwrightIndex = path.join(runDirectory, 'browser-index', 'playwright.jsonl');
     const playwrightTests = await fs.readFile(playwrightIndex, 'utf8').then(text => text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))).catch(() => []);
     await fs.writeFile(path.join(runDirectory, 'playwright-tests.json'), JSON.stringify(playwrightTests, null, 2));

@@ -901,8 +901,8 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const popupUrl = `http://localhost:${server.address().port}/popup`;
   await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(`window.open(${JSON.stringify(url)}, "_blank"); undefined`,true),popupUrl);
   progress('different-origin popup opened');
-  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().some(c=>c.getURL()===url),popupUrl)).toBe(true);
-  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getURL()===url).executeJavaScript('document.cookie'),popupUrl)).toContain('popup=1');
+  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().some(c=>c.getURL()===url),popupUrl).catch(()=>false)).toBe(true);
+  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getURL()===url)?.executeJavaScript('document.cookie'),popupUrl).catch(()=>undefined)).toContain('popup=1');
   progress('different-origin cookies verified');
   await window.getByRole('button',{name:'More',exact:true}).click();
   await window.getByRole('button',{name:'Duplicate',exact:true}).click();

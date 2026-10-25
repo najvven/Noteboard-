@@ -27,7 +27,8 @@ import {
   loadPresets as loadStoredPresets,
   loadSettings,
   savePage,
-  savePresets,
+  type PresetOperation,
+  updatePreset,
   saveSettings,
   subscribeToBoardChanges,
   type SavePageOptions,
@@ -68,7 +69,10 @@ export default function App() {
   const [storageHydrated, setStorageHydrated] = useState(false);
 
   useEffect(() => window.noteboardAPI?.onCloseRequested?.(requestId => {
-    void Promise.all([homeActionQueueRef.current, presetSaveQueueRef.current]).then(() => flushBoardOperations()).then(
+    void Promise.all([homeActionQueueRef.current, presetSaveQueueRef.current]).then(() => {
+      if (pendingPresetOperationsRef.current.length) throw new Error('Templates still need to be saved.');
+      return flushBoardOperations();
+    }).then(
       () => window.noteboardAPI?.respondToClose?.(requestId, true),
       () => window.noteboardAPI?.respondToClose?.(requestId, false),
     );
@@ -109,11 +113,59 @@ export default function App() {
     loadData();
   }, []);
 
+  const pendingPresetOperationsRef = useRef<PresetOperation[]>([]);
+  const applyPresetOperationLocally = (presets: Preset[], operation: PresetOperation): Preset[] => {
+    if (operation.type === 'add') {
+      const existing = presets.find(preset => preset.id === operation.preset.id);
+      return existing ? presets : [...presets, operation.preset];
+    }
+    if (operation.type === 'delete') return presets.filter(preset => preset.id !== operation.id);
+    return presets.map(preset => preset.id === operation.id ? { ...preset, name: operation.name } : preset);
+  };
+  const rebasePendingPresets = (presets: Preset[]) =>
+    pendingPresetOperationsRef.current.reduce(applyPresetOperationLocally, presets);
+  const refreshPresetsFromStorage = useCallback(async () => {
+    const fetched = await loadStoredPresets();
+    persistedPresetsRef.current = fetched;
+    const rebased = rebasePendingPresets(fetched);
+    userPresetsRef.current = rebased;
+    setUserPresets(rebased);
+  }, []);
+  const updateUserPresets = (presetOperation: PresetOperation): Promise<boolean> => {
+    const matches = (candidate: PresetOperation) => JSON.stringify(candidate) === JSON.stringify(presetOperation);
+    if (!pendingPresetOperationsRef.current.some(matches))
+      pendingPresetOperationsRef.current = [...pendingPresetOperationsRef.current, presetOperation];
+    const optimistic = rebasePendingPresets(persistedPresetsRef.current);
+    userPresetsRef.current = optimistic;
+    setUserPresets(optimistic);
+    const operation = presetSaveQueueRef.current.then(async () => {
+      // Retry retained operations with the same ID before acknowledging later
+      // actions, so a lost response cannot create duplicate template records.
+      let persisted = persistedPresetsRef.current;
+      while (pendingPresetOperationsRef.current.length) {
+        const nextOperation = pendingPresetOperationsRef.current[0];
+        persisted = await updatePreset(nextOperation);
+        persistedPresetsRef.current = persisted;
+        pendingPresetOperationsRef.current = pendingPresetOperationsRef.current.slice(1);
+      }
+      const rebased = rebasePendingPresets(persisted);
+      userPresetsRef.current = rebased;
+      setUserPresets(rebased);
+      updateStorageError(current => current?.conflictedPageId ? current : null);
+    });
+    presetSaveQueueRef.current = operation.catch(() => undefined);
+    return operation.then(() => true).catch(error => {
+      console.error(error);
+      setStorageError('Could not save templates. Your change is kept locally; please retry.');
+      return false;
+    });
+  };
+
   useEffect(() => {
     if (currentScreen === 'editor') return;
-
     const handleFocus = () => {
       refreshPagesFromStorage().catch(console.error);
+      refreshPresetsFromStorage().catch(console.error);
     };
     window.addEventListener('focus', handleFocus);
     const unsubscribe = subscribeToBoardChanges(handleFocus);
@@ -121,28 +173,7 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
       unsubscribe();
     };
-  }, [currentScreen, refreshPagesFromStorage]);
-
-  const updateUserPresets = (change: (presets: Preset[]) => Preset[]): Promise<boolean> => {
-    const next = change(userPresetsRef.current);
-    userPresetsRef.current = next;
-    setUserPresets(next);
-    const operation = presetSaveQueueRef.current.then(async () => {
-      await savePresets(next);
-      persistedPresetsRef.current = next;
-      updateStorageError(current => current?.conflictedPageId ? current : null);
-    });
-    presetSaveQueueRef.current = operation.catch(() => undefined);
-    return operation.then(() => true).catch(error => {
-      console.error(error);
-      if (userPresetsRef.current === next) {
-        userPresetsRef.current = persistedPresetsRef.current;
-        setUserPresets(persistedPresetsRef.current);
-      }
-      setStorageError('Could not save templates. Please try again.');
-      return false;
-    });
-  };
+  }, [currentScreen, refreshPagesFromStorage, refreshPresetsFromStorage]);
 
   const skipNextSettingsSaveRef = useRef(true);
   useEffect(() => {
@@ -403,8 +434,8 @@ export default function App() {
           userPresets={userPresets}
           onStart={handleStartFromPreset}
           onBack={handleBackToHome}
-          onDeletePreset={(id) => { void updateUserPresets(prev => prev.filter(p => p.id !== id)); }}
-          onRenamePreset={(id, newName) => { void updateUserPresets(prev => prev.map(p => p.id === id ? { ...p, name: newName } : p)); }}
+          onDeletePreset={(id) => { void updateUserPresets({ type: 'delete', id }); }}
+          onRenamePreset={(id, newName) => { void updateUserPresets({ type: 'rename', id, name: newName }); }}
         />
       )}
       
@@ -419,7 +450,7 @@ export default function App() {
               return savePageToServer(updatedPage, options);
             }}
             onSaveAs={handleSaveAsPage}
-            onSavePreset={(preset) => updateUserPresets(prev => [...prev, preset])}
+            onSavePreset={(preset) => updateUserPresets({ type: 'add', preset })}
           />
         </Suspense>
       )}

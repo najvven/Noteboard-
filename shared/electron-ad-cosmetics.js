@@ -12,10 +12,14 @@ export const isolateScriptlet = script => {
 
 /** Guest-only IPC. Page-provided URLs never determine where filters are injected. */
 export function installAdCosmeticHandlers(ipcMain, getSettings, getEngine) {
+  const stylesByFrame = new WeakMap();
   const supported = event => {
-    if (event.sender.isDestroyed() || !event.senderFrame || event.senderFrame.isDestroyed()) return false;
-    const settings = getSettings(event.sender);
-    return settings?.adBlock && event.senderFrame === event.sender.mainFrame && /^https?:\/\//i.test(event.senderFrame.url);
+    const sender = event?.sender;
+    const frame = event?.senderFrame;
+    if (!sender || sender.isDestroyed() || sender.getType?.() !== 'webview' ||
+        !frame || frame.isDestroyed() || frame.top !== sender.mainFrame ||
+        !/^https?:\/\//i.test(frame.url)) return false;
+    return getSettings(sender)?.adBlock === true;
   };
   ipcMain.handle('@ghostery/adblocker/is-mutation-observer-enabled', event => Boolean(supported(event)));
   ipcMain.handle('@ghostery/adblocker/inject-cosmetic-filters', async (event, _untrustedUrl, message) => {
@@ -33,9 +37,23 @@ export function installAdCosmeticHandlers(ipcMain, getSettings, getEngine) {
       getBaseRules: first, getInjectionRules: first, getExtendedRules: false, getRulesFromHostname: first, getRulesFromDOM: !first,
     });
     if (!active) return;
-    if (styles) await event.sender.insertCSS(styles, { cssOrigin: 'user' });
+    if (styles && !frame.isDestroyed() && frame.url === url && supported(event)) {
+      let state = stylesByFrame.get(frame);
+      if (!state || state.url !== url) state = { url, styles: new Set() };
+      const existingStyleCount = state.styles.size;
+      state.styles.add(styles);
+      stylesByFrame.set(frame, state);
+      if (state.styles.size !== existingStyleCount) {
+        const css = [...state.styles].join('\n');
+        const styleId = 'noteboard-adblocker-cosmetics';
+        const code = `(() => { let style = document.getElementById(${JSON.stringify(styleId)}); if (!style) { style = document.createElement('style'); style.id = ${JSON.stringify(styleId)}; (document.head || document.documentElement).appendChild(style); } style.textContent = ${JSON.stringify(css)}; })()`;
+        await frame.executeJavaScript(code).catch(error => {
+          console.warn('Ad cosmetic styles could not be applied.', String(error));
+        });
+      }
+    }
     for (const script of scripts) {
-      if (frame.isDestroyed() || frame.url !== url) break;
+      if (frame.isDestroyed() || frame.url !== url || !supported(event)) break;
       await frame.executeJavaScript(isolateScriptlet(script)).catch(error => console.warn('Ad scriptlet could not be applied.', String(error)));
     }
   });

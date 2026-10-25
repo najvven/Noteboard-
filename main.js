@@ -11,6 +11,7 @@ import { configureWebViewport } from './shared/electron-web-viewport.js';
 import { readNativeClipboard, writeNativeBoardClipboard } from './shared/native-clipboard.js';
 import { atomicWriteJson, enqueueWrite, readJsonWithBackup } from './shared/persistence.js';
 import { loadStoredBoards, saveStoredBoard, deleteStoredBoard } from './shared/board-store.js';
+import { loadStoredPresets, updateStoredPreset } from './shared/preset-store.js';
 import { boardWriteFailure } from './shared/board-errors.js';
 import {
   isAllowedEmbeddedWebUrl,
@@ -43,7 +44,6 @@ const MAIN_WINDOW_NAVIGATION_OPTIONS = {
 
 const dataDir = () => path.join(app.getPath('userData'), 'data');
 const boardsDir = () => path.join(dataDir(), 'boards');
-const presetsFile = () => path.join(dataDir(), 'presets.json');
 const settingsFile = () => path.join(dataDir(), 'settings.json');
 const webSessionSettings = new Map();
 const configuredWebSessions = new Map();
@@ -277,14 +277,12 @@ handleTrusted('storage:delete-page', async (_event, pageId, options) => {
 
 handleTrusted('storage:get-presets', async () => {
   await ensureDataDirs();
-  return readJsonWithBackup(presetsFile(), []);
+  return loadStoredPresets(dataDir());
 });
 
-handleTrusted('storage:save-presets', async (_event, presets) => {
+handleTrusted('storage:update-preset', async (_event, operation) => {
   await ensureDataDirs();
-  if (!Array.isArray(presets)) throw new Error('Presets must be an array.');
-  await enqueueWrite(presetsFile(), () => atomicWriteJson(presetsFile(), presets));
-  return true;
+  return updateStoredPreset(dataDir(), operation);
 });
 
 handleTrusted('storage:get-settings', async () => {

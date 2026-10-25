@@ -170,23 +170,41 @@ test('a lost acknowledgment and immediate reload keep the latest draft without a
 
 test('a recovery-only unload does not falsely advance the saved base when the page stays open', async ({ page, request }) => {
   const id = 'canceled-large-unload';
+  const hiddenTail = 'x'.repeat(70_000);
   await deleteFixtureBoard(request, `/api/pages/${id}`);
   await putFixtureBoard(request, `/api/pages/${id}`, { data: {
     id, title: 'Large unload', width: 1100, height: 700, workspaceWidth: 1500, workspaceHeight: 1000,
     boardX: 64, boardY: 0, viewportCenterX: 640, viewportCenterY: 328, updatedAt: Date.now(),
     editorSettings: { activeTool: 'text', keepToolActive: true },
-    elements: [{ id: 'large-text', type: 'text', position: { x: 100, y: 90 }, size: { width: 450, height: 110 }, content: 'Original', zIndex: 1 }],
+    elements: [{ id: 'large-text', type: 'text', position: { x: 100, y: 90 }, size: { width: 450, height: 110 }, content: `<p>Original</p><p>${hiddenTail}</p>`, zIndex: 1 }],
   } });
   await page.goto('/'); await page.getByRole('button', { name: 'Open Large unload', exact: true }).click();
   const editor = page.locator('[data-board-element-editor-id="large-text"]');
-  await editor.fill('Large pending draft ' + 'x'.repeat(70_000));
+  const replaceFirstParagraph = async (value: string) => {
+    await editor.evaluate(element => {
+      const text = element.querySelector('p')?.firstChild;
+      if (!text) throw new Error('The visible first paragraph is missing.');
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      element.focus();
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+    });
+    await page.keyboard.type(value);
+  };
+  await replaceFirstParagraph('Large pending draft');
   await page.evaluate(() => window.dispatchEvent(new Event('beforeunload')));
   await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('noteboard:page-recovery:canceled-large-unload:')))).toBe(true);
-  await editor.fill('Normal editing after staying open');
+  await replaceFirstParagraph('Normal editing after staying open');
   await expect.poll(async () => {
     const board = (await (await request.get('/api/pages')).json()).find((p: any) => p.id === id);
     return board.elements[0].content;
   }).toContain('Normal editing after staying open');
+  await expect.poll(async () => {
+    const board = (await (await request.get('/api/pages')).json()).find((p: any) => p.id === id);
+    return board.elements[0].content;
+  }).toContain(hiddenTail);
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 

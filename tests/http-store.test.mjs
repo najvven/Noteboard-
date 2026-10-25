@@ -46,4 +46,15 @@ test('HTTP preconditions, batch bases and filesystem conflicts share definitive 
   assert.equal((await request('DELETE','/api/pages/one',undefined,{'If-Match':'"3"'})).status,200);
   const saved=await (await fetch(`${base}/api/pages`)).json();
   assert.ok(!saved.some(page=>page.id==='one'));assert.ok(saved.some(page=>page.id==='new'));
+
+  const presetA={id:'preset-a',name:'Preset A',elements:[],isBuiltIn:false};
+  const presetB={id:'preset-b',name:'Preset B',elements:[],isBuiltIn:false};
+  const [addA,addB]=await Promise.all([
+    request('PATCH','/api/presets',{type:'add',preset:presetA}),
+    request('PATCH','/api/presets',{type:'add',preset:presetB}),
+  ]);
+  assert.equal(addA.status,200);assert.equal(addB.status,200);
+  assert.deepEqual(new Set((await(await fetch(`${base}/api/presets`)).json()).map(item=>item.id)),new Set(['preset-a','preset-b']));
+  assert.notEqual((await request('POST','/api/presets',[])).status,200,'the obsolete whole-array replacement endpoint must not overwrite concurrent template edits');
+  assert.deepEqual(new Set((await(await fetch(`${base}/api/presets`)).json()).map(item=>item.id)),new Set(['preset-a','preset-b']));
 });

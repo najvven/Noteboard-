@@ -43,7 +43,7 @@ interface NoteboardDesktopApi {
   savePage: (page: Page, options?: { baseRevision?: number | null }) => Promise<BoardWriteResult>;
   deletePage: (pageId: string, options?: { baseRevision?: number | null }) => Promise<BoardWriteResult>;
   loadPresets: () => Promise<Preset[]>;
-  savePresets: (presets: Preset[]) => Promise<boolean>;
+  updatePreset: (operation: PresetOperation) => Promise<Preset[]>;
   loadSettings: () => Promise<{ brightness: number }>;
   saveSettings: (settings: { brightness: number }) => Promise<boolean>;
   openBoardsFolder: () => Promise<string>;
@@ -58,6 +58,11 @@ interface NoteboardDesktopApi {
   clearWebSession: (partition: string) => Promise<boolean>;
   onBoardsChanged: (callback: () => void) => () => void;
 }
+
+export type PresetOperation =
+  | { type: 'add'; preset: Preset }
+  | { type: 'delete'; id: string }
+  | { type: 'rename'; id: string; name: string };
 
 type BoardWriteResult = boolean | { ok: false; code: BoardConflictCode | BoardValidationCode; message: string };
 const assertAcknowledged = (result: BoardWriteResult, action: string) => {
@@ -235,20 +240,14 @@ export async function loadPresets(): Promise<Preset[]> {
   return (await (await request("/api/presets")).json()) as Preset[];
 }
 
-export async function savePresets(presets: Preset[]): Promise<void> {
-  const snapshot = JSON.parse(JSON.stringify(presets)) as Preset[];
-  await enqueueBoardOperation("application:presets", async () => {
-    const api = desktopApi();
-    if (api) {
-      if (await api.savePresets(snapshot) === false) throw new Error("The desktop did not acknowledge the saved templates.");
-      return;
-    }
-    await request("/api/presets", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(snapshot),
-    });
-  });
+export async function updatePreset(operation: PresetOperation): Promise<Preset[]> {
+  const api = desktopApi();
+  if (api) return api.updatePreset(operation);
+  return (await (await request('/api/presets', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(operation),
+  })).json()) as Preset[];
 }
 
 export async function loadSettings(): Promise<{ brightness: number }> {

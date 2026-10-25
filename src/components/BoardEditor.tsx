@@ -1952,6 +1952,10 @@ export default function BoardEditor({
   },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid,showWorkspaceGrid,workspaceGridColor,workspaceGridThickness,workspaceGridSize]);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
+  const pendingSaveAsRef = useRef<{ kind: SaveAsKind; name: string; value: Page | Preset } | null>(null);
+  const pendingPresetRef = useRef<Preset | null>(null);
+  const [presetSaving, setPresetSaving] = useState(false);
+  const [presetSaveError, setPresetSaveError] = useState('');
   const [presetName, setPresetName] = useState(
     `${page.title || "Custom"} Preset`,
   );
@@ -6093,23 +6097,34 @@ export default function BoardEditor({
   };
 
   const handleSaveAs = async (kind: SaveAsKind, name: string): Promise<string> => {
-    const snapshot = buildCurrentPage();
+    const previous = pendingSaveAsRef.current;
+    const reusable = previous?.kind === kind && previous.name === name;
+    const snapshot = reusable ? undefined : buildCurrentPage();
     if (kind === 'template') {
-      if (await onSavePreset(createSavedTemplate(snapshot, name)) === false) throw new Error('Could not save the template. Please try again.');
+      const candidate = reusable ? previous.value as Preset : createSavedTemplate(snapshot!, name);
+      pendingSaveAsRef.current = { kind, name, value: candidate };
+      if (await onSavePreset(candidate) === false) throw new Error('Could not save the template. Please try again.');
+      pendingSaveAsRef.current = null;
       return 'Template saved.';
     }
     if (kind === 'board') {
       if (!onSaveAs) throw new Error('Saving a new board is unavailable.');
-      if (await onSaveAs(createSavedBoard(snapshot, name)) === false) throw new Error('Could not save the new board. Please try again.');
+      const candidate = reusable ? previous.value as Page : createSavedBoard(snapshot!, name);
+      pendingSaveAsRef.current = { kind, name, value: candidate };
+      if (await onSaveAs(candidate) === false) throw new Error('Could not save the new board. Please try again.');
+      pendingSaveAsRef.current = null;
       return 'New board saved in My Noteboards.';
     }
-    await downloadBoardArchive({ ...snapshot, title: name }, name);
+    await downloadBoardArchive({ ...buildCurrentPage(), title: name }, name);
     return 'File download started.';
   };
 
-  const handleConfirmPresetSave = () => {
-    onSavePreset({
-      id: `preset-${generateId()}`,
+  const handleConfirmPresetSave = async () => {
+    if (presetSaving) return;
+    setPresetSaving(true);
+    setPresetSaveError('');
+    const candidate = pendingPresetRef.current ?? {
+      id: 'preset-' + generateId(),
       name: presetName || "Custom Preset",
       description: "Custom preset created from page.",
       icon: "LayoutGrid",
@@ -6142,8 +6157,17 @@ export default function BoardEditor({
         : undefined,
       brightness: undefined,
       isBuiltIn: false,
-    });
-    setShowSaveModal(false);
+    };
+    pendingPresetRef.current = candidate;
+    try {
+      if (await onSavePreset(candidate) === false) throw new Error('The preset was not acknowledged.');
+      pendingPresetRef.current = null;
+      setShowSaveModal(false);
+    } catch (error) {
+      setPresetSaveError(error instanceof Error ? error.message : 'Could not save the preset. Please retry.');
+    } finally {
+      setPresetSaving(false);
+    }
   };
 
   const selectedElement = elements.find((el) => el.id === selectedId);
@@ -7105,6 +7129,7 @@ export default function BoardEditor({
             <h3 className="font-bold text-lg text-gray-900 border-b-2 border-gray-100 pb-2 flex justify-between">
               Save as Preset
               <button
+                disabled={presetSaving || Boolean(pendingPresetRef.current)}
                 onClick={() => setShowSaveModal(false)}
                 className="text-gray-500 hover:text-black hover:bg-gray-100 p-1 rounded-md"
               >
@@ -7118,6 +7143,7 @@ export default function BoardEditor({
               <input
                 type="text"
                 value={presetName}
+                disabled={presetSaving || Boolean(pendingPresetRef.current)}
                 onChange={(e) => setPresetName(e.target.value)}
                 className="w-full px-3 py-2 text-sm border-2 border-gray-300 rounded-lg focus:border-blue-500 outline-none font-bold transition-colors"
                 placeholder="My Custom Preset"
@@ -7128,7 +7154,8 @@ export default function BoardEditor({
             </span>
             <div
               className="flex items-center justify-between cursor-pointer group mt-2"
-              onClick={() => setPresetSettingsChecked(!presetSettingsChecked)}
+              aria-disabled={presetSaving || Boolean(pendingPresetRef.current)}
+              onClick={() => { if (!presetSaving && !pendingPresetRef.current) setPresetSettingsChecked(!presetSettingsChecked); }}
             >
               <span className="text-sm font-bold text-gray-700 select-none">
                 Settings (Size, Grid)
@@ -7149,7 +7176,8 @@ export default function BoardEditor({
             </div>
             <div
               className="flex items-center justify-between cursor-pointer group mb-1"
-              onClick={() => setPresetContentChecked(!presetContentChecked)}
+              aria-disabled={presetSaving || Boolean(pendingPresetRef.current)}
+              onClick={() => { if (!presetSaving && !pendingPresetRef.current) setPresetContentChecked(!presetContentChecked); }}
             >
               <span className="text-sm font-bold text-gray-700 select-none">
                 Content (Elements)
@@ -7169,11 +7197,14 @@ export default function BoardEditor({
               </div>
             </div>
             <button
+              type="button"
+              disabled={presetSaving}
               onClick={handleConfirmPresetSave}
               className="bg-blue-600 text-white px-4 py-2 mt-2 rounded-lg font-bold hover:bg-blue-700 transition-colors w-full shadow-sm"
             >
-              Save Preset
+              {presetSaving ? 'Saving…' : pendingPresetRef.current ? 'Retry Save Preset' : 'Save Preset'}
             </button>{" "}
+            {presetSaveError && <p role="alert" className="mt-2 text-xs text-red-700">{presetSaveError}</p>}
           </div>
         </div>
       )}
@@ -8064,6 +8095,7 @@ export default function BoardEditor({
                               type: "layer",
                               position: { x: 0, y: 0 },
                               name: "New Layer",
+                              content: "",
                               zIndex: elements.length + 1,
                               parentId: currentLayerView || undefined,
                             };
@@ -9275,7 +9307,7 @@ export default function BoardEditor({
                       <button
                         type="button"
                         onClick={() => {
-                          setPresetName(`${page.title || "Custom"} Preset`);
+                          setPresetName((page.title || "Custom") + " Preset");
                           setShowSaveModal(true);
                         }}
                         className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:border-blue-400 hover:bg-blue-100"

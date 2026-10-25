@@ -242,6 +242,35 @@ test('legacy ZIP chooses the newer revision and preserves an inert recovery arch
   assert.deepEqual(await loadStoredBoards(dir), []);
 });
 
+test('ZIP-only boards participate in save and delete ownership checks', async t => {
+  const dir = await fixture(t);
+  await zipBoard(dir, page(2, 'ZIP-only source', 'zip-only'));
+  await assert.rejects(saveStoredBoard(dir, page(3, 'Conflicting create', 'zip-only'), { baseRevision: null }), { code: 'STALE_BOARD_REVISION' });
+
+  await saveStoredBoard(dir, page(3, 'Updated from ZIP', 'zip-only'), { baseRevision: 2 });
+  const names = await fs.readdir(dir);
+  assert.ok(names.some(name => name.startsWith('legacy.zip.retired-')));
+  assert.ok(!names.includes('legacy.zip'));
+  assert.equal((await loadStoredBoards(dir))[0].title, 'Updated from ZIP');
+
+  await deleteStoredBoard(dir, 'zip-only', { baseRevision: 3 });
+  assert.deepEqual(await loadStoredBoards(dir), []);
+  assert.ok((await fs.readdir(dir)).some(name => name.startsWith('legacy.zip.retired-')));
+});
+
+test('saving a legacy Layer normalizes missing content before write acknowledgment', async t => {
+  const dir = await fixture(t);
+  const legacy = {
+    ...page(1, 'Legacy layer', 'legacy-layer'),
+    elements: [{ id: 'layer-one', type: 'layer', position: { x: 0, y: 0 }, name: 'Layer 1', zIndex: 1 }],
+  };
+  await saveStoredBoards(dir, [legacy]);
+  const stored = JSON.parse(await fs.readFile(boardFile(dir, 'legacy-layer'), 'utf8'));
+  assert.equal(stored.elements[0].content, '');
+  await saveStoredBoard(dir, legacy, { baseRevision: 1 });
+  assert.equal(JSON.parse(await fs.readFile(boardFile(dir, 'legacy-layer'), 'utf8')).elements[0].content, '');
+});
+
 test('a newer JSON wins over an old ZIP and failed migrations retain their ZIP', async t => {
   const dir = await fixture(t);
   await saveStoredBoard(dir, page(5, 'JSON'));

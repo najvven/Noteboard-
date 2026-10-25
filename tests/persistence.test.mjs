@@ -477,6 +477,23 @@ test("atomic writes keep a readable backup and serialize queued writes", async (
   }
 });
 
+test("corrupt previous JSON cannot replace the last good backup without a schema validator", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "noteboard-corrupt-backup-"));
+  const filePath = path.join(directory, "presets.json");
+  try {
+    await atomicWriteJson(filePath, [{ id: "first" }]);
+    await atomicWriteJson(filePath, [{ id: "second" }]);
+    await fs.writeFile(filePath, "not valid json", "utf8");
+
+    await atomicWriteJson(filePath, [{ id: "third" }]);
+
+    assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), [{ id: "third" }]);
+    assert.deepEqual(JSON.parse(await fs.readFile(`${filePath}.bak`, "utf8")), [{ id: "first" }]);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("JSON reads use an explicit fallback and surface missing primary data", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "noteboard-fallback-"));
   const filePath = path.join(directory, "missing.json");

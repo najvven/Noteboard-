@@ -3,7 +3,7 @@
   "description": "Desktop whiteboard and spatial note-taking application.",
   "author": "Noteboard+ contributors",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "type": "module",
   "main": "main.js",
   "scripts": {
@@ -40,10 +40,14 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "shortcutName": "Noteboard+",
+      "artifactName": "${productName} Setup.${ext}",
+      "uninstallDisplayName": "Noteboard+",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "installerIcon": "build/installerIcon.ico",
-      "uninstallerIcon": "build/uninstallerIcon.ico"
+      "uninstallerIcon": "build/uninstallerIcon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/installerSidebar.bmp"
     },
     "files": [
       "dist/**/*",

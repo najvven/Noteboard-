@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld("noteboardAPI", {
   savePage: (page, options) => ipcRenderer.invoke("storage:save-page", page, options),
   deletePage: (pageId, options) => ipcRenderer.invoke("storage:delete-page", pageId, options),
   loadPresets: () => ipcRenderer.invoke("storage:get-presets"),
-  savePresets: (presets) => ipcRenderer.invoke("storage:save-presets", presets),
+  updatePreset: (operation) => ipcRenderer.invoke("storage:update-preset", operation),
   loadSettings: () => ipcRenderer.invoke("storage:get-settings"),
   saveSettings: (settings) => ipcRenderer.invoke("storage:save-settings", settings),
   openBoardsFolder: () => ipcRenderer.invoke("storage:open-boards-folder"),

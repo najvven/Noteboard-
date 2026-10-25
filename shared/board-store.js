@@ -17,8 +17,11 @@ const validateStoredBoard = value => assertValidBoard(repairLegacyBoard(value));
 
 const snapshotBoard = board => {
   try {
-    assertValidBoard(board);
-    const payload = JSON.stringify(board);
+    // Saving and ACK verification must compare the same migrated shape that
+    // loading will expose (e.g. new Layers default missing content to "").
+    const normalized = repairLegacyBoard(board);
+    assertValidBoard(normalized);
+    const payload = JSON.stringify(normalized);
     assertFileSize(Buffer.byteLength(payload, "utf8"), MAX_BOARD_FILE_BYTES, "Saved board");
     return JSON.parse(payload);
   } catch (error) { throw boardWriteError('INVALID_BOARD_DATA', error.message); }
@@ -91,6 +94,26 @@ async function readBoardSources(directory, onWarning = console.warn) {
     }
   });
   return indexSources(names, candidates.filter(Boolean));
+}
+
+async function readMutationSources(directory, onWarning = console.warn) {
+  const scan = await readBoardSources(directory, onWarning);
+  const archives = scan.names.filter(name => name.endsWith('.zip'));
+  if (!archives.length) return scan;
+  const candidates = await mapInBatches(archives, 4, async name => {
+    try {
+      const bytes = await readFileLimited(sourcePath(directory, name), MAX_BOARD_FILE_BYTES, 'Board archive');
+      const legacy = await loadDesktopBoardArchive(bytes, { fallbackId: path.basename(name, '.zip') });
+      const board = snapshotBoard(repairLegacyBoard(legacy));
+      return { name, board, rank: sourceRank(name, board.id) };
+    } catch (error) {
+      onWarning(`Skipping unreadable board archive: ${name}`, error);
+      return null;
+    }
+  });
+  // Include ZIP-only IDs in create/update/delete ownership checks. The
+  // mutation paths retire any matching ZIP as an inert recovery archive.
+  return indexSources(scan.names, [...scan.candidates, ...candidates.filter(Boolean)]);
 }
 
 const staleRevisionError = () => {
@@ -166,7 +189,7 @@ async function writeCanonical(directory, snapshot, options, scan, assertHeld = (
 export function saveStoredBoard(directory, board, options = {}) {
   const snapshot = snapshotBoard(board);
   return withBoardStoreLock(directory, async assertHeld => {
-    const scan = await readBoardSources(directory);
+    const scan = await readMutationSources(directory);
     await writeCanonical(directory, snapshot, options, scan, assertHeld);
     return true;
   });
@@ -189,7 +212,7 @@ export async function saveStoredBoards(directory, boards, options = {}) {
     return base;
   });
   await withBoardStoreLock(directory, async assertHeld => {
-    let scan = await readBoardSources(directory);
+    let scan = await readMutationSources(directory);
     assertUniqueCanonicalPathIds(snapshots);
     for (const board of snapshots) assertNoCanonicalPathCollision(board.id, scan.candidates);
     // Preflight every revision before changing any canonical file.
@@ -203,7 +226,7 @@ export async function saveStoredBoards(directory, boards, options = {}) {
 export function deleteStoredBoard(directory, id, options = {}) {
   const file = boardFile(directory, id);
   return withBoardStoreLock(directory, async assertHeld => {
-    const scan = await readBoardSources(directory);
+    const scan = await readMutationSources(directory);
     assertNoCanonicalPathCollision(normalizeBoardId(id), scan.candidates);
     const baseRevision = options.baseRevision;
     if (baseRevision !== undefined) {

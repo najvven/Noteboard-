@@ -83,7 +83,11 @@ export async function atomicWriteJson(filePath, value, options = {}) {
     let validPrevious = previous !== undefined;
     if (validPrevious) {
       try {
-        options.validate?.(JSON.parse(previous));
+        // Parse even when a caller has no schema validator. Otherwise the
+        // optional-call short circuit would treat corrupt JSON as a valid
+        // previous document and rotate it over the last good backup.
+        const previousValue = JSON.parse(previous);
+        options.validate?.(previousValue);
       } catch {
         validPrevious = false;
       }

@@ -1,6 +1,6 @@
 # Noteboard+
 
-Current version: **1.0.7**. See [release notes and known validation limits](docs/RELEASE-1.0.7.md).
+Current version: **1.0.8**. See [release notes and known validation limits](docs/RELEASE-1.0.8.md).
 
 Desktop whiteboard and spatial note-taking application built with Electron, React, Vite, and TypeScript.
 
@@ -14,13 +14,15 @@ Desktop whiteboard and spatial note-taking application built with Electron, Reac
 - The contextual right panel reuses Univer's full live ribbon and registered validation/formatting panels. Advanced inline/expanded views share one workbook, cell selection and undo history. Cell dimensions are defaults before creation and affect only the selected sheet afterwards. Host-panel input and clipboard gestures stay separate from canvas shortcuts.
 - Spreadsheet thumbnails use the actual cell renderer at the object's viewport size. Selection preserves the same layout and scroll position; the expanded editor restores its complete menus. Inactive thumbnail renderers cannot take keyboard focus, started actions complete after deselection, and derived view changes do not consume canvas Undo.
 - Shared validation and bounded archive/file handling across the browser server and Electron desktop runtime.
+- Template saves use individual add/rename/delete operations across application processes. An uncertain retry keeps the same template identity; corrupted JSON cannot replace the last readable backup.
+- Legacy ZIP-only boards participate in create/update/delete conflict checks before migration, and layers are normalized before write acknowledgment.
 - Save as Template, an independent New Board, or a portable ZIP file with embedded media.
 - Full Web pages in Electron and supported YouTube video embeds in browser previews.
 - Cursor-anchored zoom up to 3200%, including Ctrl+scroll over native Web content; native video fullscreen preserves playback. Main and additional boards share a switch for keeping content fixed during resizing.
 - Optional Text scaling preserves the complete rich-text layout during proportional resizing; switch it off to resume normal frame resizing and wrapping.
 - Selection-area actions copy editable objects, paste the current system clipboard into the chosen area, or merge contents and their source layers into one movable, scalable object. Ungroup restores the original layers; merged content keeps its Web guest and input state. Board format4 retains compatibility with older documents and prevents older builds from silently editing the new group semantics.
 - All area creation tools honor Lock in time. Document Undo/Redo covers crop/transform gestures, clipboard imports, grouping, board names, fill and grid appearance; identical updates do not consume an Undo.
-- Native Web loads a bundled **Noteboard Ad Block** extension using Ghostery2.18.2 and verified maintained filter lists. Its private runtime shares one filter engine across fields; each website keeps its own session, switches and request source. Unused runtimes are released after idle cleanup. Electron guest requests are forwarded to the actual loaded extension; Web settings show real status/counts. Cosmetic, cookie and popup enforcement remains isolated per Web session. Ordinary browser previews cannot enforce native filtering inside cross-origin frames.
+- Native Web loads a bundled **Noteboard Ad Block** extension using Ghostery2.18.2 and verified maintained filter lists. Its private runtime shares one filter engine across fields; each website keeps its own session, switches and request source. Unused runtimes are released after idle cleanup. Electron guest requests are forwarded to the actual loaded extension; Web settings show real status/counts. Cosmetic filtering now applies to owned guest subframes as well as the top page; cookie and popup enforcement remains isolated per Web session. Ordinary browser previews cannot enforce native filtering inside cross-origin frames.
 
 ## Architecture
 

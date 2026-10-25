@@ -9,6 +9,7 @@ import {
 import { atomicWriteJson, enqueueWrite, readJsonWithBackup } from "./shared/persistence.js";
 import { loadStoredBoards, saveStoredBoard, saveStoredBoards, deleteStoredBoard } from "./shared/board-store.js";
 import { boardWriteError, boardWriteFailure } from './shared/board-errors.js';
+import { loadStoredPresets, updateStoredPreset } from './shared/preset-store.js';
 import { createRuntimeFileGuard, runtimeFsDeny } from './shared/local-file-access.js';
 import {
   getLocalSecurityHeaders,
@@ -20,7 +21,6 @@ const DATA_DIR = path.resolve(
   process.env.NOTEBOARD_DATA_DIR || path.join(process.cwd(), "data"),
 );
 const BOARDS_DIR = path.join(DATA_DIR, "boards");
-const PRESETS_FILE = path.join(DATA_DIR, "presets.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 function requestBaseRevision(req: express.Request) {
@@ -140,22 +140,17 @@ async function startServer() {
   // Presets
   app.get("/api/presets", async (_req, res) => {
     try {
-      res.json(await readJsonWithBackup(PRESETS_FILE, []));
+      res.json(await loadStoredPresets(DATA_DIR));
     } catch (err) {
-      res.json([]);
+      res.status(500).json({ error: "Failed to load templates" });
     }
   });
 
-  app.post("/api/presets", async (req, res) => {
+  app.patch("/api/presets", async (req, res) => {
     try {
-      if (!Array.isArray(req.body)) {
-        res.status(400).json({ error: "Presets must be an array" });
-        return;
-      }
-      await enqueueWrite(PRESETS_FILE, () => atomicWriteJson(PRESETS_FILE, req.body));
-      res.json({ success: true });
+      res.json(await updateStoredPreset(DATA_DIR, req.body));
     } catch (err) {
-      res.status(500).json({ error: "Failed to save presets" });
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update template' });
     }
   });
 

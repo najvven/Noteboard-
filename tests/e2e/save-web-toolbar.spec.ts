@@ -14,7 +14,8 @@ const fixture = () => ({ id:'save-source', title:'Save source', version:3, width
 async function open(page: Page, request: APIRequestContext) {
   const pages=await (await request.get('/api/pages')).json();
   for(const item of pages) await deleteFixtureBoard(request, `/api/pages/${item.id}`);
-  await request.post('/api/presets',{data:[]});
+  const presets=await (await request.get('/api/presets')).json();
+  for(const preset of presets) await request.patch('/api/presets',{data:{type:'delete',id:preset.id}});
   await request.post('/api/pages',{data:[fixture()]});
   await page.goto('/'); await page.getByRole('button',{name:'Open Save source',exact:true}).click();
   await expect(page.locator('[data-board-root]')).toBeVisible();
@@ -74,6 +75,64 @@ test('failed Save as actions report failure and allow retry without duplicate co
   await expect(page.getByRole('button',{name:'Open Retry specimen',exact:true})).toHaveCount(1);
 });
 
+test('Save as New Board reuses the same board after the disk write loses its response', async ({page,request}) => {
+  await open(page,request);
+  await page.getByRole('button',{name:'Save',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Save as',exact:true});
+  await dialog.getByLabel('Save as name').fill('Uncertain board copy');
+  let loseAcknowledgment=true;
+  await page.route('**/api/pages/*',async route=>{
+    if(loseAcknowledgment&&route.request().method()==='PUT'&&route.request().postDataJSON()?.title==='Uncertain board copy'){
+      loseAcknowledgment=false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await dialog.getByRole('button',{name:'Save as New Board'}).click();
+  await expect(dialog.getByRole('alert')).toContainText('Could not save');
+  const afterLostAck=(await(await request.get('/api/pages')).json()).filter((item:any)=>item.title==='Uncertain board copy');
+  expect(afterLostAck).toHaveLength(1);
+  const originalId=afterLostAck[0].id;
+  await page.unroute('**/api/pages/*');
+  await dialog.getByRole('button',{name:'Save as New Board'}).click();
+  await expect(dialog.getByRole('status')).toContainText('New board saved');
+  const afterRetry=(await(await request.get('/api/pages')).json()).filter((item:any)=>item.title==='Uncertain board copy');
+  expect(afterRetry.map((item:any)=>item.id)).toEqual([originalId]);
+});
+
+test('Save board preset stays open and retries the same template after a lost response', async ({page,request}) => {
+  await open(page,request);
+  await page.locator('[data-toolbar-item="more"] > button').click();
+  const more=page.locator('[data-toolbar-item="more"] > .toolbar-dropdown');
+  const presets=more.locator('[data-more-tool="object-presets"]');
+  await presets.getByRole('button',{name:'Object Presets',exact:true}).click();
+  await page.getByRole('button',{name:'Save board preset',exact:true}).click();
+  await page.getByPlaceholder('My Custom Preset').fill('Uncertain preset');
+  let loseAcknowledgment=true;
+  await page.route('**/api/presets',async route=>{
+    if(loseAcknowledgment&&route.request().method()==='PATCH'&&route.request().postDataJSON()?.type==='add'){
+      loseAcknowledgment=false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  await page.getByRole('button',{name:'Save Preset',exact:true}).click();
+  await expect(page.getByRole('alert').filter({hasText:'Could not save templates.'})).toBeVisible();
+  await expect(page.getByRole('button',{name:'Retry Save Preset',exact:true})).toBeVisible();
+  const afterLostAck=(await(await request.get('/api/presets')).json()).filter((item:any)=>item.name==='Uncertain preset');
+  expect(afterLostAck).toHaveLength(1);
+  const originalId=afterLostAck[0].id;
+  await page.unroute('**/api/presets');
+  await page.getByRole('button',{name:'Retry Save Preset',exact:true}).click();
+  await expect(page.getByRole('button',{name:'Retry Save Preset',exact:true})).toHaveCount(0);
+  const afterRetry=(await(await request.get('/api/presets')).json()).filter((item:any)=>item.name==='Uncertain preset');
+  expect(afterRetry.map((item:any)=>item.id)).toEqual([originalId]);
+});
+
 test('template names remain responsive and persist every character during slow writes', async ({page,request}) => {
   await open(page,request);
   await page.getByRole('button',{name:'Save',exact:true}).click();
@@ -84,7 +143,7 @@ test('template names remain responsive and persist every character during slow w
   await page.getByRole('button',{name:'Back',exact:true}).click();
   await page.getByRole('button',{name:'New Noteboard',exact:true}).click();
   await page.route('**/api/presets',async route=>{
-    if(route.request().method()==='POST') await new Promise(resolve=>setTimeout(resolve,40));
+    if(route.request().method()==='PATCH') await new Promise(resolve=>setTimeout(resolve,40));
     await route.continue();
   });
   const name=page.locator('input[title="Edit name"]');

@@ -1,0 +1,395 @@
+import JSZip, { type JSZipObject } from "jszip";
+
+import type { BoardElement, Page } from "../../types";
+import {
+  assertFileSize,
+  assertValidBoard,
+  getArchiveDeclaredSize,
+  getArchiveEntryDeclaredSize,
+  MAX_ARCHIVE_ASSET_BYTES,
+  MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+  MAX_BOARD_FILE_BYTES,
+  MAX_BOARD_JSON_BYTES,
+} from "../../../shared/board-data.js";
+import {
+  assertSafeAssetPath,
+  bytesToBase64,
+  assertCanonicalBase64,
+  estimateRestoredBoardJsonBytes,
+  restoredAssetMime,
+  readZipEntryBytes,
+} from "../../../shared/board-package-stream.js";
+import { repairLegacyBoard } from "../../../shared/board-migration.js";
+import { assertSafeZipDirectory } from "../../../shared/zip-preflight.js";
+
+export { mimeFromAssetPath } from "../../../shared/board-package-stream.js";
+
+const isPackagedAssetElement = (element: BoardElement) =>
+  element.type === "image" || element.type === "media";
+
+const assertExportedArchiveFitsLimits = async (bytes: Uint8Array) => {
+  assertFileSize(bytes.byteLength, MAX_BOARD_FILE_BYTES, "Board file");
+  const { entryCount } = assertSafeZipDirectory(bytes);
+  const zip = await JSZip.loadAsync(bytes);
+  if (entryCount !== Object.values(zip.files).length) {
+    throw new Error("Generated board package entry count is invalid.");
+  }
+
+  const jsonFile = zip.file("board.json");
+  if (!jsonFile) throw new Error("Invalid board package (missing board.json).");
+  assertFileSize(
+    getArchiveEntryDeclaredSize(jsonFile),
+    MAX_BOARD_JSON_BYTES,
+    "board.json",
+  );
+
+  for (const [path, entry] of Object.entries(zip.files)) {
+    if (entry.dir || !path.startsWith("assets/")) continue;
+    assertFileSize(
+      getArchiveEntryDeclaredSize(entry),
+      MAX_ARCHIVE_ASSET_BYTES,
+      "Board asset",
+    );
+  }
+  assertFileSize(
+    getArchiveDeclaredSize(zip.files),
+    MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    "Expanded board package",
+  );
+};
+
+/** Shared portable export used by both the workspace and Save as File. */
+export async function createBoardArchive(page: Page): Promise<Uint8Array> {
+  assertValidBoard(page);
+  const zip = new JSZip();
+  const assetByPath = new Map<string, { mime: string; base64: string; byteLength: number }>();
+  const elements = page.elements.map(element => {
+    if ((element.type !== 'image' && element.type !== 'media') || typeof element.content !== 'string') return element;
+    if (!element.content.startsWith('data:')) return element;
+    const comma = element.content.indexOf(',');
+    if (comma < 5) throw new Error('Board asset data URL is invalid.');
+    const parts = element.content.slice(5, comma).split(';');
+    if (parts.pop()?.toLowerCase() !== 'base64') return element;
+    const mime = parts.shift() || 'text/plain';
+    if (!/^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/i.test(mime))
+      throw new Error('Board asset MIME type is invalid.');
+    const base64 = element.content.slice(comma + 1);
+    if (base64.length > Math.ceil(MAX_ARCHIVE_ASSET_BYTES / 3) * 4)
+      throw new Error('Board asset is too large.');
+    const byteLength = assertCanonicalBase64(base64, 'Board asset');
+    assertFileSize(byteLength, MAX_ARCHIVE_ASSET_BYTES, 'Board asset');
+    const assetPath = `assets/${element.id}.${extensionFromMime(mime)}`;
+    assetByPath.set(assetPath, { mime, base64, byteLength });
+    return { ...element, ...(element.type === 'media' ? { mediaMime: mime } : {}), content: assetPath };
+  });
+  for (const [assetPath, asset] of assetByPath)
+    zip.file(assetPath, asset.base64, { base64: true });
+  zip.file('board.json', JSON.stringify({ ...page, version: page.version || 3, elements }, null, 2));
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  await assertExportedArchiveFitsLimits(bytes);
+  return bytes;
+}
+
+export async function downloadBoardArchive(page: Page, name = page.title): Promise<void> {
+  const bytes = await createBoardArchive(page);
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  const url = URL.createObjectURL(new Blob([copy.buffer], { type: 'application/zip' }));
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `${(name || 'Untitled board').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/\s+/g, '_').replace(/[. ]+$/, '') || 'noteboard'}_noteboard.zip`;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export interface BoardPackageLimits {
+  boardFileBytes: number;
+  expandedArchiveBytes: number;
+  boardJsonBytes: number;
+  assetBytes: number;
+}
+
+export const DEFAULT_BOARD_PACKAGE_LIMITS: BoardPackageLimits = {
+  boardFileBytes: MAX_BOARD_FILE_BYTES,
+  expandedArchiveBytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+  boardJsonBytes: MAX_BOARD_JSON_BYTES,
+  assetBytes: MAX_ARCHIVE_ASSET_BYTES,
+};
+
+export type BoardPackageStage = "opening" | "board" | "assets";
+
+export interface BoardPackageProgress {
+  stage: BoardPackageStage;
+  percent: number;
+}
+
+export interface ReadBoardPackageOptions {
+  createBoardId?: () => string;
+  limits?: BoardPackageLimits;
+  isCancelled?: () => boolean;
+  onProgress?: (progress: BoardPackageProgress) => void;
+  onSourceFingerprint?: (fingerprint: string) => void;
+}
+
+export type BoardPackageData = Page | BoardElement[];
+
+interface ExpandedArchiveBudget {
+  used: number;
+  limit: number;
+}
+
+export class BoardPackageCancelledError extends Error {
+  constructor() {
+    super("Board package import was cancelled.");
+    this.name = "BoardPackageCancelledError";
+  }
+}
+
+const assertNotCancelled = (options: ReadBoardPackageOptions) => {
+  if (options.isCancelled?.()) throw new BoardPackageCancelledError();
+};
+
+const inputByteLength = (input: Blob | ArrayBuffer | Uint8Array | string) => {
+  if (typeof input === "string") return new TextEncoder().encode(input).byteLength;
+  if (input instanceof ArrayBuffer) return input.byteLength;
+  if (ArrayBuffer.isView(input)) return input.byteLength;
+  return input.size;
+};
+
+const fingerprintBytes = async (bytes: Uint8Array): Promise<string> => {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+};
+
+export const fingerprintBoardText = (text: string): Promise<string> =>
+  fingerprintBytes(new TextEncoder().encode(text));
+
+export const extensionFromMime = (mime: string) => {
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/svg+xml") return "svg";
+  if (mime === "audio/mpeg") return "mp3";
+  return mime.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "bin";
+};
+
+const withoutSpreadsheetIdentity = (element: BoardElement): BoardElement => ({
+  ...element,
+  sheetCell: undefined,
+});
+
+const prepareBoardPackageData = (
+  value: unknown,
+  options: ReadBoardPackageOptions,
+): BoardPackageData => {
+  if (Array.isArray(value)) {
+    const rawElements = value.map((element) =>
+      withoutSpreadsheetIdentity(element as BoardElement),
+    );
+    const repaired = repairLegacyBoard({
+      id: "board-package-elements",
+      title: "Imported elements",
+      elements: rawElements,
+    });
+    assertValidBoard(repaired);
+    const elements = repaired.elements as BoardElement[];
+    return elements;
+  }
+
+  if (!value || typeof value !== "object") {
+    throw new Error("Invalid board package format.");
+  }
+  const source = value as Partial<Page>;
+  const candidate = repairLegacyBoard({
+    ...source,
+    version: source.version || 1,
+    id: options.createBoardId?.() ?? source.id,
+    elements: Array.isArray(source.elements) ? [...source.elements] : source.elements,
+  });
+  assertValidBoard(candidate);
+  return candidate as Page;
+};
+
+const packageElements = (data: BoardPackageData) =>
+  Array.isArray(data) ? data : data.elements;
+
+const withElements = (
+  data: BoardPackageData,
+  elements: BoardElement[],
+): BoardPackageData => (Array.isArray(data) ? elements : { ...data, elements });
+
+const restorePackagedAssets = async (
+  data: BoardPackageData,
+  zip: JSZip,
+  archiveBudget: ExpandedArchiveBudget,
+  options: ReadBoardPackageOptions,
+) => {
+  const limits = options.limits ?? DEFAULT_BOARD_PACKAGE_LIMITS;
+  const referencedPaths = [
+    ...new Set(
+      packageElements(data)
+        .filter(isPackagedAssetElement)
+        .map((element) => element.content)
+        .filter((content): content is string =>
+          typeof content === "string" && content.startsWith("assets/"),
+        ),
+    ),
+  ];
+  const sourceElementsByPath = new Map<string, BoardElement>();
+  for (const element of packageElements(data)) {
+    if (isPackagedAssetElement(element) && typeof element.content === "string" && element.content.startsWith("assets/"))
+      sourceElementsByPath.set(element.content, element);
+  }
+  const encodedAssets = new Map<string, string>();
+  const assetBytes = new Map<string, Uint8Array>();
+  const assetInfoByPath = new Map<string, { mime: string; byteLength: number }>();
+
+  for (let index = 0; index < referencedPaths.length; index += 1) {
+    assertNotCancelled(options);
+    const path = referencedPaths[index];
+    assertSafeAssetPath(path);
+    const asset = zip.file(path);
+    if (!asset) throw new Error(`Board package asset is missing: ${path}`);
+    assertFileSize(
+      getArchiveEntryDeclaredSize(asset),
+      limits.assetBytes,
+      "Board asset",
+    );
+    const bytes = await readZipEntryBytes(
+      asset,
+      limits.assetBytes,
+      "Board asset",
+      archiveBudget,
+      () => assertNotCancelled(options),
+      (percent) => {
+      options.onProgress?.({
+        stage: "assets",
+        percent: referencedPaths.length
+            ? ((index + percent / 100) / referencedPaths.length) * 100
+          : 100,
+      });
+      },
+    );
+    const sourceElement = sourceElementsByPath.get(path);
+    const mime = restoredAssetMime(path, sourceElement?.mediaMime || 'application/octet-stream');
+    assetBytes.set(path, bytes);
+    assetInfoByPath.set(path, { mime, byteLength: bytes.byteLength });
+  }
+
+  estimateRestoredBoardJsonBytes(data, assetInfoByPath, limits.boardJsonBytes);
+  for (const [path, bytes] of assetBytes) encodedAssets.set(path, bytesToBase64(bytes));
+
+  const elements = packageElements(data).map((element) => {
+    if (!isPackagedAssetElement(element)) return element;
+    const path = element.content;
+    if (typeof path !== "string" || !path.startsWith("assets/")) return element;
+    const encoded = encodedAssets.get(path);
+    if (encoded === undefined) throw new Error(`Board package asset is missing: ${path}`);
+    const mime = assetInfoByPath.get(path)?.mime || restoredAssetMime(path);
+    return {
+      ...element,
+      content: `data:${mime};base64,${encoded}`,
+      ...(element.type === "media" ? { mediaMime: mime } : {}),
+    };
+  });
+
+  return withElements(data, elements);
+};
+
+const parseBoardJson = (text: string, options: ReadBoardPackageOptions) => {
+  try {
+    return prepareBoardPackageData(JSON.parse(text), options);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error("Board JSON is invalid.");
+    throw error;
+  }
+};
+
+const assertArchiveEntrySize = (
+  entry: JSZipObject,
+  limit: number,
+  label: string,
+) => assertFileSize(getArchiveEntryDeclaredSize(entry), limit, label);
+
+export const readBoardArchive = async (
+  input: Blob | ArrayBuffer | Uint8Array | string,
+  options: ReadBoardPackageOptions = {},
+): Promise<BoardPackageData> => {
+  const limits = options.limits ?? DEFAULT_BOARD_PACKAGE_LIMITS;
+  assertFileSize(inputByteLength(input), limits.boardFileBytes, "Board file");
+  assertNotCancelled(options);
+  options.onProgress?.({ stage: "opening", percent: 0 });
+  const archiveInput =
+    input instanceof Blob
+      ? new Uint8Array(await input.arrayBuffer())
+      : typeof input === "string"
+        ? new TextEncoder().encode(input)
+        : input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+  if (options.onSourceFingerprint)
+    options.onSourceFingerprint(await fingerprintBytes(archiveInput));
+  assertNotCancelled(options);
+  assertSafeZipDirectory(archiveInput);
+  const zip = await JSZip.loadAsync(archiveInput);
+  assertFileSize(
+    getArchiveDeclaredSize(zip.files),
+    limits.expandedArchiveBytes,
+    "Expanded board package",
+  );
+  const jsonFile = zip.file("board.json");
+  if (!jsonFile) throw new Error("Invalid board package (missing board.json).");
+  assertArchiveEntrySize(jsonFile, limits.boardJsonBytes, "board.json");
+  const archiveBudget: ExpandedArchiveBudget = {
+    used: 0,
+    limit: limits.expandedArchiveBytes,
+  };
+  const jsonBytes = await readZipEntryBytes(
+    jsonFile,
+    limits.boardJsonBytes,
+    "board.json",
+    archiveBudget,
+    () => assertNotCancelled(options),
+    (percent) => options.onProgress?.({ stage: "board", percent }),
+  );
+  const jsonText = new TextDecoder().decode(jsonBytes);
+  assertNotCancelled(options);
+  const parsed = parseBoardJson(jsonText, options);
+  const restored = await restorePackagedAssets(
+    parsed,
+    zip,
+    archiveBudget,
+    options,
+  );
+  assertNotCancelled(options);
+  if (!Array.isArray(restored)) assertValidBoard(restored);
+  return restored;
+};
+
+export const readBoardPackageFile = async (
+  file: File,
+  options: ReadBoardPackageOptions = {},
+): Promise<BoardPackageData> => {
+  const limits = options.limits ?? DEFAULT_BOARD_PACKAGE_LIMITS;
+  assertFileSize(file.size, limits.boardFileBytes, "Board file");
+  const lowerName = file.name.toLowerCase();
+  if (lowerName.endsWith(".zip")) return readBoardArchive(file, options);
+  if (!lowerName.endsWith(".json")) {
+    throw new Error("Only Noteboard JSON and ZIP files can be imported here.");
+  }
+  assertNotCancelled(options);
+  assertFileSize(file.size, limits.boardJsonBytes, "Board JSON");
+  options.onProgress?.({ stage: "board", percent: 0 });
+  const text = await file.text();
+  assertNotCancelled(options);
+  if (options.onSourceFingerprint) options.onSourceFingerprint(await fingerprintBoardText(text));
+  assertFileSize(
+    new TextEncoder().encode(text).byteLength,
+    limits.boardJsonBytes,
+    "Board JSON",
+  );
+  options.onProgress?.({ stage: "board", percent: 100 });
+  return parseBoardJson(text, options);
+};
+
+export const getBoardPackageElements = (data: BoardPackageData) => [
+  ...packageElements(data),
+];

@@ -1,0 +1,116 @@
+{
+  "name": "noteboard-plus",
+  "description": "Desktop whiteboard and spatial note-taking application.",
+  "author": "Noteboard+ contributors",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "node scripts/check-web-filters.mjs && vite build && node scripts/build-native-assets.mjs && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "preview": "cross-env NODE_ENV=production node dist/server.cjs",
+    "start": "node dist/server.cjs",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "lint": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsc --noEmit",
+    "typecheck": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsc --noEmit",
+    "test": "tsx --test tests/*.test.mjs tests/*.test.ts tests/*.test.tsx",
+    "test:coverage": "tsx --test --test-concurrency=4 --experimental-test-coverage --test-coverage-exclude=tests/** --test-coverage-exclude=.tmp/** --test-coverage-lines=80 --test-coverage-functions=80 --test-coverage-branches=80 tests/*.test.mjs tests/*.test.ts tests/*.test.tsx",
+    "test:browser": "node --test tests/browser/*.test.mjs",
+    "test:e2e": "npm run build && playwright test",
+    "test:stress": "node tests/storage-stress.mjs",
+    "electron:dev": "node scripts/build-native-assets.mjs && concurrently -k \"npm run dev\" \"wait-on tcp:3000 && cross-env NODE_ENV=development electron .\"",
+    "make": "npm run build && electron-builder",
+    "test:desktop": "npm run build && node --test --test-concurrency=1 tests/electron/*.test.mjs",
+    "filters:update": "node scripts/update-web-filters.mjs"
+  },
+  "build": {
+    "appId": "com.noteboard.plus",
+    "productName": "Noteboard+",
+    "extraMetadata": {
+      "version": "1.0.0",
+      "shortVersion": "1.0",
+      "shortVersionWindows": "1.0.0.0"
+    },
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "Noteboard+",
+      "artifactName": "${productName} Setup.${ext}",
+      "uninstallDisplayName": "Noteboard+",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/installerIcon.ico",
+      "uninstallerIcon": "build/uninstallerIcon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/installerSidebar.bmp"
+    },
+    "files": [
+      "dist/**/*",
+      "build/**/*",
+      "main.js",
+      "preload.cjs",
+      "web-privacy-preload.cjs",
+      "scripts/update-web-filters.mjs",
+      "scripts/check-web-filters.mjs",
+      "shared/**/*"
+    ]
+  },
+  "dependencies": {
+    "@ghostery/adblocker": "2.18.2",
+    "@ghostery/adblocker-electron-preload": "2.18.2",
+    "@univerjs/core": "1.0.2",
+    "@univerjs/design": "1.0.2",
+    "@univerjs/preset-sheets-conditional-formatting": "1.0.2",
+    "@univerjs/preset-sheets-core": "1.0.2",
+    "@univerjs/preset-sheets-data-validation": "1.0.2",
+    "@univerjs/preset-sheets-filter": "1.0.2",
+    "@univerjs/preset-sheets-sort": "1.0.2",
+    "@univerjs/presets": "1.0.2",
+    "@univerjs/ui": "1.0.2",
+    "clsx": "^2.1.1",
+    "exceljs": "4.4.0",
+    "express": "^4.21.2",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "proper-lockfile": "4.1.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "rxjs": "7.8.2",
+    "tailwind-merge": "^3.5.0",
+    "tldts": "^7.4.9"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/vite": "^4.3.2",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "42.11.16",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.1",
+    "sharp": "^0.35.2",
+    "tailwindcss": "^4.1.14",
+    "tsx": "^4.23.0",
+    "typescript": "~5.8.2",
+    "vite": "6.4.5",
+    "wait-on": "^9.0.5"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
+  }
+}

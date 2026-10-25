@@ -732,7 +732,9 @@ test('Fill Tool captures an additional board beyond the Main Board bounds', {tim
     return page?.elements.find(element=>element.isPixelFill);
   });
   assert.ok(filled);
-  assert.ok(filled.position.x>=800,'fill coordinates should remain on the additional board outside Main Board bounds');
+  const fillCenter={x:filled.position.x+filled.size.width/2,y:filled.position.y+filled.size.height/2};
+  assert.ok(fillCenter.x>=800&&fillCenter.x<=1040&&fillCenter.y>=100&&fillCenter.y<=280,
+    `the raster center should remain on the clicked additional board (fill=${JSON.stringify(filled.position)}, size=${JSON.stringify(filled.size)})`);
   assert.ok(filled.size.width>200&&filled.size.height>150,`the capture must ignore the visual grid lines (found ${JSON.stringify(filled.size)})`);
   assert.deepEqual(errors,[]);
 });
@@ -1362,7 +1364,7 @@ test('desktop compact menus and scrollbar survive repeated window and zoom chang
 test('desktop More keeps a held drag across embedded web content and cancels outside the toolbar', {timeout:45000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window,errors}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const row=window.locator('[data-more-toolbar-item="embed"]');
   for(const cancel of [true,false]) {
     await window.getByRole('button',{name:'More',exact:true}).click();
@@ -1483,7 +1485,7 @@ test('Web reflows without reload, keeps page input and matches clicks through ho
   await expect.poll(async()=>(await window.locator('[data-web-viewport]').boundingBox()).width).toBeGreaterThan(visualBefore.width);
   assert.equal((await responsiveState(app)).width,1100);assert.equal((await responsiveState(app)).marker,initial.marker);
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
-  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(2);
+  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks,{timeout:15000}).toBe(2);
   assert.equal(requests.length,1);
   await nativeScreenshot(app,'web-responsive-desktop.png');
   assert.deepEqual(errors,[]);

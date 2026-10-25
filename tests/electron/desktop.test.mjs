@@ -373,11 +373,13 @@ test('native clipboard follows internal objects, external text and external imag
   await window.keyboard.press('Control+v');
   await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(1);
   await expect(window.locator('[data-board-element-type="arrow"]')).toHaveCount(2);
-  const filePath=path.join(profile,'external-image.png');
-  await sharp({create:{width:24,height:24,channels:4,background:'#2563eb'}}).png().toFile(filePath);
-  await app.evaluate(({clipboard},name)=>clipboard.writeBuffer('FileNameW',Buffer.from(name+'\0','utf16le')),filePath);
-  assert.equal((await window.evaluate(()=>window.noteboardAPI.readClipboard())).files.length,1,'Explorer file must be read from the current OS clipboard');
-  await window.keyboard.press('Control+v');await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(2);
+  if(process.platform==='win32'){
+    const filePath=path.join(profile,'external-image.png');
+    await sharp({create:{width:24,height:24,channels:4,background:'#2563eb'}}).png().toFile(filePath);
+    await app.evaluate(({clipboard},name)=>clipboard.writeBuffer('FileNameW',Buffer.from(name+'\0','utf16le')),filePath);
+    assert.equal((await window.evaluate(()=>window.noteboardAPI.readClipboard())).files.length,1,'Explorer file must be read from the current OS clipboard');
+    await window.keyboard.press('Control+v');await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(2);
+  }
   assert.deepEqual(errors,[]);
 });
 
@@ -608,7 +610,7 @@ test('Fill Tool paints the closed visible pixel region, preserves its outline, a
   const square=window.locator('[data-board-element-id="outlined-square"]');
   await expect(square).toBeVisible();
   const box=await square.boundingBox();assert.ok(box);
-  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
+  const interior={x:box.x+box.width/2+7,y:box.y+box.height/2+7};
   const outline={x:box.x+3,y:box.y+box.height/2};
   assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
 
@@ -1530,7 +1532,8 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   state=await responsiveState(app);assert.deepEqual(state.screen,[768,1024]);assert.equal(state.height,1024);assert.equal(state.touch,5);assert.equal(state.hints.mobile,false);assert.equal(state.hints.platform,'Android');assert.equal(state.columns,2);
   await chooseWebDevice(window,menu.getByRole('button',{name:'Desktop',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(560);
-  state=await responsiveState(app);assert.equal(state.touch,0);assert.equal(state.coarse,false);assert.equal(state.hover,true);assert.equal(state.hints.platform,'Windows');assert.equal(state.height,360);
+  const desktopPlatform=process.platform==='win32'?'Windows':process.platform==='darwin'?'macOS':'Linux';
+  state=await responsiveState(app);assert.equal(state.touch,0);assert.equal(state.coarse,false);assert.equal(state.hover,true);assert.equal(state.hints.platform,desktopPlatform);assert.equal(state.height,360);
   await chooseWebDevice(window,menu.getByRole('button',{name:'Tablet',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(768);
   await window.getByRole('button',{name:'More',exact:true}).click();

@@ -748,6 +748,9 @@ window.addEventListener("message", async (event) => {
         book.setActiveSheet(editingCell.sheetId);
         book.getActiveSheet().getRange(editingCell.address).activate();
         book.startEditing();
+        // Univer creates the normal document render unit on the next frames.
+        // Setting the caret synchronously can be ignored before that unit exists.
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
         // Univer 1.0.2 may restore an active edit at offset zero after the
         // browsing context reloads. Resume after the restored draft so the
         // next keystroke continues the formula/text instead of prefixing it.

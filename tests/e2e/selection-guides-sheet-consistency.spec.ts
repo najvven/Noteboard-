@@ -133,7 +133,7 @@ test('a scrolled spreadsheet retains the visible rows on selection and never tak
   const iframe=page.locator('iframe[title="Spreadsheet cells"]');
   const view=()=>iframe.evaluate(f=>JSON.parse(((f as HTMLIFrameElement).contentWindow as any).noteboardSheet.snapshot()).views?.['sheet-1']);
   await page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]').hover({position:{x:200,y:100}});
-  await page.mouse.wheel(120,410);
+  await page.mouse.wheel(0,410);
   await expect.poll(async()=>(await view())?.sheetViewStartRow??0).toBeGreaterThan(0);
   const previous=await view();
   const root=(await page.locator('[data-board-root]').boundingBox())!;

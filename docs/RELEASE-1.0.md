@@ -18,7 +18,7 @@ The prior installer and previous clean-source folder are retained in
 `Source/.tmp/task30/`.
 
 The refreshed clean source is `C:\Users\Pawel\Documents\Codex\NoteboardWork`:
-285 files / 15,340,861 bytes, hash-matched to the current source files, with
+285 files / 15,341,598 bytes, hash-matched to the current source files, with
 dependencies, build output, local state and board data excluded.
 
 ## Audit corrections

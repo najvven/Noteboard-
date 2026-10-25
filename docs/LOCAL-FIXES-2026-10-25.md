@@ -1,6 +1,6 @@
 # Lokalne poprawki po audycie — 2026-10-25
 
-Zmiany pozostają lokalne. Publiczna wersja nadal wynosi **1.0** (semver `1.0.0`). Nie wykonano commitów, publikacji, aktualizacji PR, wymiany instalatora ani odświeżenia folderu NoteboardWork. Testy używały osobnych profili i katalogów danych.
+Zmiany są w otwartym PR [#10](https://github.com/najvven/Noteboard-/pull/10), na gałęzi `audit-fixes-coverage-2026-10-25`; nie zostały scalone do `main`. Publiczna wersja nadal wynosi **1.0** (semver `1.0.0`). Nie zmieniono instalatora ani folderu NoteboardWork. Testy używały osobnych profili i katalogów danych.
 
 | Obszar | Potwierdzony problem i poprawka | Sprawdzenie |
 |---|---|---|
@@ -24,6 +24,6 @@ Weryfikacja końcowa — pełny agregat z 2026-10-25, `.tmp/coverage-aggregate/2
 - Scenariusz NB-035 używa anulowanego, syntetycznego zdarzenia `beforeunload`, a potem rzeczywistego reloadu iframe; to sprawdza zachowanie API i draftu, ale nie symuluje dialogu anulowania nawigacji strony ani prawdziwego BFCache.
 - Build nadal ostrzega o chunkie arkusza ok. **7,5 MB** i powtarzających się sourcemapach dla chunki językowe.
 - Brak kontrolowanego pomiaru produkcyjnego GPU/CPU/RAM dla Web na pierwszym planie. Test stresowy sześciu pól odczytał **1255 MiB** w fixture QA, która wyłącza background throttling; to nie jest produkcyjny baseline.
-- Nie uruchomiono zdalnego CI ani weryfikacji macOS/Linux. Poprawki pozostają lokalne; package version to nadal `1.0.0` / publiczna etykieta `1.0`, a instalator, NoteboardWork, publikacja i dane użytkownika nie były zmieniane.
+- Nie uruchomiono zdalnego CI ani weryfikacji macOS/Linux. PR #10 jest otwarty i nie scalony; package version to nadal `1.0.0` / publiczna etykieta `1.0`, a instalator, NoteboardWork i dane użytkownika nie były zmieniane.
 
 Instalator pozostał niezmieniony: SHA-256 `8B98076C2847505168B7CADEC55F4255203722AAC6F739583A7B18E91617BA5C`. Lokalny opublikowany mirror nadal wskazuje `904eb62157a3910c9a674204fc1a5909a151cee2` i nie ma zmian w drzewie roboczym.

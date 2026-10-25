@@ -1,0 +1,54 @@
+name: Application validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-and-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium chrome
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:browser
+      - run: npm run build
+      - name: Report and persistence interaction regressions
+        run: npx playwright test tests/e2e/report-regressions.spec.ts tests/e2e/storage-coherence.spec.ts tests/e2e/interaction-polish.spec.ts tests/e2e/interaction-regressions.spec.ts tests/e2e/task021-flips.spec.ts
+
+  native-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:desktop
+
+  coverage:
+    # Keep the declared gate visible. Its pre-existing source-coverage deficit
+    # is documented; do not silently lower thresholds or ignore this job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:coverage

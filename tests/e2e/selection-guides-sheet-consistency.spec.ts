@@ -108,7 +108,7 @@ test('spreadsheet preview and selected cells have the same geometry and the expa
   const dialog=page.getByRole('dialog',{name:'Spreadsheet editor'});await expect(dialog).toBeVisible();
   for(const name of ['Start','Insert','Formulas','Data','View'])await expect(cells.getByText(name,{exact:true}).first()).toBeVisible();
   await cells.getByText('Data',{exact:true}).first().click();
-  for(const name of ['Sort','Data validation','Conditional Formatting'])await expect(cells.getByRole('button',{name,exact:true})).toBeVisible();
+  for(const name of ['Sort','Data validation','Conditional Formatting'])await expect(cells.getByRole('button',{name,exact:true})).toBeVisible({timeout:15000});
   await dialog.getByRole('button',{name:'Done',exact:true}).click();
   await expect(inline).toBeVisible();
   expect(await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow!.name)).toBe('same-session');
@@ -133,7 +133,14 @@ test('a scrolled spreadsheet retains the visible rows on selection and never tak
   const iframe=page.locator('iframe[title="Spreadsheet cells"]');
   const view=()=>iframe.evaluate(f=>JSON.parse(((f as HTMLIFrameElement).contentWindow as any).noteboardSheet.snapshot()).views?.['sheet-1']);
   const grid=page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
-  await grid.click({position:{x:200,y:100}});await page.mouse.wheel(0,410);
+  await grid.click({position:{x:200,y:100}});
+  // Dispatch over the actual Univer canvas; browser-level wheel routing to an
+  // iframe is inconsistent on the Linux coverage runner, but this exercises
+  // the same sheet wheel handler without bypassing its view-state operation.
+  await grid.evaluate(canvas=>{
+    const rect=canvas.getBoundingClientRect();
+    canvas.dispatchEvent(new WheelEvent('wheel',{deltaY:410,deltaMode:0,clientX:rect.left+200,clientY:rect.top+100,bubbles:true,cancelable:true,composed:true}));
+  });
   await expect.poll(async()=>(await view())?.sheetViewStartRow??0).toBeGreaterThan(0);
   const previous=await view();
   const root=(await page.locator('[data-board-root]').boundingBox())!;

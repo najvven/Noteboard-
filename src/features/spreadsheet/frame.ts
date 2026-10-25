@@ -746,22 +746,68 @@ window.addEventListener("message", async (event) => {
       const editingCell = message.reloadDraftEditingCell;
       if (interactive && editingCell && book.getSheetBySheetId(editingCell.sheetId)) {
         book.setActiveSheet(editingCell.sheetId);
-        book.getActiveSheet().getRange(editingCell.address).activate();
+        const activeRange = book.getActiveSheet().getRange(editingCell.address);
+        activeRange.activate();
+        const savedInput = activeRange.getFormula() || activeRange.getValue();
+        const expectedInput =
+          typeof savedInput === "string" || typeof savedInput === "number"
+            ? String(savedInput)
+            : undefined;
         book.startEditing();
-        // Univer creates the normal document render unit on the next frames.
-        // Setting the caret synchronously can be ignored before that unit exists.
-        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-        // Univer 1.0.2 may restore an active edit at offset zero after the
-        // browsing context reloads. Resume after the restored draft so the
-        // next keystroke continues the formula/text instead of prefixing it.
-        for (const editorId of ["__INTERNAL_EDITOR__DOCS_NORMAL", "__INTERNAL_EDITOR__DOCS_FORMULA_BAR"]) {
-          const editor = api.getDocument(editorId) as
-            | { getBody?: () => { dataStream?: string }; setSelection?: (start: number, end: number) => void }
-            | undefined;
-          const dataStream = editor?.getBody?.().dataStream;
-          if (typeof dataStream === "string" && editor?.setSelection) {
-            const caret = dataStream.replace(/\r\n$/, "").length;
-            editor.setSelection(caret, caret);
+        // Wait for the active edit document to contain the restored input before
+        // declaring the frame loaded. On slower renderers the document unit can
+        // exist with an empty body for several frames; moving that empty body's
+        // caret to zero is then overwritten when Univer installs the draft.
+        const waitFrame = () =>
+          new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const activeElement = window.document.activeElement;
+        const activeEditorId = activeElement?.id.startsWith("__editor_")
+          ? activeElement.id.slice("__editor_".length)
+          : undefined;
+        const editorIds = [
+          activeEditorId,
+          "__INTERNAL_EDITOR__DOCS_NORMAL",
+          "__INTERNAL_EDITOR__DOCS_FORMULA_BAR",
+        ].filter((id, index, all): id is string => Boolean(id) && all.indexOf(id) === index);
+        const getEditor = (id: string) => api.getDocument(id) as
+          | {
+              getBody?: () => { dataStream?: string };
+              setSelection?: (start: number, end: number) => void;
+            }
+          | undefined;
+        const cleanInput = (value: string) => value.replace(/\r\n$/, "");
+        let restoredEditor:
+          | ReturnType<typeof getEditor>
+          | undefined;
+        for (let frame = 0; frame < 60 && !restoredEditor; frame++) {
+          await waitFrame();
+          if (!book.isCellEditing()) continue;
+          const candidate = editorIds
+            .map(getEditor)
+            .find((editor) => {
+              const dataStream = editor?.getBody?.().dataStream;
+              return (
+                typeof dataStream === "string" &&
+                editor.setSelection !== undefined &&
+                (expectedInput === undefined || cleanInput(dataStream) === expectedInput)
+              );
+            });
+          if (!candidate) continue;
+          await waitFrame();
+          const currentInput = candidate.getBody?.().dataStream;
+          if (
+            typeof currentInput === "string" &&
+            (expectedInput === undefined || cleanInput(currentInput) === expectedInput)
+          )
+            restoredEditor = candidate;
+        }
+        if (restoredEditor) {
+          // Apply this after the model has stabilized and before the host removes
+          // its loading cover, so the first new keystroke continues the draft.
+          const dataStream = restoredEditor.getBody?.().dataStream;
+          if (typeof dataStream === "string") {
+            const caret = cleanInput(dataStream).length;
+            restoredEditor.setSelection?.(caret, caret);
           }
         }
       }

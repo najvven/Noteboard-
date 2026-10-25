@@ -285,6 +285,7 @@ const assertSettingsElementShape = (element, label, partial = false) => {
     "isHidden",
     "isLocked",
     "isEraser",
+    "isPixelFill",
     "isLinkTarget",
     "textSnapToGrid",
   ]) {

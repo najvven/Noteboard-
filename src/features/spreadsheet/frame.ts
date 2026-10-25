@@ -62,7 +62,7 @@ let token = "",
   initialized = false;
 let formulaWorker: Worker | undefined;
 let formulaRecoveryPending = false;
-let reloadDraftCaptured = false;
+let lastReloadDraftSignature = "";
 let expandedMode: boolean | undefined;
 let mode: WorkbookDocument['mode'];
 let interactive = false;
@@ -104,18 +104,21 @@ const waitForFormulaCalculation = async () => {
 };
 
 const preserveSpreadsheetDraftBeforeUnload = () => {
-  if (reloadDraftCaptured || !ready || !reloadDraftObserver) return;
+  if (!ready || !reloadDraftObserver) return;
   const book = api?.getActiveWorkbook();
   const cell = book?.getActiveSheet().getActiveCell();
   const content = snapshot(false);
   if (!content) return;
-  reloadDraftCaptured = true;
-  reloadDraftObserver({
+  const draft: SpreadsheetReloadDraft = {
     content,
     ...(book?.isCellEditing() && cell ? {
       editingCell: { sheetId: book.getActiveSheet().getSheetId(), address: cell.getA1Notation() },
     } : {}),
-  });
+  };
+  const signature = JSON.stringify(draft);
+  if (signature === lastReloadDraftSignature) return;
+  lastReloadDraftSignature = signature;
+  reloadDraftObserver(draft);
 };
 
 const recoverFromFormulaTimeout = (error: FormulaCalculationTimeoutError) => {
@@ -251,12 +254,20 @@ function snapshot(includePreview = true) {
   return JSON.stringify(value);
 }
 
-// pagehide runs before the old browsing context is destroyed. The synchronous
-// same-origin callback keeps an uncommitted cell draft in the host, without
-// waiting for the debounced changed message from a context that may disappear.
-window.addEventListener('pagehide', () => {
-  clearTimeout(timer);
+// Capture before navigation, but dispose only after a terminal pagehide. A
+// canceled beforeunload or BFCache restore keeps this spreadsheet API alive.
+window.addEventListener('pagehide', (event) => {
   preserveSpreadsheetDraftBeforeUnload();
+  if (event.persisted) return;
+  clearTimeout(timer);
+  window.clearTimeout(formulaWatchdog);
+  formulaWorker?.terminate();
+  formulaWorker = undefined;
+  api?.dispose();
+  api = undefined;
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) lastReloadDraftSignature = "";
 });
 
 async function flush() {
@@ -727,7 +738,7 @@ window.addEventListener("message", async (event) => {
         throw error;
       }
       formulaRecoveryPending = false;
-      reloadDraftCaptured = false;
+      lastReloadDraftSignature = "";
       await setExpanded(message.expanded === true);
       await restoreView();
       await repaint();
@@ -761,12 +772,5 @@ window.addEventListener("message", async (event) => {
     }
   }
 });
-window.addEventListener("beforeunload", () => {
-  clearTimeout(timer);
-  window.clearTimeout(formulaWatchdog);
-  preserveSpreadsheetDraftBeforeUnload();
-  formulaWorker?.terminate();
-  formulaWorker = undefined;
-  api?.dispose();
-});
+window.addEventListener("beforeunload", preserveSpreadsheetDraftBeforeUnload);
 send("ready");

@@ -11,7 +11,10 @@ export default defineConfig({
   // Runtime data must never be reachable through Vite's separate public/ URL mapping.
   publicDir: false,
   worker: { format: 'es' },
-  build: { rollupOptions: { input: { main: path.resolve(__dirname,'index.html'), sheet: path.resolve(__dirname,'sheet.html') } } },
+  build: {
+    sourcemap: process.env.NOTEBOARD_COVERAGE === '1',
+    rollupOptions: { input: { main: path.resolve(__dirname,'index.html'), sheet: path.resolve(__dirname,'sheet.html') } },
+  },
   plugins: [univerHostPopovers(), react(), reactRefreshCspPlugin(), tailwindcss()],
   optimizeDeps: {include:['@univerjs/preset-sheets-core/worker','@univerjs/preset-sheets-filter/worker'],esbuildOptions:{plugins:[univerHostPopoversPrebundle()]}},
   resolve: {

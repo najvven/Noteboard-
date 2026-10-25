@@ -120,6 +120,7 @@ import {
   getLinePlacementRect,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
+import { fillConnectedPixels } from "../features/board/pixel-fill";
 import {
   resolveObjectPlacementProps,
   type PendingPropsBaseline,
@@ -695,39 +696,6 @@ const isElementDescendantOf = (
     currentParentId = elements.find((el) => el.id === currentParentId)?.parentId;
   }
   return false;
-};
-
-const getElementStackPath = (
-  element: BoardElement,
-  elements: BoardElement[],
-) => {
-  const ancestors: number[] = [];
-  const visited = new Set<string>();
-  let currentParentId = element.parentId;
-  while (currentParentId && !visited.has(currentParentId)) {
-    visited.add(currentParentId);
-    const parent = elements.find((el) => el.id === currentParentId);
-    if (!parent) break;
-    ancestors.unshift(parent.zIndex);
-    currentParentId = parent.parentId;
-  }
-  return [...ancestors, element.zIndex];
-};
-
-const compareElementStack = (
-  a: BoardElement,
-  b: BoardElement,
-  elements: BoardElement[],
-) => {
-  const aPath = getElementStackPath(a, elements);
-  const bPath = getElementStackPath(b, elements);
-  const length = Math.max(aPath.length, bPath.length);
-  for (let i = 0; i < length; i++) {
-    const aValue = aPath[i] ?? aPath[i - 1] ?? 0;
-    const bValue = bPath[i] ?? bPath[i - 1] ?? 0;
-    if (aValue !== bValue) return aValue - bValue;
-  }
-  return a.id.localeCompare(b.id);
 };
 
 function ColorPicker({
@@ -1556,6 +1524,20 @@ export default function BoardEditor({
   const [fillToolColor, setFillToolColor] = useState<string>(
     initialEditorSettings.fillToolColor ?? '#000000',
   );
+  const [fillNotice, setFillNotice] = useState("");
+  const fillNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const fillInProgressRef = useRef(false);
+  const showFillNotice = (message: string) => {
+    setFillNotice(message);
+    if (fillNoticeTimerRef.current) window.clearTimeout(fillNoticeTimerRef.current);
+    fillNoticeTimerRef.current = window.setTimeout(() => {
+      fillNoticeTimerRef.current = null;
+      setFillNotice("");
+    }, 3200);
+  };
+  useEffect(() => () => {
+    if (fillNoticeTimerRef.current) window.clearTimeout(fillNoticeTimerRef.current);
+  }, []);
   const [eraserMode, setEraserMode] = useState<'element' | 'partial'>(
     initialEditorSettings.eraserMode ?? 'element',
   );
@@ -1980,44 +1962,6 @@ export default function BoardEditor({
   const snap = (v: number) =>
     snapToGrid ? Math.round(v / gridSize) * gridSize : v;
 
-  const elementContainsPoint = (
-    element: BoardElement,
-    point: { x: number; y: number },
-  ) => {
-    const width = element.size?.width || 100;
-    const height = element.size?.height || 40;
-    const rotation = element.rotation || 0;
-    const centerX = element.position.x + width / 2;
-    const centerY = element.position.y + height / 2;
-    const rad = (-rotation * Math.PI) / 180;
-    const dx = point.x - centerX;
-    const dy = point.y - centerY;
-    const localX = width / 2 + dx * Math.cos(rad) - dy * Math.sin(rad);
-    const localY = height / 2 + dx * Math.sin(rad) + dy * Math.cos(rad);
-
-    if (element.type === "line" || element.type === "arrow") {
-      const stroke = Math.max(8, element.borderWidth || 4);
-      return localX >= 0 && localX <= width && Math.abs(localY - height / 2) <= stroke;
-    }
-
-    if (element.type === "draw" && element.points && element.points.length > 2) {
-      let inside = false;
-      for (let i = 0, j = element.points.length - 1; i < element.points.length; j = i++) {
-        const xi = element.points[i].x;
-        const yi = element.points[i].y;
-        const xj = element.points[j].x;
-        const yj = element.points[j].y;
-        const intersects =
-          yi > localY !== yj > localY &&
-          localX < ((xj - xi) * (localY - yi)) / (yj - yi) + xi;
-        if (intersects) inside = !inside;
-      }
-      return inside;
-    }
-
-    return localX >= 0 && localX <= width && localY >= 0 && localY <= height;
-  };
-
   const mainSurface = createBoardSurface('main-board', { x: 0, y: 0 }, pageDimensions, boardColor, -9999);
 
   const isPointInsideBounds = (
@@ -2045,38 +1989,137 @@ export default function BoardEditor({
     y: Math.min(Math.max(point.y, bounds.minY), bounds.maxY),
   });
 
-  const applyFillAtPoint = (point: { x: number; y: number }) => {
-    const target = elementsRef.current
-      .filter(
-        (el) =>
-          el.type !== "layer" &&
-          el.type !== "board" &&
-          !el.isEraser &&
-          !isMergedGroupMember(el,elementHierarchy) &&
-          elementHierarchy.isVisible(el.id, respectLayerVisibility) &&
-          !elementHierarchy.isLocked(el.id) &&
-          (!currentLayerView ||
-            el.parentId === currentLayerView ||
-            elementHierarchy.isDescendantOf(el.id, currentLayerView)),
-      )
-      .sort((a, b) => compareElementStack(b, a, elementsRef.current))
-      .find((el) => elementContainsPoint(el, point));
-
-    if (!target) {
-      const boardTarget = getBoardElementAtPoint(point);
-      if (boardTarget) {
-        updateElement(boardTarget.id, { color: fillToolColor });
-      } else {
-        setBoardColor(fillToolColor);
+  const applyFillAtPoint = async (
+    point: { x: number; y: number },
+    clientPoint: { x: number; y: number },
+  ) => {
+    if (fillInProgressRef.current) return;
+    fillInProgressRef.current = true;
+    try {
+      const captureBoardRegion = window.noteboardAPI?.captureBoardRegion;
+      if (!captureBoardRegion) {
+        showFillNotice("Visible pixel filling is available in the desktop app.");
+        return;
       }
-      return;
-    }
+      if (currentLayerView && elementHierarchy.isLocked(currentLayerView)) {
+        showFillNotice("The current layer is locked.");
+        return;
+      }
 
-    if(target.type==='group')return;
-    if (target.type === "line" || target.type === "arrow" || target.type === "draw") {
-      updateElement(target.id, { borderColor: fillToolColor });
-    } else {
-      updateElement(target.id, { color: fillToolColor });
+      const boardRect = boardSurfaceRef.current?.getBoundingClientRect();
+      const viewportRect = containerRef.current?.getBoundingClientRect();
+      const surfaceBounds = getInteractionBoundsAtPoint(point);
+      const boardScale = zoomRef.current;
+      if (!boardRect || !viewportRect || !surfaceBounds || !Number.isFinite(boardScale) || boardScale <= 0) return;
+
+      const surfaceRect = {
+        left: boardRect.left + surfaceBounds.minX * boardScale,
+        top: boardRect.top + surfaceBounds.minY * boardScale,
+        right: boardRect.left + surfaceBounds.maxX * boardScale,
+        bottom: boardRect.top + surfaceBounds.maxY * boardScale,
+      };
+      const requestedRect = {
+        left: Math.max(viewportRect.left, boardRect.left, surfaceRect.left),
+        top: Math.max(viewportRect.top, boardRect.top, surfaceRect.top),
+        right: Math.min(viewportRect.right, boardRect.right, surfaceRect.right),
+        bottom: Math.min(viewportRect.bottom, boardRect.bottom, surfaceRect.bottom),
+      };
+      if (
+        requestedRect.right <= requestedRect.left ||
+        requestedRect.bottom <= requestedRect.top ||
+        clientPoint.x < requestedRect.left || clientPoint.x >= requestedRect.right ||
+        clientPoint.y < requestedRect.top || clientPoint.y >= requestedRect.bottom
+      ) return;
+
+      const wholeSurfaceVisible =
+        requestedRect.left <= surfaceRect.left + 1 &&
+        requestedRect.top <= surfaceRect.top + 1 &&
+        requestedRect.right >= surfaceRect.right - 1 &&
+        requestedRect.bottom >= surfaceRect.bottom - 1;
+      const capture = await captureBoardRegion({
+        x: requestedRect.left,
+        y: requestedRect.top,
+        width: requestedRect.right - requestedRect.left,
+        height: requestedRect.bottom - requestedRect.top,
+      });
+
+      const sourceImage = new Image();
+      sourceImage.src = capture.dataUrl;
+      await sourceImage.decode();
+      const pixelWidth = sourceImage.naturalWidth;
+      const pixelHeight = sourceImage.naturalHeight;
+      if (!pixelWidth || !pixelHeight || pixelWidth * pixelHeight > 10_000_000) {
+        showFillNotice("The visible area is too large to fill. Zoom in and try a smaller area.");
+        return;
+      }
+
+      const sourceCanvas = document.createElement("canvas");
+      sourceCanvas.width = pixelWidth;
+      sourceCanvas.height = pixelHeight;
+      const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+      if (!sourceContext) {
+        showFillNotice("Could not read the visible board pixels.");
+        return;
+      }
+      sourceContext.drawImage(sourceImage, 0, 0);
+      const sourcePixels = sourceContext.getImageData(0, 0, pixelWidth, pixelHeight);
+      const seedX = Math.floor((clientPoint.x - capture.rect.x) * pixelWidth / capture.rect.width);
+      const seedY = Math.floor((clientPoint.y - capture.rect.y) * pixelHeight / capture.rect.height);
+      const result = fillConnectedPixels(
+        sourcePixels.data,
+        pixelWidth,
+        pixelHeight,
+        seedX,
+        seedY,
+        fillToolColor,
+      );
+      if (!result) return;
+      if (result.touchesEdge && !wholeSurfaceVisible) {
+        showFillNotice("This color continues beyond the visible area. Zoom out to show the whole region before filling.");
+        return;
+      }
+
+      const fillCanvas = document.createElement("canvas");
+      fillCanvas.width = result.bounds.width;
+      fillCanvas.height = result.bounds.height;
+      const fillContext = fillCanvas.getContext("2d");
+      if (!fillContext) {
+        showFillNotice("Could not create the filled region.");
+        return;
+      }
+      fillContext.putImageData(sourcePixels, -result.bounds.x, -result.bounds.y);
+
+      const cssPerPixelX = capture.rect.width / pixelWidth;
+      const cssPerPixelY = capture.rect.height / pixelHeight;
+      const imageLeft = capture.rect.x + result.bounds.x * cssPerPixelX;
+      const imageTop = capture.rect.y + result.bounds.y * cssPerPixelY;
+      const latestElements = elementsRef.current;
+      const filledElement: BoardElement = {
+        id: generateId(),
+        type: "image",
+        name: "Filled region",
+        content: fillCanvas.toDataURL("image/png"),
+        color: "transparent",
+        borderColor: "transparent",
+        borderWidth: 0,
+        keepRatio: false,
+        isPixelFill: true,
+        position: {
+          x: (imageLeft - boardRect.left) / boardScale,
+          y: (imageTop - boardRect.top) / boardScale,
+        },
+        size: {
+          width: Math.max(0.1, result.bounds.width * cssPerPixelX / boardScale),
+          height: Math.max(0.1, result.bounds.height * cssPerPixelY / boardScale),
+        },
+        zIndex: latestElements.reduce((highest, element) => Math.max(highest, element.zIndex), 0) + 1,
+        parentId: currentLayerView || undefined,
+      };
+      pushElements([...latestElements, filledElement]);
+    } catch {
+      showFillNotice("Could not fill this visible region. Try a smaller area or zoom out.");
+    } finally {
+      fillInProgressRef.current = false;
     }
   };
 
@@ -4064,7 +4107,9 @@ export default function BoardEditor({
                 key={mode}
                 type="button"
                 aria-pressed={settings.deviceMode === mode}
-                onClick={() => updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } })}
+                onClick={() => {
+                  if (mode !== settings.deviceMode) updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } });
+                }}
                 className={cn(
                   "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors",
                   settings.deviceMode === mode
@@ -5204,6 +5249,13 @@ export default function BoardEditor({
     updates: Partial<BoardElement>,
     skipHistory = false,
   ) => {
+    const existing = elementsRef.current.find(element => element.id === id);
+    if (existing?.type === 'embed' && updates.webDeviceMode !== undefined &&
+        normalizeWebDeviceMode(existing.webDeviceMode) !== normalizeWebDeviceMode(updates.webDeviceMode) &&
+        window.noteboardAPI?.configureWebViewport && normalizeWebUrl(existing.content) &&
+        normalizeWebUrl(existing.content) !== 'about:blank' &&
+        !window.confirm('Changing the device mode reloads this page. Unsaved input on the page may be lost. Continue?')) return;
+
     const applyElementUpdate = (source: BoardElement[]) => {
       const resizing=secondaryResizeRef.current;
       const previous = source.find((element) => element.id === id);
@@ -6383,7 +6435,7 @@ export default function BoardEditor({
     if (activeTool === "fill") {
       setIsInteracting(true);
       beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      applyFillAtPoint({ x: exactX, y: exactY });
+      void applyFillAtPoint({ x: exactX, y: exactY }, { x: e.clientX, y: e.clientY });
       return;
     }
 
@@ -6464,18 +6516,8 @@ export default function BoardEditor({
       return;
     }
 
-    if (activeTool === "fill" && activeAreaGesture && boardSurfaceRef.current) {
-      const rect = boardSurfaceRef.current.getBoundingClientRect();
-      const exactX = (e.clientX - rect.left) / zoom;
-      const exactY = (e.clientY - rect.top) / zoom;
-      const bounds =
-        activeSurfaceBoundsRef.current ??
-        getInteractionBoundsAtPoint(activeAreaGesture.start);
-      if (bounds && isPointInsideBounds({ x: exactX, y: exactY }, bounds)) {
-        applyFillAtPoint({ x: exactX, y: exactY });
-      }
-      return;
-    }
+    // Fill is a bucket action: one pointer-down fills one connected region.
+    if (activeTool === "fill" && activeAreaGesture) return;
 
     if (activeTool === "draw" && currentDrawPoints && activeAreaGesture && boardSurfaceRef.current) {
       const rect = boardSurfaceRef.current.getBoundingClientRect();
@@ -8481,6 +8523,15 @@ export default function BoardEditor({
 
       {/* Main Workspace Area with Paint-like resizable board */}
       <div className="flex-1 flex overflow-hidden relative">
+        {fillNotice && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-24 left-1/2 z-[10000] -translate-x-1/2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 shadow-lg pointer-events-none"
+          >
+            {fillNotice}
+          </div>
+        )}
         <div
           className="workspace-scroll flex-1 relative overflow-auto select-none"
           ref={containerRef}
@@ -10663,14 +10714,14 @@ export default function BoardEditor({
                                             : "border-transparent hover:border-gray-300 hover:bg-white hover:text-gray-900",
                                         )}
                                         title={WEB_DEVICE_PROFILES[mode].label}
-                                        onClick={() =>
-                                          onUpdateTarget({
+                                        onClick={() => {
+                                          if (!active) onUpdateTarget({
                                             webDeviceMode: mode,
                                             size:
                                               WEB_DEVICE_PROFILES[mode]
                                                 .defaultSize,
-                                          })
-                                        }
+                                          });
+                                        }}
                                       >
                                         <Icon className="w-4 h-4" />
                                       </button>
@@ -11972,7 +12023,9 @@ function BoardElementNode({
       className={cn(
         "absolute",
         canInteract && "touch-none",
-        isInteractionLocked
+        element.isPixelFill && !isSelected
+          ? "pointer-events-none"
+        : isInteractionLocked
           ? "pointer-events-none"
         : element.type === "board" && !canInteract
           ? "cursor-crosshair pointer-events-auto"

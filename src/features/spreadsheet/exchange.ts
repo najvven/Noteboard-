@@ -13,6 +13,9 @@ import {
 const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
 const MAX_IMPORT_EXPANDED_BYTES = 128 * 1024 * 1024;
 const MAX_CELLS = 200_000;
+const MAX_ROWS = 1_048_576;
+const MIN_COLUMNS = 26;
+const MAX_COLUMNS = 16_384;
 const borderNames = [
   "none",
   "thin",
@@ -209,15 +212,83 @@ const columnNumber = (letters: string) => {
   return result;
 };
 
-/** ExcelJS eagerly creates every cell in a merged rectangle while loading. */
-async function assertWorkbookMergeBudget(zip: JSZip) {
+function parseCellAddress(address: string) {
+  const match = address.match(/^([A-Z]{1,3})(\d+)$/i);
+  if (!match) throw Error("The workbook contains an invalid cell reference.");
+  const column = columnNumber(match[1]);
+  const row = Number(match[2]);
+  if (
+    column < 1 || column > MAX_COLUMNS || !Number.isSafeInteger(row) ||
+    row < 1 || row > MAX_ROWS
+  ) throw Error("The workbook contains an invalid cell reference.");
+  return { row, column };
+}
+
+/** Validate column declarations and bound cells ExcelJS materializes for merges. */
+async function assertWorkbookImportBudget(zip: JSZip) {
   let materializedCellBudget = 0;
+  let totalRowRecordCount = 0;
   for (const [path, entry] of Object.entries(zip.files)) {
     if (entry.dir || !/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
     const xml = await entry.async("string");
-    let declaredCells = 0;
-    for (const _match of xml.matchAll(/<(?:[\w.-]+:)?c(?:\s|>)/g)) declaredCells += 1;
-    materializedCellBudget += declaredCells;
+    let rowRecordCount = 0;
+    const explicitRowIndexes = new Set<number>();
+    const cellAddresses = new Set<string>();
+    for (const match of xml.matchAll(/<(?:[\w.-]+:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:[\w.-]+:)?row\s*>)/gi)) {
+      const rowText = xmlAttributes(match[1]).get("r")?.trim();
+      let rowNumber: number | undefined;
+      if (rowText !== undefined) {
+        rowNumber = /^\d+$/.test(rowText) ? Number(rowText) : NaN;
+        if (!Number.isSafeInteger(rowNumber) || rowNumber < 1 || rowNumber > MAX_ROWS)
+          throw Error("The workbook contains an invalid row reference.");
+        if (explicitRowIndexes.has(rowNumber))
+          throw Error("The workbook contains duplicate worksheet row references.");
+        explicitRowIndexes.add(rowNumber);
+      }
+      rowRecordCount += 1;
+      totalRowRecordCount += 1;
+      if (rowRecordCount > MAX_ROWS)
+        throw Error("The worksheet contains more than 1,048,576 row records.");
+      if (totalRowRecordCount > MAX_CELLS)
+        throw Error("The workbook contains more than 200,000 row records.");
+      let previousAddress: { row: number; column: number } | undefined;
+      for (const cellMatch of (match[2] ?? "").matchAll(/<(?:[\w.-]+:)?c\b([^>]*)\/?\s*>/gi)) {
+        const address = xmlAttributes(cellMatch[1]).get("r")?.trim();
+        let cellAddress: { row: number; column: number };
+        if (address !== undefined) {
+          cellAddress = parseCellAddress(address);
+          if (rowNumber !== undefined && cellAddress.row !== rowNumber)
+            throw Error("The workbook contains a cell reference that does not match its worksheet row.");
+        } else {
+          if (!previousAddress)
+            throw Error("The workbook contains a cell without a reference before any explicit cell reference.");
+          cellAddress = { row: previousAddress.row, column: previousAddress.column + 1 };
+          if (cellAddress.column > MAX_COLUMNS)
+            throw Error("The workbook contains an invalid cell reference.");
+        }
+        const key = `${cellAddress.row}:${cellAddress.column}`;
+        if (cellAddresses.has(key))
+          throw Error("The workbook contains duplicate cell references.");
+        cellAddresses.add(key);
+        previousAddress = cellAddress;
+      }
+    }
+    for (const match of xml.matchAll(/<(?:[\w.-]+:)?c\b([^>]*)\/?\s*>/gi)) {
+      materializedCellBudget += 1;
+      const address = xmlAttributes(match[1]).get("r");
+      if (address !== undefined) parseCellAddress(address.trim());
+    }
+    for (const match of xml.matchAll(/<(?:[\w.-]+:)?col\b([^>]*)\/?\s*>/gi)) {
+      const attributes = xmlAttributes(match[1]);
+      const minText = attributes.get("min")?.trim();
+      const maxText = attributes.get("max")?.trim();
+      const min = minText !== undefined && /^\d+$/.test(minText) ? Number(minText) : NaN;
+      const max = maxText !== undefined && /^\d+$/.test(maxText) ? Number(maxText) : NaN;
+      if (
+        !Number.isSafeInteger(min) || !Number.isSafeInteger(max) ||
+        min < 1 || max < min || max > MAX_COLUMNS
+      ) throw Error("The workbook contains invalid column definitions.");
+    }
     for (const match of xml.matchAll(/<(?:[\w.-]+:)?mergeCell\b[^>]*\bref=(?:"([^"]+)"|'([^']+)')[^>]*\/?\s*>/gi)) {
       const range = (match[1] ?? match[2]).match(/^\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?$/i);
       if (!range) throw Error("The workbook contains an invalid merged range.");
@@ -226,8 +297,8 @@ async function assertWorkbookMergeBudget(zip: JSZip) {
       const endColumn = range[3] ? columnNumber(range[3]) : startColumn;
       const endRow = range[4] ? Number(range[4]) : startRow;
       if (
-        startColumn < 1 || endColumn < startColumn || endColumn > 16_384 ||
-        startRow < 1 || endRow < startRow || endRow > 1_048_576
+        startColumn < 1 || endColumn < startColumn || endColumn > MAX_COLUMNS ||
+        startRow < 1 || endRow < startRow || endRow > MAX_ROWS
       ) throw Error("The workbook contains an invalid merged range.");
       materializedCellBudget += (endColumn - startColumn + 1) * (endRow - startRow + 1);
       if (materializedCellBudget > MAX_CELLS)
@@ -346,7 +417,7 @@ export async function importSpreadsheet(
     maxArchiveBytes: MAX_IMPORT_EXPANDED_BYTES,
     archiveLabel: "Expanded workbook",
   });
-  await assertWorkbookMergeBudget(zip);
+  await assertWorkbookImportBudget(zip);
   const warnings: string[] = [];
   if (
     Object.keys(zip.files).some((path) =>
@@ -370,11 +441,33 @@ export async function importSpreadsheet(
     if (document.workbook.sheetOrder!.length >= 256)
       throw Error("A workbook can contain up to 256 sheets.");
     const id = `sheet-${crypto.randomUUID()}`;
+    const declaredColumns = (worksheet.model as unknown as {
+      cols?: Array<{ min?: number; max?: number; width?: number; hidden?: boolean }>;
+    }).cols ?? [];
+    const mergedRanges = worksheet.model.merges ?? [];
+    const declaredColumnCount = declaredColumns.reduce(
+      (maximum, column) => Math.max(maximum, column.max ?? column.min ?? 0),
+      0,
+    );
+    const mergedColumnCount = mergedRanges.reduce((maximum, address) => {
+      const endpoint = address.split(":").at(-1) ?? address;
+      return Math.max(maximum, worksheet.getCell(endpoint).fullAddress.col);
+    }, 0);
+    const requiredColumnCount = Math.max(
+      worksheet.columnCount,
+      declaredColumnCount,
+      mergedColumnCount,
+    );
+    if (requiredColumnCount > MAX_COLUMNS)
+      throw Error("The workbook contains columns beyond the 16,384 column limit.");
     const sheet = {
       id,
       name: worksheet.name,
-      rowCount: Math.min(1_048_576, Math.max(1000, worksheet.rowCount + 100)),
-      columnCount: Math.min(16_384, Math.max(26, worksheet.columnCount + 5)),
+      rowCount: Math.min(MAX_ROWS, Math.max(1000, worksheet.rowCount + 100)),
+      columnCount: Math.min(
+        MAX_COLUMNS,
+        Math.max(MIN_COLUMNS, worksheet.columnCount + 5, requiredColumnCount),
+      ),
       cellData: {},
       rowData: {},
       columnData: {},
@@ -435,12 +528,13 @@ export async function importSpreadsheet(
         (sheet.cellData![r - 1] ??= {})[c - 1] = value;
       });
     });
-    const declaredColumns = (worksheet.model as unknown as {
-      cols?: Array<{ min?: number; max?: number; width?: number; hidden?: boolean }>;
-    }).cols ?? [];
     for (const column of declaredColumns) {
-      const first = Math.max(1, column.min ?? 1);
-      const last = Math.min(16_384, column.max ?? first);
+      const first = column.min ?? 0;
+      const last = column.max ?? 0;
+      if (
+        !Number.isInteger(first) || !Number.isInteger(last) ||
+        first < 1 || last < first || last > MAX_COLUMNS
+      ) throw Error("The workbook contains invalid column definitions.");
       for (let c = first; c <= last; c += 1) {
         sheet.columnData![c - 1] = {
           ...(column.width ? { w: excelColumnWidthToPixels(column.width) } : {}),
@@ -448,7 +542,7 @@ export async function importSpreadsheet(
         };
       }
     }
-    for (const address of worksheet.model.merges ?? []) {
+    for (const address of mergedRanges) {
       const [start, end] = address
         .split(":")
         .map((value) => worksheet.getCell(value));

@@ -121,6 +121,8 @@ export interface BoardElement {
   isHidden?: boolean;
   isLocked?: boolean;
   isEraser?: boolean;
+  /** Raster fill generated from the visible connected pixel region. */
+  isPixelFill?: boolean;
   eraserShape?: 'round' | 'square';
   name?: string;
   isLinkTarget?: boolean;

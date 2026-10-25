@@ -87,8 +87,10 @@ test('XLSX import preserves cached formula results and explicitly declared empty
   assert.deepEqual([sheet.cellData[0][3].f,sheet.cellData[0][3].v,sheet.cellData[0][3].t],['=""','',1]);
   assert.deepEqual([sheet.cellData[0][4].f,sheet.cellData[0][4].t],['=DATE(2020,1,1)',2]);
   assert.deepEqual([sheet.cellData[0][5].f,sheet.cellData[0][5].v,sheet.cellData[0][5].t],['=NA()','#N/A',4]);
+  assert.equal(sheet.columnCount,40);assert.equal(sheet.cellData[0][39],undefined);
   assert.ok(Math.abs(sheet.columnData![39].w!-180)<1e-9);
   assert.equal(sheet.columnData![39].hd,1);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
   const exported=await exportSpreadsheet(imported.document,'xlsx');
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(exported as any);
   assert.equal(workbook.worksheets[0].getCell('A1').result,3);
@@ -97,6 +99,205 @@ test('XLSX import preserves cached formula results and explicitly declared empty
   const exportedZip=await JSZip.loadAsync(exported);
   const exportedXml=await exportedZip.file('xl/worksheets/sheet1.xml')!.async('string');
   assert.match(exportedXml,/<c r="D1"[^>]*><f>&quot;&quot;<\/f><v><\/v><\/c>/);
+});
+
+test('XLSX import includes defined empty columns when sizing an otherwise empty worksheet',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Empty');
+  worksheet.getColumn(35).width=18;
+  const imported=await importSpreadsheet(await source.xlsx.writeBuffer() as ArrayBuffer,'Empty.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.deepEqual(sheet.cellData,{});
+  assert.equal(sheet.columnCount,35);
+  assert.equal(sheet.columnData![34].w,131);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
+});
+
+test('XLSX import accepts a declared XFD column at the worksheet limit',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('XFD');
+  worksheet.getColumn(16_384).width=12;
+  const imported=await importSpreadsheet(await source.xlsx.writeBuffer() as ArrayBuffer,'XFD.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(sheet.columnCount,16_384);
+  assert.equal(sheet.columnData![16_383].w,89);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
+});
+
+test('XLSX import counts a valid two-cell merge ending at XFD',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('XFD merge');
+  worksheet.mergeCells('XFC1:XFD1');
+  const imported=await importSpreadsheet(await source.xlsx.writeBuffer() as ArrayBuffer,'XFD-merge.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(sheet.columnCount,16_384);
+  assert.deepEqual(sheet.mergeData,[{startRow:0,endRow:0,startColumn:16_382,endColumn:16_383}]);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
+});
+
+test('XLSX rejects an out-of-range XFE column declaration before ExcelJS loads the workbook',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('XFE');
+  worksheet.getColumn(1).width=10;
+  const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+  const path='xl/worksheets/sheet1.xml',xml=await zip.file(path)!.async('string');
+  const invalidXml=xml.replace(/<col\b[^>]*\/>/,'<col min="16385" max="16385" width="10" customWidth="1"/>');
+  assert.notEqual(invalidXml,xml,'the fixture must replace the valid column definition');
+  zip.file(path,invalidXml);
+  const bytes=await zip.generateAsync({type:'arraybuffer'});
+  const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+  const originalLoad=xlsxPrototype.load;
+  let loadCalls=0;
+  xlsxPrototype.load=function(this:any,...args:any[]){loadCalls+=1;return originalLoad.apply(this,args);};
+  try{
+    await assert.rejects(()=>importSpreadsheet(bytes,'XFE.xlsx'),/invalid column definitions/);
+    assert.equal(loadCalls,0,'invalid column declarations must fail before ExcelJS materializes a workbook');
+  }finally{
+    xlsxPrototype.load=originalLoad;
+  }
+});
+
+test('XLSX rejects sparse out-of-range cell and row references before ExcelJS loads the workbook',async()=>{
+  const invalidReferences=[
+    {
+      name:'XFE cell column',
+      pattern:/invalid cell reference/,
+      rewrite:(xml:string)=>xml.replace(/(<c\b[^>]*\br=")A1("[^>]*>)/,(_match,start,end)=>`${start}XFE1${end}`),
+    },
+    {
+      name:'worksheet row index',
+      pattern:/invalid row reference/,
+      rewrite:(xml:string)=>xml.replace(/(<row\b[^>]*\br=")\d+("[^>]*>)/,(_match,start,end)=>`${start}1048577${end}`),
+    },
+    {
+      name:'cell row index',
+      pattern:/invalid cell reference/,
+      rewrite:(xml:string)=>xml.replace(/(<c\b[^>]*\br=")A1("[^>]*>)/,(_match,start,end)=>`${start}A1048577${end}`),
+    },
+    {
+      name:'duplicate worksheet row',
+      pattern:/duplicate worksheet row references/,
+      rewrite:(xml:string)=>{
+        const row=xml.match(/<row\b[^>]*>[\s\S]*?<\/row>/)?.[0];
+        return row?xml.replace('</sheetData>',`${row}</sheetData>`):xml;
+      },
+    },
+  ];
+  for(const scenario of invalidReferences){
+    const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Sparse');
+    worksheet.getCell('A1').value='fixture';
+    const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+    const path='xl/worksheets/sheet1.xml',xml=await zip.file(path)!.async('string');
+    const invalidXml=scenario.rewrite(xml);
+    assert.notEqual(invalidXml,xml,`${scenario.name} fixture must change the worksheet XML`);
+    zip.file(path,invalidXml);
+    const bytes=await zip.generateAsync({type:'arraybuffer'});
+    const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+    const originalLoad=xlsxPrototype.load;
+    let loadCalls=0;
+    xlsxPrototype.load=function(this:any,...args:any[]){loadCalls+=1;return originalLoad.apply(this,args);};
+    try{
+      await assert.rejects(()=>importSpreadsheet(bytes,`${scenario.name}.xlsx`),scenario.pattern);
+      assert.equal(loadCalls,0,`${scenario.name} must be rejected before ExcelJS loads the workbook`);
+    }finally{
+      xlsxPrototype.load=originalLoad;
+    }
+  }
+});
+
+test('XLSX rejects row-mismatched and duplicate cell addresses before ExcelJS loads the workbook',async()=>{
+  const scenarios=[
+    {
+      name:'row mismatch',
+      expected:/does not match its worksheet row/,
+      rewrite:(xml:string)=>xml.replace(/(<c\b[^>]*\br=")B1("[^>]*>)/,(_match,start,end)=>`${start}A2${end}`),
+    },
+    {
+      name:'duplicate cell',
+      expected:/duplicate cell references/,
+      rewrite:(xml:string)=>xml.replace(/(<c\b[^>]*\br=")B1("[^>]*>)/,(_match,start,end)=>`${start}A1${end}`),
+    },
+  ];
+  for(const scenario of scenarios){
+    const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Cells');
+    worksheet.getCell('A1').value='first';worksheet.getCell('B1').value='second';
+    const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+    const path='xl/worksheets/sheet1.xml',xml=await zip.file(path)!.async('string');
+    const invalidXml=scenario.rewrite(xml);
+    assert.notEqual(invalidXml,xml,`${scenario.name} fixture must change the cell address`);
+    zip.file(path,invalidXml);
+    const bytes=await zip.generateAsync({type:'arraybuffer'});
+    const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+    const originalLoad=xlsxPrototype.load;
+    let loadCalls=0;
+    xlsxPrototype.load=function(this:any,...args:any[]){loadCalls+=1;return originalLoad.apply(this,args);};
+    try{
+      await assert.rejects(()=>importSpreadsheet(bytes,`${scenario.name}.xlsx`),scenario.expected);
+      assert.equal(loadCalls,0,`${scenario.name} must be rejected before ExcelJS loads the workbook`);
+    }finally{
+      xlsxPrototype.load=originalLoad;
+    }
+  }
+});
+
+test('XLSX import infers a missing cell r attribute from the preceding cell',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Cells without r');
+  worksheet.getCell('A1').value='first';worksheet.getCell('B1').value='second';
+  const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+  const path='xl/worksheets/sheet1.xml',xml=await zip.file(path)!.async('string');
+  const withoutSecondAddress=xml.replace(/(<c\b[^>]*?)\s+r="B1"/,'$1');
+  assert.notEqual(withoutSecondAddress,xml,'the second cell reference must be omitted');
+  zip.file(path,withoutSecondAddress);
+  const imported=await importSpreadsheet(await zip.generateAsync({type:'arraybuffer'}),'Cells-without-r.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(sheet.cellData[0][0].v,'first');
+  assert.equal(sheet.cellData[0][1].v,'second');
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
+});
+
+test('XLSX rejects more than 200,000 worksheet row records across sheets before ExcelJS loads',async()=>{
+  const source=new ExcelJS.Workbook();
+  source.addWorksheet('First').getCell('A1').value='fixture';
+  source.addWorksheet('Second').getCell('A1').value='fixture';
+  const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+  const rowXml=Array.from({length:100_001},(_,index)=>`<row r="${index+1}"/>`).join('');
+  for(const path of ['xl/worksheets/sheet1.xml','xl/worksheets/sheet2.xml']){
+    const xml=await zip.file(path)!.async('string');
+    const overBudgetXml=xml.replace(/<sheetData>[\s\S]*?<\/sheetData>/,`<sheetData>${rowXml}</sheetData>`);
+    assert.notEqual(overBudgetXml,xml,`${path} must contain the generated empty rows`);
+    zip.file(path,overBudgetXml);
+  }
+  const bytes=await zip.generateAsync({type:'arraybuffer'});
+  const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+  const originalLoad=xlsxPrototype.load;
+  let loadCalls=0;
+  xlsxPrototype.load=function(this:any,...args:any[]){loadCalls+=1;return originalLoad.apply(this,args);};
+  try{
+    await assert.rejects(()=>importSpreadsheet(bytes,'Row budget.xlsx'),/more than 200,000 row records/);
+    assert.equal(loadCalls,0,'the workbook-wide row budget must be checked before ExcelJS loads rows');
+  }finally{
+    xlsxPrototype.load=originalLoad;
+  }
+});
+
+test('XLSX import accepts one populated cell at the maximum supported row',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Last row');
+  worksheet.getCell('A1048576').value=42;
+  const imported=await importSpreadsheet(await source.xlsx.writeBuffer() as ArrayBuffer,'Last-row.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(sheet.rowCount,1_048_576);
+  assert.equal(sheet.cellData[1_048_575][0].v,42);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
+});
+
+test('XLSX export retains the width of a defined column with no cells',async()=>{
+  const document=createWorkbookDocument('Defined width');
+  const sheet=document.workbook.sheets!['sheet-1'];
+  sheet.columnCount=40;sheet.columnData={39:{w:180}};
+  const bytes=await exportSpreadsheet(document,'xlsx');
+  const excel=new ExcelJS.Workbook();await excel.xlsx.load(bytes as any);
+  assert.equal(excel.worksheets[0].getColumn(40).width,25);
+  const imported=await importSpreadsheet(bytes.buffer as ArrayBuffer,'Defined.xlsx');
+  const importedSheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(importedSheet.columnCount,40);
+  assert.equal(importedSheet.columnData![39].w,180);
+  assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
 });
 
 test('XLSX rejects giant merged ranges before ExcelJS materializes their cells',async()=>{

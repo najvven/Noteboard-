@@ -58,6 +58,10 @@ interface NoteboardDesktopApi {
   getWebHostZoom: () => number;
   enterWebFullscreen: (guestId: number) => Promise<boolean>;
   sampleBoardColor: (point:{x:number;y:number})=>Promise<string>;
+  captureBoardRegion?: (rect:{x:number;y:number;width:number;height:number})=>Promise<{
+    dataUrl:string;
+    rect:{x:number;y:number;width:number;height:number};
+  }>;
   setBoardZoomState: (state: {shortcut:string;active:boolean}) => Promise<boolean>;
   onWebWheel: (callback: (event:{guestId:number;guestX:number;guestY:number;deltaY:number})=>void) => () => void;
   getWebBlockingStatus?: (partition: string) => Promise<WebBlockingStatus | null>;

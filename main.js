@@ -49,7 +49,8 @@ const configuredWebSessions = new Map();
 const configureWebSessionInOrder = createWebSessionConfigurationQueue();
 const webZoomStates = new WeakMap();
 const webPointerPositions = new WeakMap();
-const webNavigationUrls = new WeakMap();
+// Only cookie acceptance during a main-frame response uses its pending URL.
+// Requests made by the still-active document must never inherit that URL.
 const webPendingNavigationUrls = new WeakMap();
 const guestPreload = path.join(__dirname, 'dist', 'web-privacy-preload.cjs');
 const blockingCounts = new Map();
@@ -104,14 +105,22 @@ const getPartitionForWebContents = (contents) => {
   return null;
 };
 
-const getWebContentsTopLevelUrl = (contents) => {
+const isNetworkWebUrl = url => /^https?:\/\//i.test(url || '') && isAllowedEmbeddedWebUrl(url);
+
+const getWebContentsTopLevelContext = (contents) => {
   if (!contents || contents.isDestroyed()) return undefined;
-  const pendingUrl = webPendingNavigationUrls.get(contents);
-  if (pendingUrl && /^https?:\/\//i.test(pendingUrl) && isAllowedEmbeddedWebUrl(pendingUrl)) return pendingUrl;
-  const committedUrl = webNavigationUrls.get(contents);
-  if (committedUrl && /^https?:\/\//i.test(committedUrl) && isAllowedEmbeddedWebUrl(committedUrl)) return committedUrl;
   const currentUrl = contents.mainFrame?.url || contents.getURL();
-  return /^https?:\/\//i.test(currentUrl) && isAllowedEmbeddedWebUrl(currentUrl) ? currentUrl : undefined;
+  if (isNetworkWebUrl(currentUrl)) return { topLevelUrl: currentUrl };
+
+  // Ownerless blank popups have no attributable context and fail closed.
+  if (contents.getType() === 'window') {
+    try { if (!contents.opener) return { topLevelUrl: '' }; }
+    catch { return { topLevelUrl: '' }; }
+  }
+  // Use the document's inherited origin, not its opener's current origin:
+  // navigating the opener does not change an existing about:blank document.
+  const origin = contents.mainFrame?.origin;
+  return { topLevelUrl: isNetworkWebUrl(origin) ? origin : '' };
 };
 
 handleTrusted('clipboard:read', () => readNativeClipboard(clipboard));
@@ -129,7 +138,8 @@ ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
   const documentTopLevelUrl = isMainFrame && /^https?:\/\//i.test(documentUrl || '') && isAllowedEmbeddedWebUrl(documentUrl)
     ? documentUrl
     : undefined;
-  const topLevelUrl = documentTopLevelUrl || getWebContentsTopLevelUrl(event.sender) || settings.topLevelUrl;
+  const contentContext = getWebContentsTopLevelContext(event.sender);
+  const topLevelUrl = documentTopLevelUrl ?? contentContext?.topLevelUrl ?? settings.topLevelUrl;
   const host = event.sender.getType() === 'webview' ? event.sender.hostWebContents : null;
   const boardZoom = host && !host.isDestroyed() ? webZoomStates.get(host) || { shortcut: 'Ctrl', active: false } : null;
   event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }), boardZoom };
@@ -179,8 +189,9 @@ const requestPolicy = (details, settings) => {
     ? webContents.fromId(details.webContentsId)
     : undefined;
   const source = candidate && !candidate.isDestroyed() ? candidate : undefined;
-  const currentUrl = source ? getWebContentsTopLevelUrl(source) : undefined;
-  return { ...resolveWebRequestPolicy(details, settings, currentUrl), source };
+  const contentContext = source ? getWebContentsTopLevelContext(source) : undefined;
+  const effectiveSettings = contentContext ? { ...settings, topLevelUrl: contentContext.topLevelUrl } : settings;
+  return { ...resolveWebRequestPolicy(details, effectiveSettings, contentContext?.topLevelUrl), source };
 };
 
 const applyWebSessionConfiguration = async (partition, normalized) => {
@@ -227,7 +238,10 @@ const applyWebSessionConfiguration = async (partition, normalized) => {
     // shares the originating field's session and blocking preferences.
     const isOpenFirstParty = current.cookieBlocker === 'third-party' && webContents.getAllWebContents().some(contents => {
       if (contents.session !== webSession) return false;
-      const topLevelUrl = getWebContentsTopLevelUrl(contents) || current.topLevelUrl;
+      const contentContext = getWebContentsTopLevelContext(contents);
+      // Set-Cookie on the initial main-frame response arrives before commit.
+      // Header filtering has already approved that response's own origin.
+      const topLevelUrl = webPendingNavigationUrls.get(contents) ?? contentContext?.topLevelUrl ?? current.topLevelUrl;
       return /^https?:\/\//i.test(topLevelUrl) && !shouldBlockCookies(url, { ...current, topLevelUrl });
     });
     if (!isOpenFirstParty && shouldBlockCookies(url, current)) {
@@ -365,6 +379,37 @@ handleTrusted('board:sample-color',async(event,point={})=>{
   if(image.isEmpty())throw Error('Could not read the selected color.');
   const pixel=image.toBitmap();
   return '#'+[pixel[2],pixel[1],pixel[0]].map(value=>value.toString(16).padStart(2,'0')).join('');
+});
+
+handleTrusted('board:capture-region', async (event, rect = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) throw Error('The board window is no longer available.');
+  if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0)
+    throw Error('Invalid board capture region.');
+
+  const pageZoom = event.sender.getZoomFactor();
+  const bounds = win.getContentBounds();
+  const x = Math.floor(rect.x * pageZoom);
+  const y = Math.floor(rect.y * pageZoom);
+  const right = Math.ceil((rect.x + rect.width) * pageZoom);
+  const bottom = Math.ceil((rect.y + rect.height) * pageZoom);
+  const width = Math.min(bounds.width, right) - x;
+  const height = Math.min(bounds.height, bottom) - y;
+  if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > bounds.width || y + height > bounds.height)
+    throw Error('Choose a visible area inside the board window.');
+  if (width * height > 10_000_000)
+    throw Error('The visible area is too large to fill at once. Zoom in and try a smaller area.');
+
+  const image = await event.sender.capturePage({ x, y, width, height });
+  if (image.isEmpty()) throw Error('Could not read the visible board pixels.');
+  const png = image.toPNG({ scaleFactor: 1 });
+  if (png.byteLength > 40 * 1024 * 1024)
+    throw Error('The visible area is too large to fill at once. Zoom in and try a smaller area.');
+
+  return {
+    dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+    rect: { x: x / pageZoom, y: y / pageZoom, width: width / pageZoom, height: height / pageZoom },
+  };
 });
 
 handleTrusted('web-session:clear', async (_event, partition) => {
@@ -535,13 +580,11 @@ app.on('web-contents-created', (_event, contents) => {
   });
   contents.on('did-frame-navigate', (_navigateEvent, url, _status, _statusText, isMainFrame) => {
     if (isMainFrame !== true) return;
-    if (/^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) webNavigationUrls.set(contents, url);
     webPendingNavigationUrls.delete(contents);
     if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
   contents.on('did-navigate-in-page', (_navigateEvent, url, isMainFrame) => {
     if (isMainFrame !== true) return;
-    if (/^https?:\/\//i.test(url) && isAllowedEmbeddedWebUrl(url)) webNavigationUrls.set(contents, url);
     webPendingNavigationUrls.delete(contents);
     if (isGuest) updateWebSessionTopLevelUrl(contents, url);
   });
@@ -550,6 +593,8 @@ app.on('web-contents-created', (_event, contents) => {
       webPendingNavigationUrls.delete(contents);
     }
   });
+  // HTTP 204 and downloads can finish without either a commit or did-fail-load.
+  contents.on('did-stop-loading', () => webPendingNavigationUrls.delete(contents));
 });
 
 app.whenReady().then(() => {

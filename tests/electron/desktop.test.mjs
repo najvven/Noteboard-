@@ -36,8 +36,11 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
     process.on('uncaughtException',error=>app.__qaMainErrors.push(error.stack||error.message));
     process.on('unhandledRejection',error=>app.__qaMainErrors.push(String(error)));
     app.on('will-quit',()=>require('node:fs').writeFileSync(require('node:path').join(process.env.NOTEBOARD_QA_PROFILE,'main-errors.json'),JSON.stringify(app.__qaMainErrors)));
-    app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();});
-    app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
+    app.__qaCoverageTargets=new Map();app.__qaCoverageErrors=[];
+    const startRendererCoverage=contents=>{if(process.env.NOTEBOARD_COVERAGE!=='1')return;try{if(!contents.debugger.isAttached())contents.debugger.attach('1.3');const target={contents,started:Promise.resolve().then(()=>contents.debugger.sendCommand('Profiler.enable')).then(()=>contents.debugger.sendCommand('Profiler.startPreciseCoverage',{callCount:false,detailed:true}))};target.started.catch(error=>app.__qaCoverageErrors.push(error.message));app.__qaCoverageTargets.set(contents,target);}catch(error){app.__qaCoverageErrors.push(error.message);}};
+    app.__qaSaveRendererCoverage=async()=>{let saved=0;const dir=process.env.NOTEBOARD_ELECTRON_COVERAGE;for(const target of app.__qaCoverageTargets.values()){const contents=target.contents;try{await target.started;if(contents.isDestroyed())continue;const coverage=await contents.debugger.sendCommand('Profiler.takePreciseCoverage');if(coverage.result?.length){const output=require('node:path').join(dir,'electron-renderer-'+contents.id+'-'+process.pid+'.json');require('node:fs').mkdirSync(dir,{recursive:true});require('node:fs').writeFileSync(output,JSON.stringify({result:coverage.result,timestamp:Date.now()}));saved+=coverage.result.length;}}catch(error){app.__qaCoverageErrors.push(error.message);}}return {saved,errors:[...app.__qaCoverageErrors]};};
+    app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();startRendererCoverage(win.webContents);});
+    app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);/* test-only timer stability: this makes memory diagnostics unlike normal app behavior */if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
     import(${JSON.stringify(pathToFileURL(process.env.NOTEBOARD_TEST_APP_ENTRY || path.join(root,'main.js')).href)});`);
   const env={...process.env,NODE_ENV:'production',NOTEBOARD_QA_PROFILE:profile};
   delete env.ELECTRON_RUN_AS_NODE;
@@ -51,6 +54,11 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
   assert.equal(await app.evaluate(({app})=>app.getPath('userData')),profile);
   t.after(async()=>{
     try {
+      if(process.env.NOTEBOARD_COVERAGE==='1'&&child.exitCode===null){
+        const coverage=await app.evaluate(({app})=>app.__qaSaveRendererCoverage()).catch(error=>({saved:0,errors:[error.message]}));
+        if(coverage.errors.length)t.diagnostic('COVERAGE_COLLECTION_ERROR '+JSON.stringify(coverage.errors));
+        else t.diagnostic(`COVERAGE_ELECTRON_RENDERER ${coverage.saved}`);
+      }
       if (expectClosed && child.exitCode !== null) {
         assert.deepEqual(JSON.parse(await fs.readFile(path.join(profile,'main-errors.json'),'utf8')),[], 'Closing must not throw in Electron main');
         return;
@@ -98,6 +106,15 @@ async function fixtureServer(t) {
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   return `http://127.0.0.1:${server.address().port}`;
+}
+
+async function chooseWebDevice(window,button,accept=true) {
+  const handled=window.waitForEvent('dialog').then(async dialog=>{
+    assert.equal(dialog.type(),'confirm');
+    assert.match(dialog.message(),/reloads this page.*Unsaved input/);
+    if(accept)await dialog.accept();else await dialog.dismiss();
+  });
+  await Promise.all([handled,button.click()]);
 }
 
 test('native Web ignores iframe fragment changes and persists committed main-frame URLs only', {timeout:45000}, async t => {
@@ -275,7 +292,7 @@ test('several Web fields remain responsive and release their ad-block engines af
   await expect.poll(async()=>(await guestState(app)).filter(page=>page.title==='Native web ready').length,{timeout:30000}).toBe(6);
   assert.equal(await app.evaluate(({webContents})=>webContents.getAllWebContents().filter(item=>!item.isDestroyed()&&item.getType()==='backgroundPage').length),1,'Six fields share one real extension background');
   const memory = await app.evaluate(({app})=>app.getAppMetrics().reduce((sum,process)=>sum+(process.memory?.workingSetSize??0),0));
-  t.diagnostic(`Six native Web fields: ${Math.round(memory/1024)} MiB working set.`);
+  t.diagnostic(`Six native Web fields: ${Math.round(memory/1024)} MiB working set; QA fixture disables background throttling, so this is not a production baseline.`);
   const root=(await window.locator('[data-board-root]').boundingBox());
   await window.mouse.move(root.x+10,root.y+10);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
   await expect(window.getByRole('button',{name:'More',exact:true})).toBeEnabled();
@@ -423,7 +440,9 @@ test('Ctrl+wheel over native Web zooms the board around the cursor, including fo
   await window.locator('[data-board-element-id="web"]').click();
   await window.getByRole('button',{name:'More',exact:true}).click();
   const menu=window.locator('[data-more-toolbar-item="embed"]');await menu.getByRole('button',{name:'Web settings',exact:true}).click();
-  await menu.getByRole('button',{name:'Phone',exact:true}).click();await window.getByRole('button',{name:'More',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Phone',exact:true}));
+  await expect.poll(()=>run('navigator.userAgentData?.mobile === true && document.readyState === "complete"').catch(()=>false)).toBe(true);
+  await window.getByRole('button',{name:'More',exact:true}).click();
   await window.getByRole('button',{name:'More',exact:true}).click();await menu.getByRole('button',{name:'Web',exact:true}).click();
   const box=await window.locator('[data-web-viewport]').boundingBox(),before=await scale();
   await window.mouse.click(box.x+60,box.y+80);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
@@ -504,6 +523,111 @@ test('desktop color sampling remains available internally without removed More t
   await window.getByRole('button',{name:'More',exact:true}).click();
   await expect(window.locator('[data-more-toolbar-item="eyedropper"],[data-more-toolbar-item="crop"]')).toHaveCount(0);
   await expect(window.getByRole('alert')).toHaveCount(0);
+});
+
+test('board capture IPC rejects invalid and off-window regions without main-process errors', {timeout:30000},async t=>{
+  const {app,window,errors}=await launch(t);
+  const viewport=await app.evaluate(({BrowserWindow})=>{
+    const win=BrowserWindow.getAllWindows()[0];
+    return {bounds:win.getContentBounds(),zoom:win.webContents.getZoomFactor()};
+  });
+  const cases=[
+    {name:'zero-width region',rect:{x:0,y:0,width:0,height:1},message:/Invalid board capture region/},
+    {name:'region beyond the content bounds',rect:{
+      x:Math.ceil(viewport.bounds.width/viewport.zoom)+1,
+      y:Math.ceil(viewport.bounds.height/viewport.zoom)+1,
+      width:1,height:1,
+    },message:/visible area inside the board window/},
+  ];
+  t.diagnostic(`Capture boundary viewport: ${JSON.stringify(viewport)}`);
+  for(const scenario of cases){
+    await assert.rejects(
+      () => window.evaluate(rect=>window.noteboardAPI.captureBoardRegion(rect),scenario.rect),
+      scenario.message,
+      `${scenario.name} must reject at the IPC boundary`,
+    );
+    const mainErrors=await app.evaluate(({app})=>[...app.__qaMainErrors]);
+    assert.deepEqual(mainErrors,[],`${scenario.name} must not escape as a main-process error`);
+    t.diagnostic(`${scenario.name} rejected cleanly`);
+  }
+  assert.deepEqual(errors,[],'Rejected capture requests must not create renderer errors.');
+});
+
+test('Fill Tool paints the closed visible pixel region, preserves its outline, and saves one undoable fill layer', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1.25,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'outlined-square',type:'rectangle',position:{x:250,y:170},size:{width:180,height:120},content:'',color:'#ffffff',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  const square=window.locator('[data-board-element-id="outlined-square"]');
+  await expect(square).toBeVisible();
+  const box=await square.boundingBox();assert.ok(box);
+  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
+  const outline={x:box.x+3,y:box.y+box.height/2};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
+
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(interior.x,interior.y);
+  const fillLayer=window.locator('[data-board-element-type="image"]');
+  await expect(fillLayer).toHaveCount(1);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill)??false;
+  })).toBe(true);
+
+  const savedElements=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements??[];
+  });
+  const savedSquare=savedElements.find(element=>element.id==='outlined-square');
+  const savedFill=savedElements.find(element=>element.isPixelFill);
+  assert.equal(savedSquare.color,'#ffffff');
+  assert.equal(savedSquare.borderColor,'#000000');
+  assert.equal(savedFill.type,'image');
+  assert.equal(savedFill.name,'Filled region');
+  assert.match(savedFill.content,/^data:image\/png;base64,/);
+  const raster=await sharp(Buffer.from(savedFill.content.split(',')[1],'base64')).raw().toBuffer({resolveWithObject:true});
+  assert.ok(raster.info.width>0&&raster.info.height>0);
+  assert.deepEqual([...raster.data.subarray(0,4)],[255,0,0,255]);
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
+
+  await window.keyboard.press('Control+z');
+  await expect(fillLayer).toHaveCount(0);
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool clicked on background beside a line fills the visible pixels instead of recoloring the line', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'horizontal-line',type:'line',position:{x:250,y:170},size:{width:180,height:40},content:'',color:'#000000',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  const line=window.locator('[data-board-element-id="horizontal-line"]');
+  await expect(line).toBeVisible();
+  const box=await line.boundingBox();assert.ok(box);
+  const stroke={x:box.x+box.width/2,y:box.y+box.height/2};
+  const nearbyBackground={x:stroke.x,y:stroke.y+6};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground),'#ffffff');
+
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(nearbyBackground.x,nearbyBackground.y);
+  const fillLayer=window.locator('[data-board-element-type="image"]');
+  await expect(fillLayer).toHaveCount(1);
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground),'#ff0000');
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),stroke),'#000000');
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill)??false;
+  })).toBe(true);
+
+  const saved=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements??[];
+  });
+  assert.equal(saved.find(element=>element.id==='horizontal-line').borderColor,'#000000');
+  assert.equal(saved.filter(element=>element.isPixelFill).length,1);
+  assert.deepEqual(errors,[]);
 });
 
 test('desktop spreadsheet edits and imports through the packaged-style file origin without taking board shortcuts', {timeout:60000},async t=>{
@@ -869,6 +993,151 @@ test('cookie and popup policy changes reach already-open popup documents', {time
   assert.deepEqual(errors, []);
 });
 
+test('nested about:blank popup uses its opener origin for third-party cookie policy', {timeout:60000}, async t => {
+  let popupLoads = 0;
+  const frameCookies=new Map();
+  const server=http.createServer((request,response)=>{
+    response.setHeader('Content-Type','text/html; charset=utf-8');
+    if(request.url==='/page'){
+      response.setHeader('Set-Cookie','board-cookie=control; Path=/; SameSite=None; Secure');
+      response.end('<title>Board cookie control</title><h1>Board cookie control</h1>');
+      return;
+    }
+    if(request.url==='/popup'){
+      popupLoads++;
+      response.setHeader('Set-Cookie','popup-cookie=retained; Path=/; SameSite=None; Secure');
+      response.end('<title>Cross-site popup</title><h1>Cross-site popup</h1>');
+      return;
+    }
+    if(request.url.startsWith('/frame')){
+      const phase=new URL(request.url,`http://${request.headers.host}`).searchParams.get('phase');
+      frameCookies.set(phase,request.headers.cookie||'');
+      response.end('<script>parent.postMessage({type:"cookie-probe",value:document.cookie},"*")</script>');
+      return;
+    }
+    response.end('<title>Unknown route</title>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const popupUrl=`http://localhost:${server.address().port}/popup`;
+  const board=seed('embed',`${origin}/page`);
+  Object.assign(board.elements[1],{webAdBlock:false,webCookieBlocker:'off',webPopupBlocker:false});
+  const {app,window}=await launch(t,board,{hostRules:'MAP localhost 127.0.0.1'});
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Board cookie control');
+  await expect.poll(()=>app.evaluate(({webContents},origin)=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='webview').session.cookies.get({url:origin})
+    .then(cookies=>cookies.some(cookie=>cookie.name==='board-cookie'&&cookie.value==='control')),origin)).toBe(true);
+  await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript(`window.open(${JSON.stringify(url)},"cookie-popup");void 0`,true),popupUrl);
+  const popupId=async()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getURL().endsWith('/popup'))?.id??null);
+  await expect.poll(popupId).not.toBeNull();
+
+  const spawnBlank=async(id,phase)=>app.evaluate(({webContents},payload)=>webContents.fromId(payload.id).executeJavaScript(
+    `const child=window.open("about:blank","nested-cookie-probe");child.document.open();child.document.write(${JSON.stringify(payload.markup)});child.document.close();void 0`,true),
+    {id,markup:`<!doctype html><title>Blank cookie probe</title><body>
+      <script>window.addEventListener('message',event=>{if(event.data?.type==='cookie-probe')document.body.dataset.cookieProbe=event.data.value})</script>
+      <iframe src="${origin}/frame?phase=${phase}"></iframe></body>`});
+  const blankCookie=()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe')
+    ?.executeJavaScript('document.body?.dataset.cookieProbe??null').catch(()=>null)??null).catch(()=>null);
+  await spawnBlank(await popupId(),'control');
+  await expect.poll(blankCookie).toContain('board-cookie=control');
+  await expect.poll(()=>frameCookies.has('control')).toBe(true);
+  assert.match(frameCookies.get('control'),/board-cookie=control/,'The browser must allow the positive-control third-party cookie when app blocking is off.');
+
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()
+    .find(win=>win.webContents.getTitle()==='Blank cookie probe')?.close());
+  const configure=()=>window.evaluate(({partition,topLevelUrl})=>window.noteboardAPI.configureWebSession({
+    partition,settings:{topLevelUrl,adBlock:false,cookieBlocker:'third-party',popupBlocker:false},
+  }),{partition:'persist:noteboard-web-web',topLevelUrl:`${origin}/page`});
+  const priorPopupLoads=popupLoads;
+  await configure();
+  await expect.poll(()=>popupLoads).toBeGreaterThan(priorPopupLoads);
+  await expect.poll(async()=>(await popupId())!==null).toBe(true);
+  await spawnBlank(await popupId(),'blocked');
+  await expect.poll(blankCookie).toBe('');
+  await expect.poll(()=>frameCookies.has('blocked')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('blocked'),/board-cookie=control/,'The app must remove the cookie header in the nested about:blank context.');
+  const ownBlankCookies=()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe')
+    ?.executeJavaScript('document.cookie').catch(()=>null)??null);
+  await expect.poll(ownBlankCookies).toContain('popup-cookie=retained');
+
+  const openerId=await popupId();
+  const blankId=await app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe').id);
+  await app.evaluate(({webContents},{id,url})=>webContents.fromId(id).loadURL(url),{id:openerId,url:`${origin}/page`});
+  await app.evaluate(({webContents},{id,url})=>webContents.fromId(id).executeJavaScript(
+    `document.querySelector('iframe').src=${JSON.stringify(url)};void 0`,true),{id:blankId,url:`${origin}/frame?phase=opener-moved`});
+  await expect.poll(()=>frameCookies.has('opener-moved')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('opener-moved'),/board-cookie=control/,'Moving the opener cannot change the existing blank document\'s inherited site.');
+  await expect.poll(blankCookie).toBe('');
+
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript('window.open("about:blank","unowned-cookie-probe","noopener");void 0',true));
+  const ownerlessId=async()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getURL()==='about:blank'&&!c.opener)?.id??null);
+  await expect.poll(ownerlessId).not.toBeNull();
+  const opaqueMarkup=`<!doctype html><title>Ownerless blank</title><body>
+    <script>window.addEventListener('message',event=>{if(event.data?.type==='cookie-probe')document.body.dataset.cookieProbe=event.data.value})</script>
+    <iframe src="${origin}/frame?phase=ownerless"></iframe></body>`;
+  await app.evaluate(({webContents},payload)=>webContents.fromId(payload.id).executeJavaScript(
+    `document.open();document.write(${JSON.stringify(payload.markup)});document.close();void 0`,true),
+    {id:await ownerlessId(),markup:opaqueMarkup});
+  await expect.poll(()=>frameCookies.has('ownerless')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('ownerless'),/board-cookie=control/,'An ownerless blank popup must fail closed.');
+});
+
+test('a navigation without a new document cannot change the active Web cookie context', {timeout:60000}, async t=>{
+  let emptyNavigations=0;
+  const server=http.createServer((request,response)=>{
+    if(request.headers.origin) {
+      response.setHeader('Access-Control-Allow-Origin',request.headers.origin);
+      response.setHeader('Access-Control-Allow-Credentials','true');
+    }
+    if(request.url==='/no-content') {
+      emptyNavigations++;
+      response.writeHead(204);response.end();return;
+    }
+    if(request.url.startsWith('/echo')) {
+      response.setHeader('Content-Type','application/json');
+      response.end(JSON.stringify(request.headers.cookie||''));return;
+    }
+    response.setHeader('Content-Type','text/html; charset=utf-8');
+    response.end('<title>Committed cookie owner</title><input id="draft" value="keep this document">');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const other=`http://localhost:${server.address().port}`;
+  const board=seed('embed',`${origin}/page`);
+  Object.assign(board.elements[1],{webAdBlock:false,webCookieBlocker:'off',webPopupBlocker:false});
+  const {app,window}=await launch(t,board,{hostRules:'MAP localhost 127.0.0.1'});
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Committed cookie owner');
+  await app.evaluate(async({webContents},{origin,other})=>{
+    const contents=webContents.getAllWebContents().find(c=>c.getType()==='webview');
+    await contents.session.cookies.set({url:origin,name:'owner',value:'kept',sameSite:'no_restriction',secure:true});
+    await contents.session.cookies.set({url:other,name:'cross-site',value:'private',sameSite:'no_restriction',secure:true});
+  },{origin,other});
+  const readCookie=url=>app.evaluate(({webContents},url)=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='webview').executeJavaScript(`fetch(${JSON.stringify(url)},{credentials:'include'}).then(response=>response.json())`),url);
+  assert.match(await readCookie(`${other}/echo?control`),/cross-site=private/,'Positive control must send the cross-site cookie with blocking Off.');
+  await window.evaluate(topLevelUrl=>window.noteboardAPI.configureWebSession({
+    partition:'persist:noteboard-web-web',settings:{topLevelUrl,adBlock:false,cookieBlocker:'third-party',popupBlocker:false},
+  }),`${origin}/page`);
+  assert.equal(await readCookie(`${other}/echo?before`),'');
+  assert.match(await readCookie(`${origin}/echo?before`),/owner=kept/);
+  await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript(`location.href=${JSON.stringify(url)};void 0`,true),`${other}/no-content`);
+  await expect.poll(()=>emptyNavigations).toBe(1);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').isLoading())).toBe(false);
+  assert.equal((await guestState(app))[0]?.url,`${origin}/page`);
+  assert.equal(await readCookie(`${other}/echo?after`),'','A 204 navigation leaves the previous page active, so its cross-site cookies must remain blocked.');
+  assert.match(await readCookie(`${origin}/echo?after`),/owner=kept/,'The active document must retain its own first-party cookies.');
+});
+
 test('desktop Save as writes templates, separate boards and a real ZIP download', {timeout:45000}, async t=>{
   const {app,window,profile,errors}=await launch(t);
   await window.locator('[data-board-element-editor-id="note"]').fill('Newest native words');
@@ -1082,8 +1351,22 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   await expect.poll(async()=>(await responsiveState(app)).width).toBe(1000);
   const partition=await window.locator('webview').getAttribute('partition');
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.cookie="remember=1; path=/"'));
+  await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
+  await clickWebControl(app,window,'#state');await window.keyboard.type('Desktop draft');
+  const desktopState=await responsiveState(app);
+  assert.equal(desktopState.note,'Desktop draft');
+  await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   await window.locator('[data-board-element-id="web"]').click();
-  await window.getByRole('button',{name:'Phone',exact:true}).click();
+  await window.getByRole('button',{name:'Desktop',exact:true}).click();
+  assert.equal((await responsiveState(app)).width,1000,'Choosing the current mode must not reset the field size.');
+  await chooseWebDevice(window,window.getByRole('button',{name:'Phone',exact:true}),false);
+  const retained=await responsiveState(app);
+  assert.equal(retained.id,desktopState.id);
+  assert.equal(retained.marker,desktopState.marker);
+  assert.equal(retained.width,1000);
+  assert.equal(retained.note,'Desktop draft');
+  assert.equal(requests.length,1,'Cancelling must retain the current page without navigation.');
+  await chooseWebDevice(window,window.getByRole('button',{name:'Phone',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(390);
   let state=await responsiveState(app);assert.match(state.cookie,/remember=1/);assert.equal(await window.locator('webview').getAttribute('partition'),partition);assert.deepEqual(state.screen,[390,700]);assert.equal(state.orientation,'portrait-primary');assert.equal(state.touch,5);assert.equal(state.coarse,true);assert.equal(state.hover,false);assert.equal(state.hints.mobile,true);assert.equal(state.hints.platform,'Android');assert.equal(state.first.touch,5);assert.match(requests.at(-1).ua,/Chrome.*Mobile/);if(requests.at(-1).mobile) assert.equal(requests.at(-1).mobile,'?1');
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
@@ -1099,13 +1382,13 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   state=await responsiveState(app);assert.equal(state.orientation,'landscape-primary');assert.equal(state.marker,phoneMarker);assert.equal(state.note,'Phone input');assert.equal(state.columns,2);
   await window.getByRole('button',{name:'More',exact:true}).click();
   const menu=window.locator('[data-more-toolbar-item="embed"]');await menu.getByRole('button',{name:'Web settings',exact:true}).click();
-  await menu.getByRole('button',{name:'Tablet',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Tablet',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(768);
   state=await responsiveState(app);assert.deepEqual(state.screen,[768,1024]);assert.equal(state.height,1024);assert.equal(state.touch,5);assert.equal(state.hints.mobile,false);assert.equal(state.hints.platform,'Android');assert.equal(state.columns,2);
-  await menu.getByRole('button',{name:'Desktop',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Desktop',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(560);
   state=await responsiveState(app);assert.equal(state.touch,0);assert.equal(state.coarse,false);assert.equal(state.hover,true);assert.equal(state.hints.platform,'Windows');assert.equal(state.height,360);
-  await menu.getByRole('button',{name:'Tablet',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Tablet',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(768);
   await window.getByRole('button',{name:'More',exact:true}).click();
   await nativeScreenshot(app,'web-responsive-tablet.png');

@@ -1,9 +1,0 @@
-{
-  "manifest_version": 2,
-  "name": "Noteboard Ad Block",
-  "version": "1.0.0",
-  "description": "Blocks advertising and tracking requests in Noteboard Web using maintained Ghostery-compatible filter lists.",
-  "permissions": ["webRequest", "webRequestBlocking", "http://*/*", "https://*/*", "ws://*/*", "wss://*/*"],
-  "background": {"scripts": ["background.js"], "persistent": true},
-  "content_security_policy": "script-src 'self'; object-src 'none'"
-}

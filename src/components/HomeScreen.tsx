@@ -39,6 +39,7 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
   const [fileOperation, setFileOperation] = useState<{ label: string; progress: number } | null>(null);
   const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const cancelFileOperationRef = useRef(false);
+  const pendingImportRef = useRef<{ key: string; page: Page } | null>(null);
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const settingsDialogRef = useRef<HTMLDivElement>(null);
 
@@ -66,32 +67,51 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
     };
   }, [showSettingsMenu]);
 
+  const importPageWithRetry = async (key: string, createPage: () => Promise<Page>) => {
+    let pending = pendingImportRef.current;
+    if (pending && pending.key !== key) {
+      throw new Error('Retry the previous board import before starting another one.');
+    }
+    const page = pending?.key === key ? pending.page : await createPage();
+    pendingImportRef.current = { key, page };
+    try {
+      await onImportPage(page);
+      if (pendingImportRef.current?.page === page) pendingImportRef.current = null;
+    } catch (error) {
+      pendingImportRef.current = { key, page };
+      throw error;
+    }
+  };
+
   const handleImportFile = async (file: File) => {
     cancelFileOperationRef.current = false;
     setFileOperation({ label: `Importing ${file.name}`, progress: 0 });
     try {
-      const parsed = await readBoardPackageFile(file, {
-        createBoardId: () => `page-${generateId()}`,
-        isCancelled: () => cancelFileOperationRef.current,
-        onProgress: ({ stage, percent }) => {
-          const progress =
-            stage === 'opening'
-              ? 5
-              : stage === 'board'
-                ? 5 + percent * 0.15
-                : 20 + percent * 0.75;
-          const label =
-            stage === 'assets'
-              ? `Restoring media from ${file.name}`
-              : stage === 'opening'
-                ? `Opening ${file.name}`
-                : `Reading ${file.name}`;
-          setFileOperation({ label, progress });
-        },
+      const importKey = `file:${file.name}\u0000${file.size}\u0000${file.lastModified}\u0000${file.type}`;
+      await importPageWithRetry(importKey, async () => {
+        const parsed = await readBoardPackageFile(file, {
+          createBoardId: () => `page-${generateId()}`,
+          isCancelled: () => cancelFileOperationRef.current,
+          onProgress: ({ stage, percent }) => {
+            const progress =
+              stage === 'opening'
+                ? 5
+                : stage === 'board'
+                  ? 5 + percent * 0.15
+                  : 20 + percent * 0.75;
+            const label =
+              stage === 'assets'
+                ? `Restoring media from ${file.name}`
+                : stage === 'opening'
+                  ? `Opening ${file.name}`
+                  : `Reading ${file.name}`;
+            setFileOperation({ label, progress });
+          },
+        });
+        if (Array.isArray(parsed)) throw new Error('Invalid board package format.');
+        return parsed;
       });
-      if (Array.isArray(parsed)) throw new Error('Invalid board package format.');
       setFileOperation({ label: `Finishing ${file.name}`, progress: 100 });
-      await onImportPage(parsed);
     } catch (error) {
       if (
         !(error instanceof BoardPackageCancelledError) &&
@@ -111,13 +131,18 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
       const text = e.clipboardData?.getData('text');
       if (text) {
         try {
-          const parsed = JSON.parse(text);
+          const importKey = `clipboard:${text}`;
+          const cachedPage = pendingImportRef.current?.key === importKey ? pendingImportRef.current.page : null;
+          const parsed = cachedPage ?? JSON.parse(text);
           if (parsed && typeof parsed === 'object' && parsed.id && Array.isArray(parsed.elements)) {
-            if (!parsed.version) parsed.version = 1;
-            parsed.id = `page-${generateId()}`;
-            assertValidBoard(parsed);
             e.preventDefault();
-            await onImportPage(parsed as Page);
+            await importPageWithRetry(importKey, async () => {
+              const page = parsed;
+              if (!page.version) page.version = 1;
+              if (!cachedPage) page.id = `page-${generateId()}`;
+              assertValidBoard(page);
+              return page as Page;
+            });
           }
         } catch (err) {
           // Ignore parse errors on paste, could be random text

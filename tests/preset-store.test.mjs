@@ -58,3 +58,12 @@ test('an uncertain template-add retry is idempotent and rejects a conflicting re
   assert.equal((await loadStoredPresets(target)).filter(item => item.id === candidate.id).length, 1);
   await assert.rejects(updateStoredPreset(target, { type: 'add', preset: { ...candidate, name: 'Different template' } }), /different template/i);
 });
+
+test('a rename for a template deleted in another process is resolved without blocking later operations', async t => {
+  const target = await directory(t), removed = preset('removed-elsewhere');
+  await updateStoredPreset(target, { type: 'add', preset: removed });
+  await updateStoredPreset(target, { type: 'delete', id: removed.id });
+  assert.deepEqual(await updateStoredPreset(target, { type: 'rename', id: removed.id, name: 'Stale rename' }), []);
+  await updateStoredPreset(target, { type: 'add', preset: preset('later-add') });
+  assert.deepEqual((await loadStoredPresets(target)).map(item => item.id), ['later-add']);
+});

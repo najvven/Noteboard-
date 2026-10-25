@@ -1,5 +1,16 @@
 import { deleteFixtureBoard, putFixtureBoard } from './fixture-storage';
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
+
+async function selectImportFile(input: Locator, file: {name: string; mimeType: string; buffer: Buffer}) {
+  await input.evaluate((element, payload) => {
+    const bytes = Uint8Array.from(atob(payload.base64), character => character.charCodeAt(0));
+    const selected = new File([bytes], payload.name, { type: payload.mimeType, lastModified: payload.lastModified });
+    const transfer = new DataTransfer();
+    transfer.items.add(selected);
+    (element as HTMLInputElement).files = transfer.files;
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }, {name:file.name,mimeType:file.mimeType,base64:file.buffer.toString('base64'),lastModified:1_700_000_000_000});
+}
 
 test('stale saves and duplicate batch ids cannot replace the current persisted board', async ({ request }) => {
   const original = { id: 'revision-check', title: 'Newest', width: 800, height: 600, updatedAt: 20, elements: [] };
@@ -124,13 +135,47 @@ test('a failed first import keeps Home usable and retries the original file', as
   page.on('dialog', dialog => dialog.accept());
   await page.goto('/');
   const input = page.locator('input[type="file"]');
-  await input.setInputFiles(file);
+  await selectImportFile(input,file);
   await expect(page.getByRole('alert')).toContainText('Could not import');
   await expect(page.locator('[data-board-root]')).toHaveCount(0);
-  await input.setInputFiles(file);
+  await selectImportFile(input,file);
   await expect(page.locator('[data-board-root]')).toBeVisible();
   await page.getByRole('button', { name: 'Back', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Open Retried import', exact: true })).toBeVisible();
+});
+
+test('an import whose response is lost retries the same independent board copy', async ({ page, request }) => {
+  const pages = await (await request.get('/api/pages')).json();
+  for (const board of pages) await deleteFixtureBoard(request, `/api/pages/${board.id}`);
+  let loseAcknowledgment = true;
+  await page.route('**/api/pages/page-*', async route => {
+    if (loseAcknowledgment && route.request().method() === 'PUT' &&
+        route.request().postDataJSON()?.title === 'Lost acknowledgment import') {
+      loseAcknowledgment = false;
+      await route.fetch();
+      await route.abort();
+      return;
+    }
+    await route.continue();
+  });
+  const file = { name: 'Lost-ack.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+    id: 'lost-ack-source', title: 'Lost acknowledgment import', width: 800, height: 600, updatedAt: 1, elements: [],
+  })) };
+  page.on('dialog', dialog => dialog.accept());
+  await page.goto('/');
+  const input = page.locator('input[type="file"]');
+  await selectImportFile(input,file);
+  await expect(page.getByRole('alert')).toContainText('Could not import');
+  const afterLostAck = (await (await request.get('/api/pages')).json()).filter((board: any) => board.title === 'Lost acknowledgment import');
+  expect(afterLostAck).toHaveLength(1);
+  const originalId = afterLostAck[0].id;
+
+  await selectImportFile(input,file);
+  await expect(page.locator('[data-board-root]')).toBeVisible();
+  await page.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Open Lost acknowledgment import', exact: true })).toHaveCount(1);
+  const afterRetry = (await (await request.get('/api/pages')).json()).filter((board: any) => board.title === 'Lost acknowledgment import');
+  expect(afterRetry.map((board: any) => board.id)).toEqual([originalId]);
 });
 
 test('a lost acknowledgment and immediate reload keep the latest draft without a self-conflict', async ({ page, request }) => {

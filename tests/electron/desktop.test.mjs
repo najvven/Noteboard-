@@ -647,9 +647,9 @@ test('Fill Tool updates a simple shape fill, preserves its outline, and supports
 
 test('Fill Tool clicked on open board background changes that surface and leaves a nearby line unchanged', {timeout:45000},async t=>{
   const board=seed('select');
-  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1,boardColor:'#ffffff'});
+  Object.assign(board,{width:500,height:350,workspaceWidth:1200,workspaceHeight:900,boardX:100,boardY:100,viewportCenterX:600,viewportCenterY:450,zoom:1,boardColor:'#ffffff'});
   board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
-  board.elements=[{id:'horizontal-line',type:'line',position:{x:250,y:170},size:{width:180,height:40},content:'',color:'#000000',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  board.elements=[{id:'horizontal-line',type:'line',position:{x:170,y:150},size:{width:160,height:30},content:'',color:'#000000',borderColor:'#000000',borderWidth:8,zIndex:1}];
   const {window,errors}=await launch(t,board);
   const line=window.locator('[data-board-element-id="horizontal-line"]');
   await expect(line).toBeVisible();

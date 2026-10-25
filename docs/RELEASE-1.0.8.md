@@ -11,6 +11,7 @@ This release applies the final fixes from the 1.0.7 technical report and keeps t
 - Legacy Layer records receive their normalized `content` value before canonical storage and write acknowledgment.
 - Native cosmetic ad filters run in guest subframes. A build-time compatibility check patches the pinned Ghostery preload only when its expected frame guard is present; Electron frame handlers validate ownership, URL and lifecycle, then apply filters to that specific frame.
 - The recovery interaction fixture now edits existing visible text while preserving the accepted hidden overflow, instead of entering a new 70,000-character value that violates the text-row limit.
+- Restored spreadsheet cell editing places the formula/text caret after the recovered draft, preventing the next keystroke from being inserted at the beginning after an iframe reload.
 - The desktop Simple spreadsheet raster assertion allows the documented two-pixel platform rounding while keeping exact workbook and object dimensions as semantic checks.
 
 ## Validation
@@ -19,6 +20,7 @@ This release applies the final fixes from the 1.0.7 technical report and keeps t
 - `npm run build` passes.
 - `npm test` passes: 335 tests.
 - Focused browser scenarios pass for Save as, lost acknowledgments, template retries and hidden-text recovery.
+- The formula draft browser scenario passes after an iframe reload and subsequent typing.
 - The Electron Web test confirms cosmetic ad rules hide a test slot in both the page and its iframe, and that both become visible when the blocker is switched off.
 - The existing coverage thresholds remain unchanged. Current coverage is 61.62% lines, 77.42% branches and 54.58% functions; the 80% coverage gate remains open.
 

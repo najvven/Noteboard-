@@ -437,6 +437,17 @@ async function restoreView() {
   await repaint();
 }
 
+async function scrollToCell(row: number, column: number) {
+  if (!Number.isSafeInteger(row) || row < 0 || row >= 1_048_576 ||
+      !Number.isSafeInteger(column) || column < 0 || column >= 16_384)
+    throw Error("The spreadsheet cell is outside the worksheet bounds.");
+  const sheet = api?.getActiveWorkbook()?.getActiveSheet();
+  if (!sheet) throw Error("The spreadsheet is not ready.");
+  sheet.scrollToCell(row, column, 0);
+  await repaint();
+  return snapshot(false);
+}
+
 async function capturePreview() {
   if (!api || expandedMode) return "";
   const book = api.getActiveWorkbook();
@@ -600,6 +611,7 @@ async function action(action: SpreadsheetAction) {
   capturePreview,
   replaceContent,
   setCellDimensions,
+  scrollToCell,
   action,
 };
 

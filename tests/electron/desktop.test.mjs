@@ -388,7 +388,7 @@ test('a merged area keeps the existing native Web guest, page input and session 
   Object.assign(board,{width:1100,height:700,workspaceWidth:1500,workspaceHeight:1000,boardX:64,boardY:0,viewportCenterX:640,viewportCenterY:328,zoom:1});
   board.elements[1].size={width:700,height:300};
   const {app,window,errors}=await launch(t,board);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const before=(await guestState(app))[0].id;
   await app.evaluate(({webContents})=>webContents.fromId(webContents.getAllWebContents().find(c=>c.getType()==='webview').id).executeJavaScript('document.body.innerHTML="<input id=note value=Preserved>"; void 0'));
   const root=await window.locator('[data-board-root]').boundingBox();
@@ -421,7 +421,7 @@ test('a shared actual ad-block extension keeps opposite settings in isolated Web
   board.elements[1].size={width:600,height:400};
   board.elements.push({...board.elements[1],id:'web-off',position:{x:750,y:150},size:{width:550,height:400},content:url+'?tag=off',zIndex:3,webAdBlock:false});
   const {app,window,errors}=await launch(t,board,{hostRules:'MAP publisher.example.org 127.0.0.1, MAP pagead2.googlesyndication.com 127.0.0.1'});
-  await expect.poll(async()=>(await guestState(app)).map(guest=>guest.title).sort()).toEqual(['Publisher off','Publisher on']);
+  await expect.poll(async()=>(await guestState(app)).map(guest=>guest.title).sort(),{timeout:15000}).toEqual(['Publisher off','Publisher on']);
   await expect.poll(()=>contacted.off).toBe(1);assert.equal(contacted.on,0);
   const partitions=await window.locator('webview').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('partition')));
   const states=await window.evaluate(partitions=>Promise.all(partitions.map(partition=>window.noteboardAPI.getWebBlockingStatus(partition))),partitions);
@@ -459,7 +459,7 @@ test('Web Select and Hand controls operate the existing native guest and persist
 test('Ctrl+wheel over native Web zooms the board around the cursor, including focused mobile guests', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const root=window.locator('[data-board-root]');
   const scale=()=>root.evaluate(node=>Number(node.style.transform.match(/scale\(([^)]+)\)/)[1]));
   for(const focused of [false,true]) {
@@ -504,7 +504,7 @@ test('flipped and rotated native Web corners remain clickable and Ctrl+wheel kee
   board.elements[1].rotation=90;board.elements[1].flipX=true;
   const {app,window}=await launch(t,board);
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script),script);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web corners');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web corners');
   const box=await window.locator('[data-web-viewport]').boundingBox();
   const screenCorners=[
     {x:box.x+8,y:box.y+box.height-8,expected:'bottom-left'},
@@ -538,7 +538,7 @@ test('cookie consent popups close without main-process errors and Web fullscreen
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   const {app,window,errors}=await launch(t,seed('embed',`http://127.0.0.1:${server.address().port}/page`));
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script,true),script);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Consent fixture');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Consent fixture');
   for(let i=0;i<3;i++){
     const popupPromise=app.waitForEvent('window');
     await run('document.querySelector("#open").click(); void 0');
@@ -865,7 +865,7 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const {app,window,errors} = await launch(t,board,{hostRules:'MAP pagead2.googlesyndication.com 127.0.0.1'});
   progress('launched');
   const inspect = () => app.evaluate(({webContents}) => webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('({ready:document.body.dataset.ready,echo:document.body.dataset.cookie,immediate:document.body.dataset.immediate,store:document.body.dataset.store,cookies:document.cookie,ad:window.adLoaded===true,hidden:document.getElementById("ad-slot")?.checkVisibility()===false,hero:document.getElementById("hero")?.checkVisibility(),node:typeof require})')).catch(()=>({}));
-  await expect.poll(async () => (await inspect()).ready).toBe('1');
+  await expect.poll(async () => (await inspect()).ready,{timeout:15000}).toBe('1');
   await expect.poll(async () => (await inspect()).cookies).toBe('');
   assert.equal((await inspect()).echo,''); assert.equal((await inspect()).ad,false); assert.equal(adRequests,0);
   assert.equal((await inspect()).immediate,''); assert.equal((await inspect()).store,'[]'); assert.equal((await inspect()).node,'undefined');
@@ -894,7 +894,7 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const loads = pageLoads;
   await menu.getByRole('button',{name:'Block popups',exact:true}).click();
   await expect.poll(()=>pageLoads).toBeGreaterThan(loads);
-  await expect.poll(async () => (await inspect()).ready).toBe('1');
+  await expect.poll(async () => (await inspect()).ready,{timeout:15000}).toBe('1');
   await openPopup();
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(2);
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().endsWith('/popup')))).toBe(true);

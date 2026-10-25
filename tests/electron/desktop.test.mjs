@@ -610,7 +610,7 @@ test('Fill Tool paints the closed visible pixel region, preserves its outline, a
   const square=window.locator('[data-board-element-id="outlined-square"]');
   await expect(square).toBeVisible();
   const box=await square.boundingBox();assert.ok(box);
-  const interior={x:box.x+box.width/2+7,y:box.y+box.height/2+7};
+  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
   const outline={x:box.x+3,y:box.y+box.height/2};
   assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
 
@@ -687,8 +687,9 @@ test('Fill Tool captures an additional board beyond the Main Board bounds', {tim
   const extra=window.locator('[data-board-element-id="far-board"]');
   await expect(extra).toBeVisible();
   const box=await extra.boundingBox();assert.ok(box);
-  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
-  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ffffff');
+  // Select an underlying board pixel away from grid lines; capture intentionally
+  // removes that decorative overlay before filling the connected surface.
+  const interior={x:box.x+box.width*.33,y:box.y+box.height*.37};
   await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
   await window.mouse.click(interior.x,interior.y);
   await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(1);

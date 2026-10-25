@@ -694,7 +694,7 @@ test('Fill Tool captures an additional board beyond the Main Board bounds', {tim
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements.some(element=>element.isPixelFill)??false;
   })).toBe(true);
-  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
+  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior)).toBe('#ff0000');
   const filled=await window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements.find(element=>element.isPixelFill);

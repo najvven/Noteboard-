@@ -51,7 +51,7 @@ async function loadMask(content: string): Promise<PixelFillMask | null> {
   if (encoded) {
     const header = atob(encoded.slice(0, 32));
     if (header.length >= 24) {
-      const headerBytes = Uint8Array.from(header, char => char.charCodeAt(0));
+      const headerBytes = Uint8Array.from(header, char => char.codePointAt(0)!);
       const dimensions = new DataView(headerBytes.buffer);
       const width = dimensions.getUint32(16);
       const height = dimensions.getUint32(20);
@@ -100,7 +100,7 @@ export function isPixelFillOpaqueAtPoint(element: BoardElement, point: Position)
 
   const width = element.size?.width ?? 0;
   const height = element.size?.height ?? 0;
-  if (!(width > 0) || !(height > 0)) return false;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
   const dx = point.x - (element.position.x + width / 2);
   const dy = point.y - (element.position.y + height / 2);
   const radians = -(element.rotation ?? 0) * Math.PI / 180;

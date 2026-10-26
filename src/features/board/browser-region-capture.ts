@@ -69,8 +69,8 @@ export async function captureBoardRegionFromDOM(
     filter: node => {
       if (!(node instanceof HTMLElement)) return true;
       const tag = node.tagName.toLowerCase();
-      if (tag === 'webview' || tag === 'iframe' || node.hasAttribute('data-board-fill-capture-exclude')) return false;
-      if (node !== root && node.hasAttribute('data-board-element')) {
+      if (tag === 'webview' || tag === 'iframe' || node.dataset.boardFillCaptureExclude !== undefined) return false;
+      if (node !== root && node.dataset.boardElement !== undefined) {
         const rect = node.getBoundingClientRect();
         const padding = 24;
         return rect.right > requested.left - padding && rect.left < requested.right + padding &&

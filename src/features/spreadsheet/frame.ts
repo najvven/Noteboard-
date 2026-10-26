@@ -287,7 +287,7 @@ async function flush() {
   await repaint();
   const content = historySnapshot() || snapshot();
   if (content && !parseWorkbookDocument(content))
-    throw Error(
+    throw new Error(
       "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
     );
   if (content) send("changed", { content });
@@ -316,9 +316,9 @@ async function exchange(data: Record<string, unknown>) {
   try {
     return await new Promise<any>((resolve, reject) => {
       worker.onmessage = ({ data }) =>
-        data.error ? reject(Error(data.error)) : resolve(data.result);
+        data.error ? reject(new Error(data.error)) : resolve(data.result);
       worker.onerror = () =>
-        reject(Error("Could not open the spreadsheet file processor."));
+        reject(new Error("Could not open the spreadsheet file processor."));
       worker.postMessage(data);
     });
   } finally {
@@ -335,14 +335,14 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
   });
   const importedContent = JSON.stringify(document);
   if (!parseWorkbookDocument(importedContent))
-    throw Error(
+    throw new Error(
       "The imported workbook exceeds the supported size or dimensions.",
     );
   if (
     currentContent.length + importedContent.length >
     MAX_WORKBOOK_CHARACTERS - 256 * 1024
   )
-    throw Error(
+    throw new Error(
       "These sheets would exceed the workbook size limit. Import them into a separate spreadsheet.",
     );
   const book = api!.getActiveWorkbook()!;
@@ -362,7 +362,7 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
       sheet.name = replacements.get(sheet.name.toLowerCase());
       sheet.id = `sheet-${crypto.randomUUID()}`;
       const added = book.insertSheet(sheet.name, { sheet });
-      if (!added) throw Error(`Could not add sheet "${sheet.name}".`);
+      if (!added) throw new Error(`Could not add sheet "${sheet.name}".`);
       inserted.push(added.getSheetId());
     }
     await flush();
@@ -391,6 +391,8 @@ function sendSelection() {
     sheet.getActiveCell() ??
     sheet.getRange(range.getRow(), range.getColumn(), 1, 1);
   const style = cell.getCellStyleData() ?? {};
+  const color = style.cl ? style.cl.rgb : undefined;
+  const fill = style.bg ? style.bg.rgb : undefined;
   const selection: SpreadsheetSelection = {
     sheetId: sheet.getSheetId(),
     address: range.getA1Notation(),
@@ -398,8 +400,8 @@ function sendSelection() {
     bold: style.bl === 1,
     italic: style.it === 1,
     fontSize: style.fs ?? 11,
-    color: String((style.cl || {}).rgb || "#000000"),
-    fill: String((style.bg || {}).rgb || "#ffffff"),
+    color: String(color && color.length > 0 ? color : "#000000"),
+    fill: String(fill && fill.length > 0 ? fill : "#ffffff"),
     numberFormat: cell.getNumberFormat(),
     alignment: cell.getHorizontalAlignment(),
   };
@@ -445,9 +447,9 @@ async function restoreView() {
 async function scrollToCell(row: number, column: number) {
   if (!Number.isSafeInteger(row) || row < 0 || row >= 1_048_576 ||
       !Number.isSafeInteger(column) || column < 0 || column >= 16_384)
-    throw Error("The spreadsheet cell is outside the worksheet bounds.");
+    throw new Error("The spreadsheet cell is outside the worksheet bounds.");
   const sheet = api?.getActiveWorkbook()?.getActiveSheet();
-  if (!sheet) throw Error("The spreadsheet is not ready.");
+  if (!sheet) throw new Error("The spreadsheet is not ready.");
   sheet.scrollToCell(row, column, 0);
   await repaint();
   return snapshot(false);
@@ -477,7 +479,7 @@ async function capturePreview() {
 
 async function replaceContent(content: string) {
   const value = parseWorkbookDocument(content);
-  if (!api || !value) throw Error("Invalid spreadsheet data.");
+  if (!api || !value) throw new Error("Invalid spreadsheet data.");
   clearTimeout(timer);
   renderRevision++;
   ready = false;
@@ -507,7 +509,7 @@ async function replaceContent(content: string) {
 
 async function setCellDimensions(width: number, height: number) {
   const book = api?.getActiveWorkbook();
-  if (!book) throw Error("The spreadsheet is not ready.");
+  if (!book) throw new Error("The spreadsheet is not ready.");
   await book.endEditingAsync(true);
   const sheet = book.getActiveSheet(),
     size = normalizeCellSize(width, height);
@@ -526,7 +528,7 @@ async function setCellDimensions(width: number, height: number) {
   // The scheduled mutation snapshot paints its thumbnail after layout settles.
   const content = snapshot(false);
   if (!parseWorkbookDocument(content))
-    throw Error(
+    throw new Error(
       "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
     );
   return content;
@@ -534,7 +536,7 @@ async function setCellDimensions(width: number, height: number) {
 
 async function action(action: SpreadsheetAction) {
   const book = api?.getActiveWorkbook();
-  if (!book || !api) throw Error("The spreadsheet is not ready.");
+  if (!book || !api) throw new Error("The spreadsheet is not ready.");
   await book.endEditingAsync(true);
   const sheet = book.getActiveSheet(),
     range = sheet.getActiveRange();
@@ -789,16 +791,22 @@ window.addEventListener("message", async (event) => {
         // declaring the frame loaded. On slower renderers the document unit can
         // exist with an empty body for several frames; moving that empty body's
         // caret to zero is then overwritten when Univer installs the draft.
-        const waitFrame = (fallbackMs: number) => new Promise<void>((resolve) => {
+        const scheduleAfterFrame = (fallbackMs: number, callback: () => void) => {
+          let completed = false;
           let frameId = 0;
-          const timeoutId = window.setTimeout(() => {
-            cancelAnimationFrame(frameId);
-            resolve();
-          }, fallbackMs);
-          frameId = requestAnimationFrame(() => {
+          let timeoutId = 0;
+          const finish = () => {
+            if (completed) return;
+            completed = true;
             window.clearTimeout(timeoutId);
-            resolve();
-          });
+            cancelAnimationFrame(frameId);
+            callback();
+          };
+          timeoutId = window.setTimeout(finish, fallbackMs);
+          frameId = requestAnimationFrame(finish);
+        };
+        const waitFrame = (fallbackMs: number) => new Promise<void>((resolve) => {
+          scheduleAfterFrame(fallbackMs, resolve);
         });
         const activeElement = window.document.activeElement;
         const activeEditorId = activeElement?.id.startsWith("__editor_")
@@ -816,31 +824,46 @@ window.addEventListener("message", async (event) => {
             }
           | undefined;
         const cleanInput = (value: string) => value.replace(/\r\n$/, "");
-        let restoredEditors: NonNullable<ReturnType<typeof getEditor>>[] = [];
         const restorationDeadline = performance.now() + 15_000;
-        for (let frame = 0; frame < 300 && restoredEditors.length === 0 && performance.now() < restorationDeadline; frame++) {
-          await waitFrame(Math.min(100, restorationDeadline - performance.now()));
-          if (!book.isCellEditing()) continue;
-          const candidates = editorIds
-            .map(getEditor)
-            .filter((editor): editor is NonNullable<ReturnType<typeof getEditor>> => {
-              const dataStream = editor?.getBody?.().dataStream;
-              return (
-                typeof dataStream === "string" &&
-                editor.setSelection !== undefined &&
-                (expectedInput === undefined || cleanInput(dataStream) === expectedInput)
-              );
+        const restoredEditors = await new Promise<NonNullable<ReturnType<typeof getEditor>>[]>((resolve) => {
+          let checks = 0;
+          const poll = () => {
+            if (checks >= 300 || performance.now() >= restorationDeadline) {
+              resolve([]);
+              return;
+            }
+            checks += 1;
+            const remaining = Math.max(0, restorationDeadline - performance.now());
+            scheduleAfterFrame(Math.min(100, remaining), () => {
+              if (!book.isCellEditing()) {
+                poll();
+                return;
+              }
+              const candidates = editorIds
+                .map(getEditor)
+                .filter((editor): editor is NonNullable<ReturnType<typeof getEditor>> => {
+                  const dataStream = editor?.getBody?.().dataStream;
+                  return typeof dataStream === "string" && editor.setSelection !== undefined &&
+                    (expectedInput === undefined || cleanInput(dataStream) === expectedInput);
+                });
+              if (!candidates.length) {
+                poll();
+                return;
+              }
+              const confirmRemaining = Math.max(0, restorationDeadline - performance.now());
+              scheduleAfterFrame(Math.min(100, confirmRemaining), () => {
+                const stableEditors = candidates.filter((editor) => {
+                  const currentInput = editor.getBody?.().dataStream;
+                  return typeof currentInput === "string" &&
+                    (expectedInput === undefined || cleanInput(currentInput) === expectedInput);
+                });
+                if (stableEditors.length) resolve(stableEditors);
+                else poll();
+              });
             });
-          if (!candidates.length) continue;
-          await waitFrame(Math.min(100, Math.max(0, restorationDeadline - performance.now())));
-          restoredEditors = candidates.filter((editor) => {
-            const currentInput = editor.getBody?.().dataStream;
-            return (
-              typeof currentInput === "string" &&
-              (expectedInput === undefined || cleanInput(currentInput) === expectedInput)
-            );
-          });
-        }
+          };
+          poll();
+        });
         if (restoredEditors.length) {
           // Univer can keep both the in-cell and formula-bar documents mounted.
           // Align every matching restored editor so the focused one cannot retain
@@ -882,16 +905,29 @@ window.addEventListener("message", async (event) => {
             };
             const caretDeadline = performance.now() + 5_000;
             let stableFrames = 0;
-            for (let frame = 0; frame < 50 && performance.now() < caretDeadline && stableFrames < 3; frame++) {
-              if (caretIsRestored()) stableFrames++;
-              else {
-                stableFrames = 0;
-                restoreCaret();
-                targetEditor.focus();
-              }
-              await waitFrame(100);
-            }
-            if (stableFrames < 3)
+            const caretRestored = await new Promise<boolean>((resolve) => {
+              let checks = 0;
+              const poll = () => {
+                if (checks >= 50 || performance.now() >= caretDeadline) {
+                  resolve(false);
+                  return;
+                }
+                checks += 1;
+                if (caretIsRestored()) stableFrames += 1;
+                else {
+                  stableFrames = 0;
+                  restoreCaret();
+                  targetEditor.focus();
+                }
+                if (stableFrames >= 3) {
+                  scheduleAfterFrame(100, () => resolve(true));
+                  return;
+                }
+                scheduleAfterFrame(100, poll);
+              };
+              poll();
+            });
+            if (!caretRestored)
               throw new Error("Could not restore the active spreadsheet edit cursor.");
           }
         }

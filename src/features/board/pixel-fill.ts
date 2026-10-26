@@ -11,6 +11,54 @@ export interface PixelFillResult {
   touchesEdge: boolean;
 }
 
+/** Marks omitted embedded DOM regions as opaque, non-matching pixels before flood fill. */
+export function applyPixelFillBarriers(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+  barriers: readonly PixelFillBounds[],
+  seedX: number,
+  seedY: number,
+): boolean {
+  const pixelCount = width * height;
+  if (
+    !Number.isSafeInteger(width) || width <= 0 ||
+    !Number.isSafeInteger(height) || height <= 0 ||
+    !Number.isSafeInteger(pixelCount) || pixelCount > 0xffffffff ||
+    pixels.length !== pixelCount * 4 ||
+    !Number.isInteger(seedX) || !Number.isInteger(seedY) ||
+    seedX < 0 || seedY < 0 || seedX >= width || seedY >= height
+  ) return false;
+
+  const normalized = barriers.flatMap(barrier => {
+    if (![barrier.x, barrier.y, barrier.width, barrier.height].every(Number.isFinite) ||
+        barrier.width <= 0 || barrier.height <= 0) return [];
+    const left = Math.max(0, Math.floor(barrier.x));
+    const top = Math.max(0, Math.floor(barrier.y));
+    const right = Math.min(width, Math.ceil(barrier.x + barrier.width));
+    const bottom = Math.min(height, Math.ceil(barrier.y + barrier.height));
+    return right > left && bottom > top ? [{ left, top, right, bottom }] : [];
+  });
+
+  if (normalized.some(({ left, top, right, bottom }) =>
+    seedX >= left && seedX < right && seedY >= top && seedY < bottom)) return false;
+
+  const seedOffset = (seedY * width + seedX) * 4;
+  const barrierColor = [0, 1, 2].map(channel => pixels[seedOffset + channel] >= 128 ? 0 : 255);
+  for (const { left, top, right, bottom } of normalized) {
+    for (let y = top; y < bottom; y++) {
+      for (let x = left; x < right; x++) {
+        const offset = (y * width + x) * 4;
+        pixels[offset] = barrierColor[0];
+        pixels[offset + 1] = barrierColor[1];
+        pixels[offset + 2] = barrierColor[2];
+        pixels[offset + 3] = 255;
+      }
+    }
+  }
+  return true;
+}
+
 function parseHexColor(value: string): readonly [number, number, number, number] | null {
   const match = /^#([\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.exec(value.trim());
   if (!match) return null;

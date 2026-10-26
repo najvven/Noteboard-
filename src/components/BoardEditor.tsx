@@ -120,7 +120,7 @@ import {
   getLinePlacementRect,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
-import { fillConnectedPixels } from "../features/board/pixel-fill";
+import { applyPixelFillBarriers, fillConnectedPixels } from "../features/board/pixel-fill";
 import { isPixelFillOpaqueAtPoint, rememberPixelFillAlphaMask } from "../features/board/pixel-fill-hit-test";
 import { captureBoardRegionFromDOM } from "../features/board/browser-region-capture";
 import {
@@ -2204,6 +2204,17 @@ export default function BoardEditor({
       const sourcePixels = sourceContext.getImageData(0, 0, pixelWidth, pixelHeight);
       const seedX = Math.floor((clientPoint.x - capture.rect.x) * pixelWidth / capture.rect.width);
       const seedY = Math.floor((clientPoint.y - capture.rect.y) * pixelHeight / capture.rect.height);
+      if (capture.excludedRects?.length && !applyPixelFillBarriers(
+        sourcePixels.data,
+        pixelWidth,
+        pixelHeight,
+        capture.excludedRects,
+        seedX,
+        seedY,
+      )) {
+        showFillNotice("The fill point is inside content that the browser preview cannot capture.");
+        return;
+      }
       const result = fillConnectedPixels(
         sourcePixels.data,
         pixelWidth,

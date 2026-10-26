@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fillConnectedPixels } from "../src/features/board/pixel-fill";
+import { applyPixelFillBarriers, fillConnectedPixels } from "../src/features/board/pixel-fill";
 
 const raster = (width: number, height: number, color: [number, number, number, number]) => {
   const pixels = new Uint8ClampedArray(width * height * 4);
@@ -55,6 +55,26 @@ test("reports a region that reaches the captured view edge", () => {
   const result = fillConnectedPixels(pixels, 4, 3, 0, 0, "#123456");
   assert.equal(result?.touchesEdge, true);
   assert.equal(result?.filledPixels, 11);
+});
+
+test("embedded preview barriers stop a fill from crossing omitted iframe pixels", () => {
+  const pixels = raster(5, 3, [255, 255, 255, 255]);
+  assert.equal(applyPixelFillBarriers(pixels, 5, 3, [{ x: 2, y: 0, width: 1, height: 3 }], 0, 1), true);
+
+  const result = fillConnectedPixels(pixels, 5, 3, 0, 1, "#ff0000");
+
+  assert.equal(result?.filledPixels, 6);
+  assert.deepEqual(result?.bounds, { x: 0, y: 0, width: 2, height: 3 });
+  assert.deepEqual(at(pixels, 5, 2, 1), [0, 0, 0, 0]);
+  assert.deepEqual(at(pixels, 5, 4, 1), [255, 255, 255, 0]);
+});
+
+test("an embedded preview barrier cannot be used as a fill seed", () => {
+  const pixels = raster(3, 3, [255, 255, 255, 255]);
+  const original = pixels.slice();
+
+  assert.equal(applyPixelFillBarriers(pixels, 3, 3, [{ x: 1, y: 1, width: 1, height: 1 }], 1, 1), false);
+  assert.deepEqual(pixels, original);
 });
 
 test("invalid seeds, transparent pixels and an unchanged fill color do not create a mask", () => {

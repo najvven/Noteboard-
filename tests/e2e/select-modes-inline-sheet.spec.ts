@@ -1,5 +1,10 @@
 import { test, expect, type Page } from "./test";
 import { createWorkbookDocument } from "../../src/features/spreadsheet/workbook";
+import {
+  SPREADSHEET_BORDER,
+  SPREADSHEET_COLUMN_HEADER_HEIGHT,
+  SPREADSHEET_ROW_HEADER_WIDTH,
+} from "../../src/features/spreadsheet/grid-geometry";
 
 const board = (id: string, elements: any[] = [], settings = {}) => ({
   id,
@@ -149,10 +154,16 @@ test("dragging a spreadsheet column boundary changes the column width", async ({
   await expect(grid).toBeVisible();
   const bounds = await grid.boundingBox();
   expect(bounds).not.toBeNull();
-  const before = (await read(page)).workbook.sheets["sheet-1"].defaultColumnWidth ?? 100;
-  await page.mouse.move(bounds!.x + 150, bounds!.y + 15);
+  const sheetData = (await read(page)).workbook.sheets["sheet-1"];
+  const before = sheetData.columnData?.[0]?.w ?? sheetData.defaultColumnWidth ?? 100;
+  const rowHeaderWidth = sheetData.rowHeader?.hidden === 1
+    ? 0
+    : sheetData.rowHeader?.width ?? SPREADSHEET_ROW_HEADER_WIDTH;
+  const firstColumnBoundary = bounds!.x + SPREADSHEET_BORDER + rowHeaderWidth + before;
+  const headerY = bounds!.y + SPREADSHEET_COLUMN_HEADER_HEIGHT / 2;
+  await page.mouse.move(firstColumnBoundary, headerY);
   await page.mouse.down();
-  await page.mouse.move(bounds!.x + 190, bounds!.y + 15, { steps: 6 });
+  await page.mouse.move(firstColumnBoundary + 40, headerY, { steps: 6 });
   await page.mouse.up();
   await expect.poll(async () => {
     const current = (await read(page)).workbook.sheets["sheet-1"];

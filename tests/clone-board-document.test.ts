@@ -30,6 +30,19 @@ test('cloning boards remaps pixel-fill ownership and clears references outside t
   assert.equal(cloned.find(element => element.zIndex === 3)?.pixelFillBoardId, 'main-board');
 });
 
+test('cloning a fill preserves an external board owner only when external parents are preserved', () => {
+  const fill: BoardElement = {
+    id: 'fill', type: 'image', position: { x: 10, y: 10 }, size: { width: 20, height: 20 },
+    content: 'data:image/png;base64,', isPixelFill: true, pixelFillBoardId: 'overlapping-board', zIndex: 1,
+  };
+
+  const preserved = cloneBoardDocument([fill], [], () => 'preserved', { preserveExternalParents: true }).elements[0];
+  const cleared = cloneBoardDocument([fill], [], () => 'cleared').elements[0];
+
+  assert.equal(preserved.pixelFillBoardId, 'overlapping-board');
+  assert.equal(cleared.pixelFillBoardId, undefined);
+});
+
 test("cloning a board remaps element and spreadsheet references without mutating source", () => {
   const elements: BoardElement[] = [
     {

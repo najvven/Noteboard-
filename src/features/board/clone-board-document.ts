@@ -37,7 +37,8 @@ export function cloneBoardDocument(
           ? {
               pixelFillBoardId: element.pixelFillBoardId === 'main-board'
                 ? 'main-board'
-                : boardIds.get(element.pixelFillBoardId),
+                : boardIds.get(element.pixelFillBoardId) ??
+                  (options.preserveExternalParents ? element.pixelFillBoardId : undefined),
             }
           : {}),
         parentId: element.parentId ? elementIds.get(element.parentId) ?? (options.preserveExternalParents ? element.parentId : undefined) : undefined,

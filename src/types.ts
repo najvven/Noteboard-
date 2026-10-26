@@ -121,6 +121,10 @@ export interface BoardElement {
   isHidden?: boolean;
   isLocked?: boolean;
   isEraser?: boolean;
+  /** Raster fill generated from the visible connected pixel region. */
+  isPixelFill?: boolean;
+  /** Explicit board ownership for pixel fills, independent of their layer parent. */
+  pixelFillBoardId?: string;
   eraserShape?: 'round' | 'square';
   name?: string;
   isLinkTarget?: boolean;

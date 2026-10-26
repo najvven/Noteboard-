@@ -18,6 +18,16 @@ test(`an uncommitted spreadsheet ${input.name} survives a browsing-context reloa
   await page.goto('/');await page.getByRole('button',{name:`Open ${id}`,exact:true}).click();
   await page.locator('[data-board-element-id="draft-sheet"]').click();
   const iframe=page.locator('iframe[title="Spreadsheet cells"]');
+  const ribbon=page.getByRole('complementary',{name:'Spreadsheet settings'}).locator('[data-spreadsheet-ribbon]');
+  await expect(ribbon.getByText('Data',{exact:true})).toBeVisible();
+  const ribbonNodes=()=>ribbon.evaluate(host=>{
+   const root=(host as HTMLElement).shadowRoot;
+   return {mount:root?.querySelectorAll('[data-sheet-ribbon-mount]').length??0,
+    layout:root?.querySelectorAll('[data-sheet-ribbon-layout]').length??0,
+    styles:root?.querySelectorAll('[data-sheet-ribbon-style]').length??0};
+  });
+  await expect.poll(ribbonNodes).toMatchObject({mount:1,layout:1});
+  const originalRibbonNodes=await ribbonNodes();expect(originalRibbonNodes.styles).toBeGreaterThan(0);
   const grid=page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
   await expect(grid).toBeVisible();await grid.click({position:{x:90,y:32}});await page.keyboard.type(input.value);
   const value=async()=>{try{return await iframe.evaluate(frame=>{
@@ -26,17 +36,23 @@ test(`an uncommitted spreadsheet ${input.name} survives a browsing-context reloa
    const cell=snapshot?.workbook?.sheets?.['sheet-1']?.cellData?.[0]?.[0];return cell?.f??cell?.v;
   });}catch{return undefined;}};
   await expect.poll(value).toBe(input.value);
-  const oldGeneration=await page.evaluate(()=>(window as any).__lastSheetLoaded);
-  await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow!.location.reload());
-  await expect.poll(value,{timeout:15000}).toBe(input.value);
-  await expect.poll(()=>page.evaluate(()=>(window as any).__lastSheetLoaded?.documentId)).not.toBe(oldGeneration.documentId);
-  await expect(page.getByText('Opening spreadsheet…',{exact:true})).toHaveCount(0);
+  const staleGeneration=await page.evaluate(()=>(window as any).__lastSheetLoaded);
+  let previousGeneration=staleGeneration;
+  for(let reload=0;reload<3;reload++){
+   await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow!.location.reload());
+   await expect.poll(value,{timeout:15000}).toBe(input.value);
+   const nextGeneration=async()=>page.evaluate(()=>(window as any).__lastSheetLoaded);
+   await expect.poll(async()=>(await nextGeneration())?.documentId).not.toBe(previousGeneration.documentId);
+   await expect(page.getByText('Opening spreadsheet…',{exact:true})).toHaveCount(0);
+   await expect.poll(ribbonNodes).toEqual(originalRibbonNodes);
+   previousGeneration=await nextGeneration();
+  }
   await page.keyboard.type(input.append);
   await expect.poll(value).toBe(input.value+input.append);
   await page.evaluate(({old,content})=>{
    const frame=document.querySelector('iframe[title="Spreadsheet cells"]') as HTMLIFrameElement;
    window.dispatchEvent(new MessageEvent('message',{source:frame.contentWindow,data:{...old,type:'changed',content}}));
-  },{old:oldGeneration,content:board.elements[0].content});
+  },{old:staleGeneration,content:board.elements[0].content});
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(null)))));
   await expect.poll(value).toBe(input.value+input.append);
   expect(await iframe.evaluate(frame=>{

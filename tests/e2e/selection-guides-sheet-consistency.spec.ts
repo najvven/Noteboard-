@@ -107,8 +107,9 @@ test('spreadsheet preview and selected cells have the same geometry and the expa
   await page.getByRole('button',{name:'Edit spreadsheet',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'Spreadsheet editor'});await expect(dialog).toBeVisible();
   for(const name of ['Start','Insert','Formulas','Data','View'])await expect(cells.getByText(name,{exact:true}).first()).toBeVisible();
-  await cells.getByText('Data',{exact:true}).first().click();
-  for(const name of ['Sort','Data validation','Conditional Formatting'])await expect(cells.getByRole('button',{name,exact:true})).toBeVisible();
+  const dataTab=cells.getByRole('tab',{name:'Data',exact:true});
+  await dataTab.click();
+  for(const name of ['Sort','Data validation','Conditional Formatting'])await expect(cells.getByRole('button',{name,exact:true})).toBeVisible({timeout:15000});
   await dialog.getByRole('button',{name:'Done',exact:true}).click();
   await expect(inline).toBeVisible();
   expect(await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow!.name)).toBe('same-session');
@@ -123,8 +124,8 @@ test('spreadsheet preview and selected cells have the same geometry and the expa
   expect(errors).toEqual([]);
 });
 
-test('a scrolled spreadsheet retains the visible rows on selection and never takes canvas Undo focus',async({page,request})=>{
-  const content=JSON.stringify(createWorkbookDocument('Scroll',Array.from({length:40},(_,r)=>[`Row ${r+1}`,r])));
+test('keyboard and wheel scrolling retain visible spreadsheet rows and columns on selection',async({page,request})=>{
+  const content=JSON.stringify(createWorkbookDocument('Scroll',Array.from({length:100},(_,r)=>[`Row ${r+1}`,r])));
   await open(page,request,board('sheet-scroll-consistency',[{id:'sheet',type:'table',position:{x:100,y:100},size:{width:650,height:430},content,zIndex:1}],{isSelectionLockEnabled:false}));
   const object=page.locator('[data-spreadsheet-object]');
   await expect(object.locator('[data-spreadsheet-preview]')).toBeVisible({timeout:30000});
@@ -132,12 +133,24 @@ test('a scrolled spreadsheet retains the visible rows on selection and never tak
   await expect(page.locator('[data-spreadsheet-inline]').getByRole('status')).toHaveCount(0,{timeout:30000});
   const iframe=page.locator('iframe[title="Spreadsheet cells"]');
   const view=()=>iframe.evaluate(f=>JSON.parse(((f as HTMLIFrameElement).contentWindow as any).noteboardSheet.snapshot()).views?.['sheet-1']);
-  await page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]').hover({position:{x:200,y:100}});
-  await page.mouse.wheel(120,410);
-  await expect.poll(async()=>(await view())?.sheetViewStartRow??0).toBeGreaterThan(0);
+  const grid=page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
+  await expect(grid).toBeVisible();
+  await grid.hover({position:{x:120,y:180}});
+  await grid.click({position:{x:120,y:180}});
+  await grid.focus();
+  for(let row=0;row<20;row++)await page.keyboard.press('ArrowDown');
+  for(let column=0;column<12;column++)await page.keyboard.press('ArrowRight');
+  await expect.poll(async()=>(await view())?.sheetViewStartRow??0,{timeout:15000}).toBeGreaterThan(0);
+  await expect.poll(async()=>(await view())?.sheetViewStartColumn??0,{timeout:15000}).toBeGreaterThan(0);
+  const beforeVerticalWheel=(await view())?.sheetViewStartRow??0;
+  await page.mouse.wheel(0,900);
+  await expect.poll(async()=>(await view())?.sheetViewStartRow??0,{timeout:15000}).toBeGreaterThan(beforeVerticalWheel);
+  const beforeHorizontalWheel=(await view())?.sheetViewStartColumn??0;
+  await page.mouse.wheel(900,0);
+  await expect.poll(async()=>(await view())?.sheetViewStartColumn??0,{timeout:15000}).toBeGreaterThan(beforeHorizontalWheel);
   const previous=await view();
-  const root=(await page.locator('[data-board-root]').boundingBox())!;
-  await page.mouse.click(root.x+10,root.y+600);
+  const objectBounds=(await object.boundingBox())!;
+  await page.mouse.click(objectBounds.x+objectBounds.width+24,objectBounds.y+120);
   await expect(object.locator('[data-spreadsheet-preview]')).toBeVisible({timeout:30000});
   await expect(page.locator('iframe[data-spreadsheet-element-id]')).toHaveCount(0);
   expect(await page.evaluate(()=>document.activeElement?.tagName)).not.toBe('IFRAME');
@@ -145,7 +158,7 @@ test('a scrolled spreadsheet retains the visible rows on selection and never tak
   await object.click({position:{x:80,y:15}});
   await expect(page.locator('[data-spreadsheet-inline]').getByRole('status')).toHaveCount(0,{timeout:30000});
   await expect.poll(view).toEqual(previous);
-  await page.mouse.click(root.x+10,root.y+600);
+  await page.mouse.click(objectBounds.x+objectBounds.width+24,objectBounds.y+120);
   await page.keyboard.press('Control+z');
   await expect(object).toHaveCount(1);
 });

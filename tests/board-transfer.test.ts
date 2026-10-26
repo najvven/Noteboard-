@@ -150,6 +150,16 @@ test("source workspace origins do not affect transfer geometry", () => {
   assert.deepEqual(item.position, { x: 860, y: 20 });
 });
 
+test('transferring a page moves main-board pixel fills onto its new surface', () => {
+  const source = page({ width: 300, height: 200, elements: [
+    { id: 'fill', type: 'image', position: { x: 20, y: 30 }, size: { width: 40, height: 50 }, content: 'data:image/png;base64,', isPixelFill: true, pixelFillBoardId: 'main-board', zIndex: 1 },
+  ] });
+  const result = clonePageAsAdditionalBoard(source, page({ id: 'destination' }), sequentialIds());
+  const fill = result.elements.find(element => element.isPixelFill)!;
+  assert.equal(fill.pixelFillBoardId, result.surface.id);
+  assert.equal(fill.position.x, result.surface.position.x + 20);
+});
+
 test("preset presentation retains board background and grid/workspace values", () => {
   const preset: Preset = {
     id: "preset",

@@ -1,4 +1,8 @@
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
+import { IEditorService } from "@univerjs/docs-ui";
+import { SetCellEditVisibleWithF2Operation } from "@univerjs/sheets-ui";
+import { DeviceInputEventType } from "@univerjs/engine-render";
+import { KeyCode } from "@univerjs/ui";
 import { UniverSheetsCorePreset, ScrollCommand, SetWorksheetActiveOperation, SetScrollOperation, SetZoomRatioOperation } from "@univerjs/preset-sheets-core";
 import { CommandType, Injector } from "@univerjs/core";
 import {ISidebarService, IDialogService, IUIPartsService, UniverUIPlugin, IUIController, DesktopUIController, type IUniverUIConfig} from '@univerjs/ui';
@@ -62,7 +66,7 @@ let token = "",
   initialized = false;
 let formulaWorker: Worker | undefined;
 let formulaRecoveryPending = false;
-let reloadDraftCaptured = false;
+let lastReloadDraftSignature = "";
 let expandedMode: boolean | undefined;
 let mode: WorkbookDocument['mode'];
 let interactive = false;
@@ -75,6 +79,7 @@ let historyBaseline = "",
   historyDirty = false,
   viewDirty = false,
   ready = false;
+let reloadDraftRestoring = false;
 const FORMULA_CALCULATION_DEADLINE_MS = 5_000;
 
 class FormulaCalculationTimeoutError extends Error {
@@ -104,18 +109,21 @@ const waitForFormulaCalculation = async () => {
 };
 
 const preserveSpreadsheetDraftBeforeUnload = () => {
-  if (reloadDraftCaptured || !ready || !reloadDraftObserver) return;
+  if (!ready || !reloadDraftObserver) return;
   const book = api?.getActiveWorkbook();
   const cell = book?.getActiveSheet().getActiveCell();
   const content = snapshot(false);
   if (!content) return;
-  reloadDraftCaptured = true;
-  reloadDraftObserver({
+  const draft: SpreadsheetReloadDraft = {
     content,
     ...(book?.isCellEditing() && cell ? {
       editingCell: { sheetId: book.getActiveSheet().getSheetId(), address: cell.getA1Notation() },
     } : {}),
-  });
+  };
+  const signature = JSON.stringify(draft);
+  if (signature === lastReloadDraftSignature) return;
+  lastReloadDraftSignature = signature;
+  reloadDraftObserver(draft);
 };
 
 const recoverFromFormulaTimeout = (error: FormulaCalculationTimeoutError) => {
@@ -251,12 +259,20 @@ function snapshot(includePreview = true) {
   return JSON.stringify(value);
 }
 
-// pagehide runs before the old browsing context is destroyed. The synchronous
-// same-origin callback keeps an uncommitted cell draft in the host, without
-// waiting for the debounced changed message from a context that may disappear.
-window.addEventListener('pagehide', () => {
-  clearTimeout(timer);
+// Capture before navigation, but dispose only after a terminal pagehide. A
+// canceled beforeunload or BFCache restore keeps this spreadsheet API alive.
+window.addEventListener('pagehide', (event) => {
   preserveSpreadsheetDraftBeforeUnload();
+  if (event.persisted) return;
+  clearTimeout(timer);
+  window.clearTimeout(formulaWatchdog);
+  formulaWorker?.terminate();
+  formulaWorker = undefined;
+  api?.dispose();
+  api = undefined;
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) lastReloadDraftSignature = "";
 });
 
 async function flush() {
@@ -271,7 +287,7 @@ async function flush() {
   await repaint();
   const content = historySnapshot() || snapshot();
   if (content && !parseWorkbookDocument(content))
-    throw Error(
+    throw new Error(
       "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
     );
   if (content) send("changed", { content });
@@ -300,9 +316,9 @@ async function exchange(data: Record<string, unknown>) {
   try {
     return await new Promise<any>((resolve, reject) => {
       worker.onmessage = ({ data }) =>
-        data.error ? reject(Error(data.error)) : resolve(data.result);
+        data.error ? reject(new Error(data.error)) : resolve(data.result);
       worker.onerror = () =>
-        reject(Error("Could not open the spreadsheet file processor."));
+        reject(new Error("Could not open the spreadsheet file processor."));
       worker.postMessage(data);
     });
   } finally {
@@ -319,14 +335,14 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
   });
   const importedContent = JSON.stringify(document);
   if (!parseWorkbookDocument(importedContent))
-    throw Error(
+    throw new Error(
       "The imported workbook exceeds the supported size or dimensions.",
     );
   if (
     currentContent.length + importedContent.length >
     MAX_WORKBOOK_CHARACTERS - 256 * 1024
   )
-    throw Error(
+    throw new Error(
       "These sheets would exceed the workbook size limit. Import them into a separate spreadsheet.",
     );
   const book = api!.getActiveWorkbook()!;
@@ -346,7 +362,7 @@ async function importSheets(bytes: ArrayBuffer, name: string) {
       sheet.name = replacements.get(sheet.name.toLowerCase());
       sheet.id = `sheet-${crypto.randomUUID()}`;
       const added = book.insertSheet(sheet.name, { sheet });
-      if (!added) throw Error(`Could not add sheet "${sheet.name}".`);
+      if (!added) throw new Error(`Could not add sheet "${sheet.name}".`);
       inserted.push(added.getSheetId());
     }
     await flush();
@@ -375,6 +391,8 @@ function sendSelection() {
     sheet.getActiveCell() ??
     sheet.getRange(range.getRow(), range.getColumn(), 1, 1);
   const style = cell.getCellStyleData() ?? {};
+  const color = style.cl ? style.cl.rgb : undefined;
+  const fill = style.bg ? style.bg.rgb : undefined;
   const selection: SpreadsheetSelection = {
     sheetId: sheet.getSheetId(),
     address: range.getA1Notation(),
@@ -382,8 +400,8 @@ function sendSelection() {
     bold: style.bl === 1,
     italic: style.it === 1,
     fontSize: style.fs ?? 11,
-    color: String((style.cl || {}).rgb || "#000000"),
-    fill: String((style.bg || {}).rgb || "#ffffff"),
+    color: String(color && color.length > 0 ? color : "#000000"),
+    fill: String(fill && fill.length > 0 ? fill : "#ffffff"),
     numberFormat: cell.getNumberFormat(),
     alignment: cell.getHorizontalAlignment(),
   };
@@ -426,6 +444,17 @@ async function restoreView() {
   await repaint();
 }
 
+async function scrollToCell(row: number, column: number) {
+  if (!Number.isSafeInteger(row) || row < 0 || row >= 1_048_576 ||
+      !Number.isSafeInteger(column) || column < 0 || column >= 16_384)
+    throw new Error("The spreadsheet cell is outside the worksheet bounds.");
+  const sheet = api?.getActiveWorkbook()?.getActiveSheet();
+  if (!sheet) throw new Error("The spreadsheet is not ready.");
+  sheet.scrollToCell(row, column, 0);
+  await repaint();
+  return snapshot(false);
+}
+
 async function capturePreview() {
   if (!api || expandedMode) return "";
   const book = api.getActiveWorkbook();
@@ -450,10 +479,11 @@ async function capturePreview() {
 
 async function replaceContent(content: string) {
   const value = parseWorkbookDocument(content);
-  if (!api || !value) throw Error("Invalid spreadsheet data.");
+  if (!api || !value) throw new Error("Invalid spreadsheet data.");
   clearTimeout(timer);
   renderRevision++;
   ready = false;
+  reloadDraftRestoring = false;
   historyBaseline = content;
   historyDirty = false;
   viewDirty = false;
@@ -479,7 +509,7 @@ async function replaceContent(content: string) {
 
 async function setCellDimensions(width: number, height: number) {
   const book = api?.getActiveWorkbook();
-  if (!book) throw Error("The spreadsheet is not ready.");
+  if (!book) throw new Error("The spreadsheet is not ready.");
   await book.endEditingAsync(true);
   const sheet = book.getActiveSheet(),
     size = normalizeCellSize(width, height);
@@ -498,7 +528,7 @@ async function setCellDimensions(width: number, height: number) {
   // The scheduled mutation snapshot paints its thumbnail after layout settles.
   const content = snapshot(false);
   if (!parseWorkbookDocument(content))
-    throw Error(
+    throw new Error(
       "The workbook exceeds the 32 MB save limit. Undo the last change or reduce its size.",
     );
   return content;
@@ -506,7 +536,7 @@ async function setCellDimensions(width: number, height: number) {
 
 async function action(action: SpreadsheetAction) {
   const book = api?.getActiveWorkbook();
-  if (!book || !api) throw Error("The spreadsheet is not ready.");
+  if (!book || !api) throw new Error("The spreadsheet is not ready.");
   await book.endEditingAsync(true);
   const sheet = book.getActiveSheet(),
     range = sheet.getActiveRange();
@@ -577,7 +607,7 @@ async function action(action: SpreadsheetAction) {
 
 (window as any).noteboardSheet = {
   documentId,
-  isReady: () => ready,
+  isReady: () => ready && !reloadDraftRestoring,
   observeReloadDraft: (observer:(draft:SpreadsheetReloadDraft)=>void) => {reloadDraftObserver=observer;},
   snapshot,
   historySnapshot,
@@ -589,6 +619,7 @@ async function action(action: SpreadsheetAction) {
   capturePreview,
   replaceContent,
   setCellDimensions,
+  scrollToCell,
   action,
 };
 
@@ -647,6 +678,7 @@ window.addEventListener("message", async (event) => {
         ],
       });
       api = created.univerAPI;
+      const editorService = created.univer.__getInjector().get(IEditorService);
       mode=document.mode;
       api.updateMenuConfig({'sheet.menu.zoom-ratio':{disabled:mode==='simple'}});
       api.registerUIPart(api.Enum.BuiltInUIPart.CUSTOM_HEADER, () => React.createElement(SheetRibbon,{targetId:message.ribbonTarget}));
@@ -727,31 +759,194 @@ window.addEventListener("message", async (event) => {
         throw error;
       }
       formulaRecoveryPending = false;
-      reloadDraftCaptured = false;
+      lastReloadDraftSignature = "";
       await setExpanded(message.expanded === true);
       await restoreView();
       await repaint();
       ready = true;
       const editingCell = message.reloadDraftEditingCell;
       if (interactive && editingCell && book.getSheetBySheetId(editingCell.sheetId)) {
+        reloadDraftRestoring = true;
         book.setActiveSheet(editingCell.sheetId);
-        book.getActiveSheet().getRange(editingCell.address).activate();
-        book.startEditing();
-        // Univer 1.0.2 may restore an active edit at offset zero after the
-        // browsing context reloads. Resume after the restored draft so the
-        // next keystroke continues the formula/text instead of prefixing it.
-        const editor = api.getDocument("__INTERNAL_EDITOR__DOCS_NORMAL") as
-          | { getBody?: () => { dataStream?: string }; setSelection?: (start: number, end: number) => void }
+        const activeRange = book.getActiveSheet().getRange(editingCell.address);
+        activeRange.activate();
+        const savedInput = activeRange.getFormula() || activeRange.getValue();
+        const expectedInput =
+          typeof savedInput === "string" || typeof savedInput === "number"
+            ? String(savedInput)
+            : undefined;
+        // startEditing() uses a double-click editor transition. If Univer kept
+        // its editor bridge visible across reload, that transition can be a
+        // no-op and leave a formula caret at offset zero. Reopen the persisted
+        // draft through Univer's F2 operation, whose edit path restores the
+        // caret at the end of the existing cell text.
+        await book.endEditingAsync(false);
+        await api.executeCommand(SetCellEditVisibleWithF2Operation.id, {
+          unitId: book.getId(),
+          visible: true,
+          eventType: DeviceInputEventType.Keyboard,
+          keycode: KeyCode.F2,
+        });
+        // Wait for the active edit document to contain the restored input before
+        // declaring the frame loaded. On slower renderers the document unit can
+        // exist with an empty body for several frames; moving that empty body's
+        // caret to zero is then overwritten when Univer installs the draft.
+        const scheduleAfterFrame = (fallbackMs: number, callback: () => void) => {
+          let completed = false;
+          let frameId = 0;
+          let timeoutId = 0;
+          const finish = () => {
+            if (completed) return;
+            completed = true;
+            window.clearTimeout(timeoutId);
+            cancelAnimationFrame(frameId);
+            callback();
+          };
+          timeoutId = window.setTimeout(finish, fallbackMs);
+          frameId = requestAnimationFrame(finish);
+        };
+        const waitFrame = (fallbackMs: number) => new Promise<void>((resolve) => {
+          scheduleAfterFrame(fallbackMs, resolve);
+        });
+        const activeElement = window.document.activeElement;
+        const activeEditorId = activeElement?.id.startsWith("__editor_")
+          ? activeElement.id.slice("__editor_".length)
+          : undefined;
+        const editorIds = [
+          activeEditorId,
+          "__INTERNAL_EDITOR__DOCS_NORMAL",
+          "__INTERNAL_EDITOR__DOCS_FORMULA_BAR",
+        ].filter((id, index, all): id is string => Boolean(id) && all.indexOf(id) === index);
+        const getEditor = (id: string) => api.getDocument(id) as
+          | {
+              getBody?: () => { dataStream?: string };
+              setSelection?: (start: number, end: number) => void;
+            }
           | undefined;
-        const dataStream = editor?.getBody?.().dataStream;
-        if (typeof dataStream === "string" && editor?.setSelection) {
-          const caret = dataStream.replace(/\r\n$/, "").length;
-          editor.setSelection(caret, caret);
+        const cleanInput = (value: string) => value.replace(/\r\n$/, "");
+        const findStableEditors = (
+          candidates: NonNullable<ReturnType<typeof getEditor>>[],
+        ) => candidates.filter((editor) => {
+          const currentInput = editor.getBody?.().dataStream;
+          return typeof currentInput === "string" &&
+            (expectedInput === undefined || cleanInput(currentInput) === expectedInput);
+        });
+        const restorationDeadline = performance.now() + 15_000;
+        const restoredEditors = await new Promise<NonNullable<ReturnType<typeof getEditor>>[]>((resolve) => {
+          let checks = 0;
+          const poll = () => {
+            if (checks >= 300 || performance.now() >= restorationDeadline) {
+              resolve([]);
+              return;
+            }
+            checks += 1;
+            const remaining = Math.max(0, restorationDeadline - performance.now());
+            scheduleAfterFrame(Math.min(100, remaining), () => {
+              if (!book.isCellEditing()) {
+                poll();
+                return;
+              }
+              const candidates = editorIds
+                .map(getEditor)
+                .filter((editor): editor is NonNullable<ReturnType<typeof getEditor>> => {
+                  const dataStream = editor?.getBody?.().dataStream;
+                  return typeof dataStream === "string" && editor.setSelection !== undefined &&
+                    (expectedInput === undefined || cleanInput(dataStream) === expectedInput);
+                });
+              if (!candidates.length) {
+                poll();
+                return;
+              }
+              const confirmRemaining = Math.max(0, restorationDeadline - performance.now());
+              scheduleAfterFrame(Math.min(100, confirmRemaining), () => {
+                const stableEditors = findStableEditors(candidates);
+                if (stableEditors.length) resolve(stableEditors);
+                else poll();
+              });
+            });
+          };
+          poll();
+        });
+        if (restoredEditors.length) {
+          // Univer can keep both the in-cell and formula-bar documents mounted.
+          // Align every matching restored editor so the focused one cannot retain
+          // its old start-of-text caret while the other document is updated.
+          const restoreCaret = () => {
+            for (const editor of editorIds.map(getEditor)) {
+              const dataStream = editor?.getBody?.().dataStream;
+              if (
+                !editor || typeof dataStream !== "string" ||
+                (expectedInput !== undefined && cleanInput(dataStream) !== expectedInput)
+              ) continue;
+              const caret = cleanInput(dataStream).length;
+              editor.setSelection?.(caret, caret);
+            }
+          };
+          restoreCaret();
+          await repaint();
+          // Univer may reconcile the active formula-bar document one frame
+          // after the body is restored. Re-fetch its live model and apply the
+          // final caret after that reconciliation, before unblocking the host.
+          await waitFrame(100);
+          restoreCaret();
+          await repaint();
+          if (expectedInput !== undefined) {
+            const targetEditorId = editorIds.find(id => {
+              const editor = getEditor(id);
+              const dataStream = editor?.getBody?.().dataStream;
+              return typeof dataStream === "string" && cleanInput(dataStream) === expectedInput &&
+                Boolean(editorService.getEditor(id));
+            });
+            const targetEditor = targetEditorId ? editorService.getEditor(targetEditorId) : undefined;
+            if (!targetEditor) {
+              console.warn("Could not locate the active spreadsheet edit cursor.");
+            } else {
+              try {
+                const caret = cleanInput(expectedInput).length;
+                const caretIsRestored = () => {
+                  const currentInput = targetEditor.getDocumentData().body?.dataStream;
+                  return typeof currentInput === "string" && cleanInput(currentInput) === expectedInput &&
+                    targetEditor.getCursorPosition() === caret && targetEditor.isFocus();
+                };
+                const caretDeadline = performance.now() + 5_000;
+                let stableFrames = 0;
+                const caretRestored = await new Promise<boolean>((resolve) => {
+                  let checks = 0;
+                  const poll = () => {
+                    if (checks >= 50 || performance.now() >= caretDeadline) {
+                      resolve(false);
+                      return;
+                    }
+                    checks += 1;
+                    if (caretIsRestored()) stableFrames += 1;
+                    else {
+                      stableFrames = 0;
+                      restoreCaret();
+                      targetEditor.focus();
+                    }
+                    if (stableFrames >= 3) {
+                      scheduleAfterFrame(100, () => resolve(true));
+                      return;
+                    }
+                    scheduleAfterFrame(100, poll);
+                  };
+                  poll();
+                });
+                if (!caretRestored)
+                  console.warn("Could not restore the active spreadsheet edit cursor.");
+              } catch (error) {
+                console.warn("Could not restore the active spreadsheet edit cursor.", error);
+              }
+            }
+          }
         }
       }
+      reloadDraftRestoring = false;
       send("loaded");
       sendSelection();
     } catch (error) {
+      ready = false;
+      reloadDraftRestoring = false;
       send("error", {
         message:
           error instanceof Error
@@ -761,12 +956,5 @@ window.addEventListener("message", async (event) => {
     }
   }
 });
-window.addEventListener("beforeunload", () => {
-  clearTimeout(timer);
-  window.clearTimeout(formulaWatchdog);
-  preserveSpreadsheetDraftBeforeUnload();
-  formulaWorker?.terminate();
-  formulaWorker = undefined;
-  api?.dispose();
-});
+window.addEventListener("beforeunload", preserveSpreadsheetDraftBeforeUnload);
 send("ready");

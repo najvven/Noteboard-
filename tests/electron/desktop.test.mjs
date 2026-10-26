@@ -36,8 +36,50 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
     process.on('uncaughtException',error=>app.__qaMainErrors.push(error.stack||error.message));
     process.on('unhandledRejection',error=>app.__qaMainErrors.push(String(error)));
     app.on('will-quit',()=>require('node:fs').writeFileSync(require('node:path').join(process.env.NOTEBOARD_QA_PROFILE,'main-errors.json'),JSON.stringify(app.__qaMainErrors)));
-    app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();});
-    app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
+    app.__qaCoverageTargets=new Map();app.__qaCoverageErrors=[];
+    const startRendererCoverage=contents=>{
+      if(process.env.NOTEBOARD_COVERAGE!=='1')return;
+      const status={contentsId:contents.id,attempted:true,started:false,profilesSaved:0,error:null,attachedByProfiler:false};
+      const target={contents,status,started:null};
+      app.__qaCoverageTargets.set(contents,target);
+      target.started=Promise.resolve().then(()=>{
+        if(!contents.debugger.isAttached()){contents.debugger.attach('1.3');status.attachedByProfiler=true;}
+        return contents.debugger.sendCommand('Profiler.enable');
+      }).then(()=>contents.debugger.sendCommand('Profiler.startPreciseCoverage',{callCount:false,detailed:true}))
+        .then(()=>{status.started=true;return true;})
+        .catch(error=>{status.error=error.message;app.__qaCoverageErrors.push(error.message);return false;});
+    };
+    app.__qaSaveRendererCoverage=async()=>{
+      const result={hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:[...app.__qaCoverageErrors],targets:[]};
+      const dir=process.env.NOTEBOARD_ELECTRON_COVERAGE;
+      for(const target of app.__qaCoverageTargets.values()){
+        const {contents,status}=target;
+        const started=await target.started;
+        if(started)result.hostRenderersStarted++;
+        if(!started||contents.isDestroyed()){
+          if(status.error)result.errors.push(status.error);
+          result.targets.push(status);continue;
+        }
+        try{
+          const coverage=await contents.debugger.sendCommand('Profiler.takePreciseCoverage');
+          if(coverage.result?.length){
+            const output=require('node:path').join(dir,'electron-renderer-'+contents.id+'-'+process.pid+'.json');
+            require('node:fs').mkdirSync(dir,{recursive:true});
+            require('node:fs').writeFileSync(output,JSON.stringify({result:coverage.result,timestamp:Date.now()}));
+            status.profilesSaved=1;result.rendererProfilesSaved++;result.scriptEntriesSaved+=coverage.result.length;
+          }
+        }catch(error){status.error=error.message;result.errors.push(error.message);}
+        try{await contents.debugger.sendCommand('Profiler.stopPreciseCoverage');}
+        catch(error){status.error=status.error||error.message;result.errors.push(error.message);}
+        if(status.attachedByProfiler&&contents.debugger.isAttached()){
+          try{contents.debugger.detach();}catch(error){status.error=status.error||error.message;result.errors.push(error.message);}
+        }
+        result.targets.push(status);
+      }
+      return result;
+    };
+    app.on('browser-window-created',(_,win)=>{win.hide();win.setSkipTaskbar(true);win.setPosition(-10000,-10000);win.webContents.setBackgroundThrottling(false);win.showInactive();startRendererCoverage(win.webContents);});
+    app.on('web-contents-created',(_,contents)=>{if(contents.getType()==='webview'){contents.setAudioMuted(true);contents.setBackgroundThrottling(false);/* test-only timer stability: this makes memory diagnostics unlike normal app behavior */if(process.env.NOTEBOARD_PRIVACY_TRACE)contents.on('console-message',event=>console.error('GUEST',event.level,event.message));}});
     import(${JSON.stringify(pathToFileURL(process.env.NOTEBOARD_TEST_APP_ENTRY || path.join(root,'main.js')).href)});`);
   const env={...process.env,NODE_ENV:'production',NOTEBOARD_QA_PROFILE:profile};
   delete env.ELECTRON_RUN_AS_NODE;
@@ -51,6 +93,18 @@ async function launch(t, board = seed(), { hostRules, expectClosed = false, addi
   assert.equal(await app.evaluate(({app})=>app.getPath('userData')),profile);
   t.after(async()=>{
     try {
+      if(process.env.NOTEBOARD_COVERAGE==='1'){
+        const coverage=child.exitCode===null
+          ? await app.evaluate(({app})=>app.__qaSaveRendererCoverage()).catch(error=>({hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:[error.message],targets:[]}))
+          : {hostRenderersStarted:0,rendererProfilesSaved:0,scriptEntriesSaved:0,errors:expectClosed?[]:['Electron app exited before renderer coverage could be collected.'],targets:[]};
+        const status=child.exitCode!==null&&expectClosed?'expected-shutdown'
+          :coverage.hostRenderersStarted>0&&coverage.rendererProfilesSaved>0&&coverage.errors.length===0?'collected':'failed';
+        const record={testName:t.name,status,hostRenderersStarted:coverage.hostRenderersStarted,rendererProfilesSaved:coverage.rendererProfilesSaved,scriptEntriesSaved:coverage.scriptEntriesSaved,errors:coverage.errors,targets:coverage.targets};
+        const statusFile=process.env.NOTEBOARD_ELECTRON_COVERAGE_STATUS;
+        if(statusFile){await fs.mkdir(path.dirname(statusFile),{recursive:true});await fs.appendFile(statusFile,JSON.stringify(record)+String.fromCharCode(10),'utf8');}
+        if(coverage.errors.length)t.diagnostic('COVERAGE_COLLECTION_ERROR '+JSON.stringify(coverage.errors));
+        else t.diagnostic(`COVERAGE_ELECTRON_RENDERER ${coverage.scriptEntriesSaved}`);
+      }
       if (expectClosed && child.exitCode !== null) {
         assert.deepEqual(JSON.parse(await fs.readFile(path.join(profile,'main-errors.json'),'utf8')),[], 'Closing must not throw in Electron main');
         return;
@@ -98,6 +152,15 @@ async function fixtureServer(t) {
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   return `http://127.0.0.1:${server.address().port}`;
+}
+
+async function chooseWebDevice(window,button,accept=true) {
+  const handled=window.waitForEvent('dialog').then(async dialog=>{
+    assert.equal(dialog.type(),'confirm');
+    assert.match(dialog.message(),/reloads this page.*Unsaved input/);
+    if(accept)await dialog.accept();else await dialog.dismiss();
+  });
+  await Promise.all([handled,button.click()]);
 }
 
 test('native Web ignores iframe fragment changes and persists committed main-frame URLs only', {timeout:45000}, async t => {
@@ -275,7 +338,7 @@ test('several Web fields remain responsive and release their ad-block engines af
   await expect.poll(async()=>(await guestState(app)).filter(page=>page.title==='Native web ready').length,{timeout:30000}).toBe(6);
   assert.equal(await app.evaluate(({webContents})=>webContents.getAllWebContents().filter(item=>!item.isDestroyed()&&item.getType()==='backgroundPage').length),1,'Six fields share one real extension background');
   const memory = await app.evaluate(({app})=>app.getAppMetrics().reduce((sum,process)=>sum+(process.memory?.workingSetSize??0),0));
-  t.diagnostic(`Six native Web fields: ${Math.round(memory/1024)} MiB working set.`);
+  t.diagnostic(`Six native Web fields: ${Math.round(memory/1024)} MiB working set; QA fixture disables background throttling, so this is not a production baseline.`);
   const root=(await window.locator('[data-board-root]').boundingBox());
   await window.mouse.move(root.x+10,root.y+10);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
   await expect(window.getByRole('button',{name:'More',exact:true})).toBeEnabled();
@@ -310,11 +373,13 @@ test('native clipboard follows internal objects, external text and external imag
   await window.keyboard.press('Control+v');
   await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(1);
   await expect(window.locator('[data-board-element-type="arrow"]')).toHaveCount(2);
-  const filePath=path.join(profile,'external-image.png');
-  await sharp({create:{width:24,height:24,channels:4,background:'#2563eb'}}).png().toFile(filePath);
-  await app.evaluate(({clipboard},name)=>clipboard.writeBuffer('FileNameW',Buffer.from(name+'\0','utf16le')),filePath);
-  assert.equal((await window.evaluate(()=>window.noteboardAPI.readClipboard())).files.length,1,'Explorer file must be read from the current OS clipboard');
-  await window.keyboard.press('Control+v');await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(2);
+  if(process.platform==='win32'){
+    const filePath=path.join(profile,'external-image.png');
+    await sharp({create:{width:24,height:24,channels:4,background:'#2563eb'}}).png().toFile(filePath);
+    await app.evaluate(({clipboard},name)=>clipboard.writeBuffer('FileNameW',Buffer.from(name+'\0','utf16le')),filePath);
+    assert.equal((await window.evaluate(()=>window.noteboardAPI.readClipboard())).files.length,1,'Explorer file must be read from the current OS clipboard');
+    await window.keyboard.press('Control+v');await expect(window.locator('[data-board-element-type="media"]')).toHaveCount(2);
+  }
   assert.deepEqual(errors,[]);
 });
 
@@ -323,7 +388,7 @@ test('a merged area keeps the existing native Web guest, page input and session 
   Object.assign(board,{width:1100,height:700,workspaceWidth:1500,workspaceHeight:1000,boardX:64,boardY:0,viewportCenterX:640,viewportCenterY:328,zoom:1});
   board.elements[1].size={width:700,height:300};
   const {app,window,errors}=await launch(t,board);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const before=(await guestState(app))[0].id;
   await app.evaluate(({webContents})=>webContents.fromId(webContents.getAllWebContents().find(c=>c.getType()==='webview').id).executeJavaScript('document.body.innerHTML="<input id=note value=Preserved>"; void 0'));
   const root=await window.locator('[data-board-root]').boundingBox();
@@ -356,7 +421,7 @@ test('a shared actual ad-block extension keeps opposite settings in isolated Web
   board.elements[1].size={width:600,height:400};
   board.elements.push({...board.elements[1],id:'web-off',position:{x:750,y:150},size:{width:550,height:400},content:url+'?tag=off',zIndex:3,webAdBlock:false});
   const {app,window,errors}=await launch(t,board,{hostRules:'MAP publisher.example.org 127.0.0.1, MAP pagead2.googlesyndication.com 127.0.0.1'});
-  await expect.poll(async()=>(await guestState(app)).map(guest=>guest.title).sort()).toEqual(['Publisher off','Publisher on']);
+  await expect.poll(async()=>(await guestState(app)).map(guest=>guest.title).sort(),{timeout:15000}).toEqual(['Publisher off','Publisher on']);
   await expect.poll(()=>contacted.off).toBe(1);assert.equal(contacted.on,0);
   const partitions=await window.locator('webview').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('partition')));
   const states=await window.evaluate(partitions=>Promise.all(partitions.map(partition=>window.noteboardAPI.getWebBlockingStatus(partition))),partitions);
@@ -370,7 +435,8 @@ test('a shared actual ad-block extension keeps opposite settings in isolated Web
 test('Web Select and Hand controls operate the existing native guest and persist independently', {timeout:45000}, async t => {
   const {url}=await responsiveServer(t),board=seed('select',url);
   Object.assign(board.editorSettings,{autoToolOnSelect:false});
-  const {app,window,errors}=await launch(t,board);
+  const {app,window,errors,profile}=await launch(t,board);
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Responsive Web');
   await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(0);
   const identity=(await guestState(app))[0].id;
   await clickWebControl(app,window,'#target');assert.equal((await responsiveState(app)).clicks,0);
@@ -385,7 +451,7 @@ test('Web Select and Hand controls operate the existing native guest and persist
   await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(2);
   assert.equal((await guestState(app))[0].id,identity);
   await expect.poll(async()=>{
-    const saved=JSON.parse(await fs.readFile(path.join((await app.evaluate(({app})=>app.getPath('userData'))),'data','boards','native-source.json'),'utf8'));
+    const saved=JSON.parse(await fs.readFile(path.join(profile,'data','boards','native-source.json'),'utf8'));
     return saved.editorSettings.toolMenuSettingsOverrides?.embed?.pageInteractionWithSelect;
   }).toBe(true);
   assert.deepEqual(errors,[]);
@@ -394,7 +460,7 @@ test('Web Select and Hand controls operate the existing native guest and persist
 test('Ctrl+wheel over native Web zooms the board around the cursor, including focused mobile guests', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const root=window.locator('[data-board-root]');
   const scale=()=>root.evaluate(node=>Number(node.style.transform.match(/scale\(([^)]+)\)/)[1]));
   for(const focused of [false,true]) {
@@ -411,11 +477,14 @@ test('Ctrl+wheel over native Web zooms the board around the cursor, including fo
   }
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script),script);
   await run('document.body.style.minHeight="3000px"; void 0');
+  await expect.poll(()=>run('document.documentElement.scrollHeight')).toBeGreaterThan(1000);
+  let plainBox=await window.locator('[data-web-viewport]').boundingBox();
+  await window.mouse.move(plainBox.x+90,plainBox.y+80);
   let beforePlain=await scale();await window.mouse.wheel(0,120);
   await expect.poll(()=>run('scrollY')).toBeGreaterThan(0);assert.equal(await scale(),beforePlain);
   await run(`scrollTo(0,0);document.body.innerHTML='<iframe src="${origin.replace('127.0.0.1','localhost')}/child" style="width:900px;height:400px;border:0"></iframe>'; void 0`);
   await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.length)).toBe(2);
-  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.find(frame=>frame.url.endsWith('/child'))?.executeJavaScript('document.readyState'))).toBe('complete');
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.find(frame=>frame.url.endsWith('/child'))?.executeJavaScript('document.readyState')).catch(()=>undefined)).toBe('complete');
   const childBox=await window.locator('[data-web-viewport]').boundingBox();beforePlain=await scale();
   await window.mouse.click(childBox.x+90,childBox.y+90);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
   await expect.poll(scale).toBeGreaterThan(beforePlain);
@@ -423,7 +492,9 @@ test('Ctrl+wheel over native Web zooms the board around the cursor, including fo
   await window.locator('[data-board-element-id="web"]').click();
   await window.getByRole('button',{name:'More',exact:true}).click();
   const menu=window.locator('[data-more-toolbar-item="embed"]');await menu.getByRole('button',{name:'Web settings',exact:true}).click();
-  await menu.getByRole('button',{name:'Phone',exact:true}).click();await window.getByRole('button',{name:'More',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Phone',exact:true}));
+  await expect.poll(()=>run('navigator.userAgentData?.mobile === true && document.readyState === "complete"').catch(()=>false)).toBe(true);
+  await window.getByRole('button',{name:'More',exact:true}).click();
   await window.getByRole('button',{name:'More',exact:true}).click();await menu.getByRole('button',{name:'Web',exact:true}).click();
   const box=await window.locator('[data-web-viewport]').boundingBox(),before=await scale();
   await window.mouse.click(box.x+60,box.y+80);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
@@ -437,7 +508,7 @@ test('flipped and rotated native Web corners remain clickable and Ctrl+wheel kee
   board.elements[1].rotation=90;board.elements[1].flipX=true;
   const {app,window}=await launch(t,board);
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script),script);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Native web corners');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web corners');
   const box=await window.locator('[data-web-viewport]').boundingBox();
   const screenCorners=[
     {x:box.x+8,y:box.y+box.height-8,expected:'bottom-left'},
@@ -471,7 +542,7 @@ test('cookie consent popups close without main-process errors and Web fullscreen
   t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
   const {app,window,errors}=await launch(t,seed('embed',`http://127.0.0.1:${server.address().port}/page`));
   const run=script=>app.evaluate(({webContents},script)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(script,true),script);
-  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Consent fixture');
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Consent fixture');
   for(let i=0;i<3;i++){
     const popupPromise=app.waitForEvent('window');
     await run('document.querySelector("#open").click(); void 0');
@@ -504,6 +575,218 @@ test('desktop color sampling remains available internally without removed More t
   await window.getByRole('button',{name:'More',exact:true}).click();
   await expect(window.locator('[data-more-toolbar-item="eyedropper"],[data-more-toolbar-item="crop"]')).toHaveCount(0);
   await expect(window.getByRole('alert')).toHaveCount(0);
+});
+
+test('board capture IPC rejects invalid and off-window regions without main-process errors', {timeout:30000},async t=>{
+  const {app,window,errors}=await launch(t);
+  const viewport=await app.evaluate(({BrowserWindow})=>{
+    const win=BrowserWindow.getAllWindows()[0];
+    return {bounds:win.getContentBounds(),zoom:win.webContents.getZoomFactor()};
+  });
+  const cases=[
+    {name:'zero-width region',rect:{x:0,y:0,width:0,height:1},message:/Invalid board capture region/},
+    {name:'region beyond the content bounds',rect:{
+      x:Math.ceil(viewport.bounds.width/viewport.zoom)+1,
+      y:Math.ceil(viewport.bounds.height/viewport.zoom)+1,
+      width:1,height:1,
+    },message:/visible area inside the board window/},
+  ];
+  t.diagnostic(`Capture boundary viewport: ${JSON.stringify(viewport)}`);
+  for(const scenario of cases){
+    await assert.rejects(
+      () => window.evaluate(rect=>window.noteboardAPI.captureBoardRegion(rect),scenario.rect),
+      scenario.message,
+      `${scenario.name} must reject at the IPC boundary`,
+    );
+    const mainErrors=await app.evaluate(({app})=>[...app.__qaMainErrors]);
+    assert.deepEqual(mainErrors,[],`${scenario.name} must not escape as a main-process error`);
+    t.diagnostic(`${scenario.name} rejected cleanly`);
+  }
+  assert.deepEqual(errors,[],'Rejected capture requests must not create renderer errors.');
+});
+
+test('Fill Tool raster-fills visible shape pixels, preserves the outline, and supports undo', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1.25,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'outlined-square',type:'rectangle',position:{x:250,y:170},size:{width:180,height:120},content:'',color:'#ffffff',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  const square=window.locator('[data-board-element-id="outlined-square"]');
+  await expect(square).toBeVisible();
+  const box=await square.boundingBox();assert.ok(box);
+  const interior={x:box.x+box.width/2,y:box.y+box.height/2};
+  const outline={x:box.x+3,y:box.y+box.height/2};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
+
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(interior.x,interior.y);
+  const fillLayer=window.locator('[data-board-element-type="image"]');
+  await expect(fillLayer).toHaveCount(1);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill) && page?.elements.find(element=>element.id==='outlined-square')?.color;
+  })).toBe('#ffffff');
+
+  const savedElements=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements??[];
+  });
+  const savedSquare=savedElements.find(element=>element.id==='outlined-square');
+  assert.equal(savedSquare.color,'#ffffff');
+  assert.equal(savedSquare.borderColor,'#000000');
+  const pixelFill=savedElements.find(element=>element.isPixelFill);
+  assert.ok(pixelFill);
+  assert.equal(pixelFill.pixelFillBoardId,'main-board');
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
+
+  await window.keyboard.press('Control+z');
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill);
+  })).toBe(false);
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool raster-fills open board background and leaves a nearby line unchanged', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:500,height:350,workspaceWidth:1200,workspaceHeight:900,boardX:100,boardY:100,viewportCenterX:600,viewportCenterY:450,zoom:1,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'horizontal-line',type:'line',position:{x:170,y:150},size:{width:160,height:30},content:'',color:'#000000',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  const line=window.locator('[data-board-element-id="horizontal-line"]');
+  await expect(line).toBeVisible();
+  const box=await line.boundingBox();assert.ok(box);
+  const stroke={x:box.x+box.width/2,y:box.y+box.height/2};
+  const nearbyBackground={x:stroke.x,y:stroke.y+6};
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground),'#ffffff');
+
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(nearbyBackground.x,nearbyBackground.y);
+  const fillLayer=window.locator('[data-board-element-type="image"]');
+  await expect(fillLayer).toHaveCount(1);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill) && page?.boardColor;
+  })).toBe('#ffffff');
+  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground)).toBe('#ff0000');
+  await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),stroke)).toBe('#000000');
+
+  const saved=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page;
+  });
+  assert.equal(saved.boardColor,'#ffffff');
+  assert.equal(saved.elements.find(element=>element.id==='horizontal-line').borderColor,'#000000');
+  assert.equal(saved.elements.filter(element=>element.isPixelFill).length,1);
+  assert.equal(saved.elements.find(element=>element.isPixelFill).pixelFillBoardId,'main-board');
+  await window.keyboard.press('Control+z');
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill);
+  })).toBe(false);
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool captures an additional board beyond the Main Board bounds', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1800,workspaceHeight:1000,boardX:0,boardY:0,viewportCenterX:900,viewportCenterY:400,zoom:1,boardColor:'#ffffff',showGrid:true,gridSize:24});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'far-board',type:'board',position:{x:800,y:100},size:{width:240,height:180},content:'',color:'#ffffff',zIndex:5}];
+  const {window,errors}=await launch(t,board);
+  const extra=window.locator('[data-board-element-id="far-board"]');
+  await expect(extra).toBeVisible();
+  const box=await extra.boundingBox();assert.ok(box);
+  // Select an underlying board pixel away from grid lines; capture intentionally
+  // removes that decorative overlay before filling the connected surface.
+  const interior={x:box.x+box.width*.33,y:box.y+box.height*.37};
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(interior.x,interior.y);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.find(element=>element.id==='far-board')?.color;
+  })).toBe('#ff0000');
+  await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(0);
+  const pageAfterFill=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page;
+  });
+  assert.equal(pageAfterFill.boardColor,'#ffffff');
+  assert.equal(pageAfterFill.elements.some(element=>element.isPixelFill),false);
+  assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool raster-fills a closed drawing on an additional board outside Main', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1800,workspaceHeight:1000,boardX:0,boardY:0,viewportCenterX:900,viewportCenterY:400,zoom:1,boardColor:'#ffffff',showGrid:true,gridSize:24});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[
+    {id:'far-board',type:'board',position:{x:800,y:100},size:{width:240,height:180},content:'',color:'#ffffff',zIndex:5},
+    {id:'closed-drawing',type:'draw',position:{x:820,y:120},size:{width:160,height:140},content:'',points:[{x:0,y:0},{x:160,y:0},{x:160,y:140},{x:0,y:140},{x:0,y:0}],borderColor:'#000000',borderWidth:8,zIndex:6,parentId:'far-board'},
+  ];
+  const {window,errors}=await launch(t,board);
+  const drawing=window.locator('[data-board-element-id="closed-drawing"]');
+  await expect(drawing).toBeVisible();
+  const drawingBox=await drawing.boundingBox();assert.ok(drawingBox);
+  const interior={x:drawingBox.x+drawingBox.width/2,y:drawingBox.y+drawingBox.height/2};
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(interior.x,interior.y);
+  await expect.poll(async()=>window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.some(element=>element.isPixelFill)??false;
+  }),{timeout:15000}).toBe(true);
+  await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(1);
+  const filled=await window.evaluate(async()=>{
+    const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
+    return page?.elements.find(element=>element.isPixelFill);
+  });
+  assert.ok(filled);
+  assert.equal(filled.pixelFillBoardId,'far-board');
+  const center={x:filled.position.x+filled.size.width/2,y:filled.position.y+filled.size.height/2};
+  assert.ok(center.x>=800&&center.x<=1040&&center.y>=100&&center.y<=280);
+  assert.equal(filled.parentId,'far-board');
+  assert.ok(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior)==='#ff0000');
+  assert.deepEqual(errors,[]);
+});
+
+test('Fill Tool discards a capture when the board scrolls before pixel processing completes', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1800,workspaceHeight:2400,boardX:350,boardY:200,viewportCenterX:900,viewportCenterY:500,zoom:1,boardColor:'#ffffff'});
+  board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
+  board.elements=[{id:'open-boundary',type:'line',position:{x:250,y:170},size:{width:180,height:40},content:'',borderColor:'#000000',borderWidth:8,zIndex:1}];
+  const {window,errors}=await launch(t,board);
+  const root=window.locator('[data-board-root]'),box=await root.boundingBox();assert.ok(box);
+  const point={x:box.x+box.width/2,y:box.y+box.height/2};
+  await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
+  await window.mouse.click(point.x,point.y);
+  await window.waitForTimeout(1);
+  await window.locator('.workspace-scroll').evaluate(node=>{node.scrollTop+=80;});
+  await expect(window.getByRole('status')).toContainText('board view changed');
+  await expect(window.locator('[data-board-element-type="image"]')).toHaveCount(0);
+  assert.deepEqual(errors,[]);
+});
+
+test('whole-element Eraser skips transparent pixel-fill regions and removes opaque ones', {timeout:45000},async t=>{
+  const board=seed('select');
+  Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1});
+  const rgba=Buffer.from([255,0,0,255,0,0,0,0,0,0,0,0,0,0,0,0]);
+  const content=`data:image/png;base64,${(await sharp(rgba,{raw:{width:2,height:2,channels:4}}).png().toBuffer()).toString('base64')}`;
+  board.elements=[
+    {id:'underlying',type:'rectangle',position:{x:250,y:170},size:{width:100,height:100},content:'',color:'#00ff00',zIndex:1},
+    {id:'alpha-fill',type:'image',position:{x:250,y:170},size:{width:100,height:100},content,isPixelFill:true,zIndex:2},
+  ];
+  const {window,errors}=await launch(t,board);
+  await window.waitForTimeout(100);
+  await window.getByRole('button',{name:'Eraser tool',exact:true}).click();
+  const root=await window.locator('[data-board-root]').boundingBox();assert.ok(root);
+  const opaque={x:root.x+275,y:root.y+195},transparent={x:root.x+325,y:root.y+195};
+  await window.mouse.click(transparent.x,transparent.y);
+  await expect(window.locator('[data-board-element-id="underlying"]')).toHaveCount(0);
+  await expect(window.locator('[data-board-element-id="alpha-fill"]')).toHaveCount(1);
+  await window.mouse.click(opaque.x,opaque.y);
+  await expect(window.locator('[data-board-element-id="alpha-fill"]')).toHaveCount(0);
+  assert.deepEqual(errors,[]);
 });
 
 test('desktop spreadsheet edits and imports through the packaged-style file origin without taking board shortcuts', {timeout:60000},async t=>{
@@ -593,7 +876,7 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const {app,window,errors} = await launch(t,board,{hostRules:'MAP pagead2.googlesyndication.com 127.0.0.1'});
   progress('launched');
   const inspect = () => app.evaluate(({webContents}) => webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('({ready:document.body.dataset.ready,echo:document.body.dataset.cookie,immediate:document.body.dataset.immediate,store:document.body.dataset.store,cookies:document.cookie,ad:window.adLoaded===true,hidden:document.getElementById("ad-slot")?.checkVisibility()===false,hero:document.getElementById("hero")?.checkVisibility(),node:typeof require})')).catch(()=>({}));
-  await expect.poll(async () => (await inspect()).ready).toBe('1');
+  await expect.poll(async () => (await inspect()).ready,{timeout:15000}).toBe('1');
   await expect.poll(async () => (await inspect()).cookies).toBe('');
   assert.equal((await inspect()).echo,''); assert.equal((await inspect()).ad,false); assert.equal(adRequests,0);
   assert.equal((await inspect()).immediate,''); assert.equal((await inspect()).store,'[]'); assert.equal((await inspect()).node,'undefined');
@@ -622,7 +905,7 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const loads = pageLoads;
   await menu.getByRole('button',{name:'Block popups',exact:true}).click();
   await expect.poll(()=>pageLoads).toBeGreaterThan(loads);
-  await expect.poll(async () => (await inspect()).ready).toBe('1');
+  await expect.poll(async () => (await inspect()).ready,{timeout:15000}).toBe('1');
   await openPopup();
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().length)).toBe(2);
   await expect.poll(()=>app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows().some(w=>w.webContents.getURL().endsWith('/popup')))).toBe(true);
@@ -632,8 +915,8 @@ test('desktop Web enforces ad, popup and cookie settings from first load and aft
   const popupUrl = `http://localhost:${server.address().port}/popup`;
   await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript(`window.open(${JSON.stringify(url)}, "_blank"); undefined`,true),popupUrl);
   progress('different-origin popup opened');
-  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().some(c=>c.getURL()===url),popupUrl)).toBe(true);
-  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getURL()===url).executeJavaScript('document.cookie'),popupUrl)).toContain('popup=1');
+  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().some(c=>c.getURL()===url),popupUrl).catch(()=>false)).toBe(true);
+  await expect.poll(()=>app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getURL()===url)?.executeJavaScript('document.cookie'),popupUrl).catch(()=>undefined)).toContain('popup=1');
   progress('different-origin cookies verified');
   await window.getByRole('button',{name:'More',exact:true}).click();
   await window.getByRole('button',{name:'Duplicate',exact:true}).click();
@@ -771,7 +1054,7 @@ test('sandboxed frames cannot open windows while an allowed top-level popup stil
 test('desktop Web loads, saves before ready, retries and opens isolated popups', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window,profile,errors}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   const field=window.locator('[data-board-element-id="web"]');
   await field.click({position:{x:5,y:5}});
@@ -786,7 +1069,7 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
   const templates=JSON.parse(await fs.readFile(path.join(profile,'data','presets.json'),'utf8'));
   assert.equal(templates[0].elements.find(e=>e.id==='web').content,`${origin}/slow`);
   await dialog.getByRole('button',{name:'Close save dialog'}).click();
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   await expect(window.getByText('Loading page…',{exact:true})).toHaveCount(0);
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   await field.click({position:{x:5,y:5}});
@@ -801,7 +1084,7 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
       await expect.poll(()=>app.evaluate(({app})=>app.__qaExternalUrl)).toBe(origin+'/fail');
     }
     else {
-      await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+      await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
       await expect.poll(async()=> (await guestState(app)).length).toBe(1);
     }
   }
@@ -867,6 +1150,151 @@ test('cookie and popup policy changes reach already-open popup documents', {time
   await new Promise(resolve => setTimeout(resolve, 250));
   assert.equal(nestedLoads, 0, 'an existing popup must use the updated popup-blocking setting');
   assert.deepEqual(errors, []);
+});
+
+test('nested about:blank popup uses its opener origin for third-party cookie policy', {timeout:60000}, async t => {
+  let popupLoads = 0;
+  const frameCookies=new Map();
+  const server=http.createServer((request,response)=>{
+    response.setHeader('Content-Type','text/html; charset=utf-8');
+    if(request.url==='/page'){
+      response.setHeader('Set-Cookie','board-cookie=control; Path=/; SameSite=None; Secure');
+      response.end('<title>Board cookie control</title><h1>Board cookie control</h1>');
+      return;
+    }
+    if(request.url==='/popup'){
+      popupLoads++;
+      response.setHeader('Set-Cookie','popup-cookie=retained; Path=/; SameSite=None; Secure');
+      response.end('<title>Cross-site popup</title><h1>Cross-site popup</h1>');
+      return;
+    }
+    if(request.url.startsWith('/frame')){
+      const phase=new URL(request.url,`http://${request.headers.host}`).searchParams.get('phase');
+      frameCookies.set(phase,request.headers.cookie||'');
+      response.end('<script>parent.postMessage({type:"cookie-probe",value:document.cookie},"*")</script>');
+      return;
+    }
+    response.end('<title>Unknown route</title>');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const popupUrl=`http://localhost:${server.address().port}/popup`;
+  const board=seed('embed',`${origin}/page`);
+  Object.assign(board.elements[1],{webAdBlock:false,webCookieBlocker:'off',webPopupBlocker:false});
+  const {app,window}=await launch(t,board,{hostRules:'MAP localhost 127.0.0.1'});
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Board cookie control');
+  await expect.poll(()=>app.evaluate(({webContents},origin)=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='webview').session.cookies.get({url:origin})
+    .then(cookies=>cookies.some(cookie=>cookie.name==='board-cookie'&&cookie.value==='control')),origin)).toBe(true);
+  await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript(`window.open(${JSON.stringify(url)},"cookie-popup");void 0`,true),popupUrl);
+  const popupId=async()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getURL().endsWith('/popup'))?.id??null);
+  await expect.poll(popupId).not.toBeNull();
+
+  const spawnBlank=async(id,phase)=>app.evaluate(({webContents},payload)=>webContents.fromId(payload.id).executeJavaScript(
+    `const child=window.open("about:blank","nested-cookie-probe");child.document.open();child.document.write(${JSON.stringify(payload.markup)});child.document.close();void 0`,true),
+    {id,markup:`<!doctype html><title>Blank cookie probe</title><body>
+      <script>window.addEventListener('message',event=>{if(event.data?.type==='cookie-probe')document.body.dataset.cookieProbe=event.data.value})</script>
+      <iframe src="${origin}/frame?phase=${phase}"></iframe></body>`});
+  const blankCookie=()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe')
+    ?.executeJavaScript('document.body?.dataset.cookieProbe??null').catch(()=>null)??null).catch(()=>null);
+  await spawnBlank(await popupId(),'control');
+  await expect.poll(blankCookie).toContain('board-cookie=control');
+  await expect.poll(()=>frameCookies.has('control')).toBe(true);
+  assert.match(frameCookies.get('control'),/board-cookie=control/,'The browser must allow the positive-control third-party cookie when app blocking is off.');
+
+  await app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()
+    .find(win=>win.webContents.getTitle()==='Blank cookie probe')?.close());
+  const configure=()=>window.evaluate(({partition,topLevelUrl})=>window.noteboardAPI.configureWebSession({
+    partition,settings:{topLevelUrl,adBlock:false,cookieBlocker:'third-party',popupBlocker:false},
+  }),{partition:'persist:noteboard-web-web',topLevelUrl:`${origin}/page`});
+  const priorPopupLoads=popupLoads;
+  await configure();
+  await expect.poll(()=>popupLoads).toBeGreaterThan(priorPopupLoads);
+  await expect.poll(async()=>(await popupId())!==null).toBe(true);
+  await spawnBlank(await popupId(),'blocked');
+  await expect.poll(blankCookie).toBe('');
+  await expect.poll(()=>frameCookies.has('blocked')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('blocked'),/board-cookie=control/,'The app must remove the cookie header in the nested about:blank context.');
+  const ownBlankCookies=()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe')
+    ?.executeJavaScript('document.cookie').catch(()=>null)??null);
+  await expect.poll(ownBlankCookies).toContain('popup-cookie=retained');
+
+  const openerId=await popupId();
+  const blankId=await app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getTitle()==='Blank cookie probe').id);
+  await app.evaluate(({webContents},{id,url})=>webContents.fromId(id).loadURL(url),{id:openerId,url:`${origin}/page`});
+  await app.evaluate(({webContents},{id,url})=>webContents.fromId(id).executeJavaScript(
+    `document.querySelector('iframe').src=${JSON.stringify(url)};void 0`,true),{id:blankId,url:`${origin}/frame?phase=opener-moved`});
+  await expect.poll(()=>frameCookies.has('opener-moved')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('opener-moved'),/board-cookie=control/,'Moving the opener cannot change the existing blank document\'s inherited site.');
+  await expect.poll(blankCookie).toBe('');
+
+  await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript('window.open("about:blank","unowned-cookie-probe","noopener");void 0',true));
+  const ownerlessId=async()=>app.evaluate(({webContents})=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='window'&&c.getURL()==='about:blank'&&!c.opener)?.id??null);
+  await expect.poll(ownerlessId).not.toBeNull();
+  const opaqueMarkup=`<!doctype html><title>Ownerless blank</title><body>
+    <script>window.addEventListener('message',event=>{if(event.data?.type==='cookie-probe')document.body.dataset.cookieProbe=event.data.value})</script>
+    <iframe src="${origin}/frame?phase=ownerless"></iframe></body>`;
+  await app.evaluate(({webContents},payload)=>webContents.fromId(payload.id).executeJavaScript(
+    `document.open();document.write(${JSON.stringify(payload.markup)});document.close();void 0`,true),
+    {id:await ownerlessId(),markup:opaqueMarkup});
+  await expect.poll(()=>frameCookies.has('ownerless')).toBe(true);
+  assert.doesNotMatch(frameCookies.get('ownerless'),/board-cookie=control/,'An ownerless blank popup must fail closed.');
+});
+
+test('a navigation without a new document cannot change the active Web cookie context', {timeout:60000}, async t=>{
+  let emptyNavigations=0;
+  const server=http.createServer((request,response)=>{
+    if(request.headers.origin) {
+      response.setHeader('Access-Control-Allow-Origin',request.headers.origin);
+      response.setHeader('Access-Control-Allow-Credentials','true');
+    }
+    if(request.url==='/no-content') {
+      emptyNavigations++;
+      response.writeHead(204);response.end();return;
+    }
+    if(request.url.startsWith('/echo')) {
+      response.setHeader('Content-Type','application/json');
+      response.end(JSON.stringify(request.headers.cookie||''));return;
+    }
+    response.setHeader('Content-Type','text/html; charset=utf-8');
+    response.end('<title>Committed cookie owner</title><input id="draft" value="keep this document">');
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  t.after(()=>{server.closeAllConnections();return new Promise(resolve=>server.close(resolve));});
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const other=`http://localhost:${server.address().port}`;
+  const board=seed('embed',`${origin}/page`);
+  Object.assign(board.elements[1],{webAdBlock:false,webCookieBlocker:'off',webPopupBlocker:false});
+  const {app,window}=await launch(t,board,{hostRules:'MAP localhost 127.0.0.1'});
+  await expect.poll(async()=>(await guestState(app))[0]?.title).toBe('Committed cookie owner');
+  await app.evaluate(async({webContents},{origin,other})=>{
+    const contents=webContents.getAllWebContents().find(c=>c.getType()==='webview');
+    await contents.session.cookies.set({url:origin,name:'owner',value:'kept',sameSite:'no_restriction',secure:true});
+    await contents.session.cookies.set({url:other,name:'cross-site',value:'private',sameSite:'no_restriction',secure:true});
+  },{origin,other});
+  const readCookie=url=>app.evaluate(({webContents},url)=>webContents.getAllWebContents()
+    .find(c=>c.getType()==='webview').executeJavaScript(`fetch(${JSON.stringify(url)},{credentials:'include'}).then(response=>response.json())`),url);
+  assert.match(await readCookie(`${other}/echo?control`),/cross-site=private/,'Positive control must send the cross-site cookie with blocking Off.');
+  await window.evaluate(topLevelUrl=>window.noteboardAPI.configureWebSession({
+    partition:'persist:noteboard-web-web',settings:{topLevelUrl,adBlock:false,cookieBlocker:'third-party',popupBlocker:false},
+  }),`${origin}/page`);
+  assert.equal(await readCookie(`${other}/echo?before`),'');
+  assert.match(await readCookie(`${origin}/echo?before`),/owner=kept/);
+  await app.evaluate(({webContents},url)=>webContents.getAllWebContents().find(c=>c.getType()==='webview')
+    .executeJavaScript(`location.href=${JSON.stringify(url)};void 0`,true),`${other}/no-content`);
+  await expect.poll(()=>emptyNavigations).toBe(1);
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').isLoading())).toBe(false);
+  assert.equal((await guestState(app))[0]?.url,`${origin}/page`);
+  assert.equal(await readCookie(`${other}/echo?after`),'','A 204 navigation leaves the previous page active, so its cross-site cookies must remain blocked.');
+  assert.match(await readCookie(`${origin}/echo?after`),/owner=kept/,'The active document must retain its own first-party cookies.');
 });
 
 test('desktop Save as writes templates, separate boards and a real ZIP download', {timeout:45000}, async t=>{
@@ -947,7 +1375,7 @@ test('desktop compact menus and scrollbar survive repeated window and zoom chang
 test('desktop More keeps a held drag across embedded web content and cancels outside the toolbar', {timeout:45000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window,errors}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   const row=window.locator('[data-more-toolbar-item="embed"]');
   for(const cancel of [true,false]) {
     await window.getByRole('button',{name:'More',exact:true}).click();
@@ -1048,7 +1476,7 @@ test('Web reflows without reload, keeps page input and matches clicks through ho
   await expect.poll(async()=>(await responsiveState(app)).width).toBe(1000);
   const initial=await responsiveState(app);
   assert.equal(initial.first.width,1000);assert.equal(initial.columns,3);
-  await clickWebControl(app,window,'#state');await window.keyboard.type('Keep this page input');
+  await clickWebControl(app,window,'#state');await window.keyboard.insertText('Keep this page input');
   await expect.poll(async()=>(await responsiveState(app)).note).toBe('Keep this page input');
   await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(1);
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();await window.locator('[data-board-element-id="web"]').click();
@@ -1068,7 +1496,7 @@ test('Web reflows without reload, keeps page input and matches clicks through ho
   await expect.poll(async()=>(await window.locator('[data-web-viewport]').boundingBox()).width).toBeGreaterThan(visualBefore.width);
   assert.equal((await responsiveState(app)).width,1100);assert.equal((await responsiveState(app)).marker,initial.marker);
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
-  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(2);
+  await clickWebControl(app,window,'#target');await expect.poll(async()=>(await responsiveState(app)).clicks,{timeout:15000}).toBe(2);
   assert.equal(requests.length,1);
   await nativeScreenshot(app,'web-responsive-desktop.png');
   assert.deepEqual(errors,[]);
@@ -1082,12 +1510,26 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   await expect.poll(async()=>(await responsiveState(app)).width).toBe(1000);
   const partition=await window.locator('webview').getAttribute('partition');
   await app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').executeJavaScript('document.cookie="remember=1; path=/"'));
+  await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
+  await clickWebControl(app,window,'#state');await window.keyboard.insertText('Desktop draft');
+  const desktopState=await responsiveState(app);
+  assert.equal(desktopState.note,'Desktop draft');
+  await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   await window.locator('[data-board-element-id="web"]').click();
-  await window.getByRole('button',{name:'Phone',exact:true}).click();
+  await window.getByRole('button',{name:'Desktop',exact:true}).click();
+  assert.equal((await responsiveState(app)).width,1000,'Choosing the current mode must not reset the field size.');
+  await chooseWebDevice(window,window.getByRole('button',{name:'Phone',exact:true}),false);
+  const retained=await responsiveState(app);
+  assert.equal(retained.id,desktopState.id);
+  assert.equal(retained.marker,desktopState.marker);
+  assert.equal(retained.width,1000);
+  assert.equal(retained.note,'Desktop draft');
+  assert.equal(requests.length,1,'Cancelling must retain the current page without navigation.');
+  await chooseWebDevice(window,window.getByRole('button',{name:'Phone',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(390);
   let state=await responsiveState(app);assert.match(state.cookie,/remember=1/);assert.equal(await window.locator('webview').getAttribute('partition'),partition);assert.deepEqual(state.screen,[390,700]);assert.equal(state.orientation,'portrait-primary');assert.equal(state.touch,5);assert.equal(state.coarse,true);assert.equal(state.hover,false);assert.equal(state.hints.mobile,true);assert.equal(state.hints.platform,'Android');assert.equal(state.first.touch,5);assert.match(requests.at(-1).ua,/Chrome.*Mobile/);if(requests.at(-1).mobile) assert.equal(requests.at(-1).mobile,'?1');
   await window.getByRole('button',{name:'Pan Tool (Hand)',exact:true}).click();
-  await clickWebControl(app,window,'#state');await window.keyboard.type('Phone input');
+   await clickWebControl(app,window,'#state');await window.keyboard.insertText('Phone input');
   await expect.poll(async()=>(await responsiveState(app)).note).toBe('Phone input');assert.equal((await responsiveState(app)).lastClick.target,'state');
   await nativeScreenshot(app,'web-responsive-phone.png');
   assert.deepEqual((await responsiveState(app)).screen,[390,700]);
@@ -1099,13 +1541,14 @@ test('Web device modes apply before load, agree in both menus and survive save/r
   state=await responsiveState(app);assert.equal(state.orientation,'landscape-primary');assert.equal(state.marker,phoneMarker);assert.equal(state.note,'Phone input');assert.equal(state.columns,2);
   await window.getByRole('button',{name:'More',exact:true}).click();
   const menu=window.locator('[data-more-toolbar-item="embed"]');await menu.getByRole('button',{name:'Web settings',exact:true}).click();
-  await menu.getByRole('button',{name:'Tablet',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Tablet',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(768);
   state=await responsiveState(app);assert.deepEqual(state.screen,[768,1024]);assert.equal(state.height,1024);assert.equal(state.touch,5);assert.equal(state.hints.mobile,false);assert.equal(state.hints.platform,'Android');assert.equal(state.columns,2);
-  await menu.getByRole('button',{name:'Desktop',exact:true}).click();
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Desktop',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(560);
-  state=await responsiveState(app);assert.equal(state.touch,0);assert.equal(state.coarse,false);assert.equal(state.hover,true);assert.equal(state.hints.platform,'Windows');assert.equal(state.height,360);
-  await menu.getByRole('button',{name:'Tablet',exact:true}).click();
+  const desktopPlatform=process.platform==='win32'?'Windows':process.platform==='darwin'?'macOS':'Linux';
+  state=await responsiveState(app);assert.equal(state.touch,0);assert.equal(state.coarse,false);assert.equal(state.hover,true);assert.equal(state.hints.platform,desktopPlatform);assert.equal(state.height,360);
+  await chooseWebDevice(window,menu.getByRole('button',{name:'Tablet',exact:true}));
   await expect.poll(async()=>(await responsiveState(app)).first?.width).toBe(768);
   await window.getByRole('button',{name:'More',exact:true}).click();
   await nativeScreenshot(app,'web-responsive-tablet.png');

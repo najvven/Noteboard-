@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld("noteboardAPI", {
   getWebHostZoom: () => webFrame.getZoomFactor(),
   enterWebFullscreen: (guestId) => ipcRenderer.invoke('web-view:fullscreen', guestId),
   sampleBoardColor: (point) => ipcRenderer.invoke('board:sample-color',point),
+  captureBoardRegion: (rect) => ipcRenderer.invoke('board:capture-region',rect),
   setBoardZoomState: (state) => ipcRenderer.invoke('web-zoom:state', state),
   onWebWheel: (callback) => {
     const listener = (_event, value) => callback(value);

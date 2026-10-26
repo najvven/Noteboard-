@@ -11,8 +11,8 @@ white sidebar. It crops the logo to the installer panel rather than stretching
 it. The application ID, installation identity, and per-user board-data
 location are preserved.
 
-The final installer is `C:\Users\Pawel\Documents\Codex\Noteboard+\Installer\Noteboard+ Setup.exe` (139,175,235 bytes; SHA-256
-`8B98076C2847505168B7CADEC55F4255203722AAC6F739583A7B18E91617BA5C`). Its
+The final installer is `C:\Users\Pawel\Documents\Codex\Noteboard+\Installer\Noteboard+ Setup.exe` (139,220,841 bytes; SHA-256
+`6D931CA6FFF6BE1FEA0097BF1393A4DF4EE1D3C6495F2CBBA5B9F9392CF5AA74`). Its
 packaged `app.asar` contains the application but no user boards or settings.
 The prior installer and previous clean-source folder are retained in
 `Source/.tmp/task30/`.
@@ -52,6 +52,10 @@ dependencies, build output, local state and board data excluded.
 - Production build and Windows installer packaging: passed. The installer
   version label is `1.0`; package metadata retains the valid semver `1.0.0`,
   and Windows' numeric product-version resource uses `1.0.0.0`.
+- Packaged startup: launched the built Windows app with a fresh temporary
+  profile and confirmed the `My Workspace` window rendered. The Electron ESM
+  entrypoint now registers readiness callbacks without blocking on top-level
+  `await app.whenReady()`.
 - Coverage remains below the unchanged 80% gates: 62.49% lines, 77.48%
   branches and 55.66% functions. The coverage command exits non-zero; the gate
   remains an open validation limitation and was not lowered.

@@ -119,3 +119,61 @@ test('More creates a spreadsheet and file import adds independent sheets without
   data=await snapshot();expect(new Set(data.workbook.sheetOrder.map((id:string)=>data.workbook.sheets[id].name)).size).toBe(3);
   await dialog.getByRole('button',{name:'Done',exact:true}).click();await expect(object).toHaveCount(1);expect(errors).toEqual([]);
 });
+
+test('canceled beforeunload keeps the spreadsheet API alive and a later iframe reload restores the latest cell draft',async({page,request})=>{
+  const id='spreadsheet-canceled-reload';
+  await request.post('/api/pages',{data:[{
+    id,title:'Canceled spreadsheet reload',width:1100,height:700,boardX:64,boardY:0,
+    workspaceWidth:1500,workspaceHeight:1000,viewportCenterX:640,viewportCenterY:328,
+    zoom:1,updatedAt:Date.now(),
+    elements:[{id:'sheet',type:'table',name:'Draft',position:{x:100,y:100},size:{width:720,height:420},content:'',zIndex:1}],
+    editorSettings:{activeTool:'select',allowEditing:true,keepToolActive:true},
+  }]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Canceled spreadsheet reload',exact:true}).click();
+  await page.locator('[data-board-element-id="sheet"]').click();
+  await page.getByRole('button',{name:'Edit spreadsheet',exact:true}).click();
+  const dialog=page.getByRole('dialog',{name:'Spreadsheet editor'});
+  await expect(dialog).toBeVisible();await expect(dialog.getByRole('status')).toHaveCount(0,{timeout:30000});
+  const iframe=page.locator('iframe[title="Spreadsheet cells"]');
+  const read=()=>iframe.evaluate(frame=>JSON.parse(((frame as HTMLIFrameElement).contentWindow as any).noteboardSheet.snapshot()));
+  const readCell=(row:number,column:number)=>read().then(document=>document.workbook.sheets['sheet-1'].cellData?.[row]?.[column]?.v);
+  const documentId=()=>iframe.evaluate(frame=>((frame as HTMLIFrameElement).contentWindow as any).noteboardSheet.documentId).catch(()=>null);
+  const ready=()=>iframe.evaluate(frame=>((frame as HTMLIFrameElement).contentWindow as any).noteboardSheet?.isReady()===true).catch(()=>false);
+  const grid=page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
+  await grid.click({position:{x:95,y:32}});await page.keyboard.type('first draft',{delay:15});
+  await expect.poll(()=>readCell(0,0)).toBe('first draft');
+  const initialDocumentId=await documentId();expect(initialDocumentId).toBeTruthy();
+
+  const cancelBeforeUnload=async()=>{
+    const canceled=await iframe.evaluate(frame=>{
+      const target=(frame as HTMLIFrameElement).contentWindow!;
+      target.addEventListener('beforeunload',event=>event.preventDefault(),{once:true});
+      return !target.dispatchEvent(new Event('beforeunload',{cancelable:true}));
+    });
+    expect(canceled).toBe(true);
+  };
+  await cancelBeforeUnload();
+  expect(await documentId()).toBe(initialDocumentId);
+  await expect.poll(ready).toBe(true);
+  await expect.poll(()=>readCell(0,0)).toBe('first draft');
+
+  await grid.click({position:{x:95,y:56}});await page.keyboard.type('latest draft',{delay:15});
+  await expect.poll(()=>readCell(1,0)).toBe('latest draft');
+  await cancelBeforeUnload();
+  expect(await documentId()).toBe(initialDocumentId);
+  await expect.poll(ready).toBe(true);
+  await expect.poll(()=>readCell(1,0)).toBe('latest draft');
+
+  await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow?.location.reload()).catch(()=>undefined);
+  await expect.poll(documentId).not.toBe(initialDocumentId);
+  await expect.poll(ready,{timeout:15000}).toBe(true);
+  await expect.poll(()=>readCell(0,0)).toBe('first draft');
+  await expect.poll(()=>readCell(1,0)).toBe('latest draft');
+  await page.getByRole('button',{name:'Done',exact:true}).click();
+  const storedLatestCell=async()=>{
+    const pages=await (await request.get('/api/pages')).json();
+    const content=pages.find((value:any)=>value.id===id)?.elements.find((element:any)=>element.id==='sheet')?.content;
+    return content?JSON.parse(content).workbook.sheets['sheet-1'].cellData?.[1]?.[0]?.v:null;
+  };
+  await expect.poll(storedLatestCell).toBe('latest draft');
+});

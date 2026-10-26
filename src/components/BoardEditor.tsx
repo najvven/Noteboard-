@@ -59,7 +59,7 @@ import {
   freezeTextLineDefaultsOnEdit,
   resolveTextLineSettings,
 } from "../features/board/text-lines";
-import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary } from "../features/board/board-surfaces";
+import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner, reconcilePixelFillBoardOwners } from "../features/board/board-surfaces";
 import { elementPolygon, getPlacementSection, getSectionClipPath, isPointInVisibleElementArea } from "../features/board/section-clipping";
 import { getElementPermissions } from "../features/board/interaction-permissions";
 import { isFlippableElementType } from "../features/board/flip";
@@ -120,6 +120,9 @@ import {
   getLinePlacementRect,
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
+import { applyPixelFillBarriers, fillConnectedPixels } from "../features/board/pixel-fill";
+import { isPixelFillOpaqueAtPoint, rememberPixelFillAlphaMask } from "../features/board/pixel-fill-hit-test";
+import { captureBoardRegionFromDOM } from "../features/board/browser-region-capture";
 import {
   resolveObjectPlacementProps,
   type PendingPropsBaseline,
@@ -697,39 +700,6 @@ const isElementDescendantOf = (
   return false;
 };
 
-const getElementStackPath = (
-  element: BoardElement,
-  elements: BoardElement[],
-) => {
-  const ancestors: number[] = [];
-  const visited = new Set<string>();
-  let currentParentId = element.parentId;
-  while (currentParentId && !visited.has(currentParentId)) {
-    visited.add(currentParentId);
-    const parent = elements.find((el) => el.id === currentParentId);
-    if (!parent) break;
-    ancestors.unshift(parent.zIndex);
-    currentParentId = parent.parentId;
-  }
-  return [...ancestors, element.zIndex];
-};
-
-const compareElementStack = (
-  a: BoardElement,
-  b: BoardElement,
-  elements: BoardElement[],
-) => {
-  const aPath = getElementStackPath(a, elements);
-  const bPath = getElementStackPath(b, elements);
-  const length = Math.max(aPath.length, bPath.length);
-  for (let i = 0; i < length; i++) {
-    const aValue = aPath[i] ?? aPath[i - 1] ?? 0;
-    const bValue = bPath[i] ?? bPath[i - 1] ?? 0;
-    if (aValue !== bValue) return aValue - bValue;
-  }
-  return a.id.localeCompare(b.id);
-};
-
 function ColorPicker({
   value,
   onChange,
@@ -1166,16 +1136,23 @@ export default function BoardEditor({
     newElements: BoardElement[],
     newSectionSheets: SectionSheet[] = sectionSheetsRef.current,
   ) => {
+    const previousBoardGeometry = documentHistoryRef.current.entries[documentHistoryRef.current.index]?.boardGeometry;
+    const normalizedElements = reconcilePixelFillBoardOwners(
+      newElements,
+      pageDimensions,
+      elementsRef.current,
+      previousBoardGeometry?.size ?? pageDimensions,
+    );
     const nextHistory = pushBoardDocumentHistory(
       documentHistoryRef.current,
-      { elements: newElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
+      { elements: normalizedElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
       50,
     );
     documentHistoryRef.current = nextHistory;
     setDocumentHistory(nextHistory);
-    elementsRef.current = newElements;
+    elementsRef.current = normalizedElements;
     sectionSheetsRef.current = newSectionSheets;
-    setElements(newElements);
+    setElements(normalizedElements);
     setSectionSheets(newSectionSheets);
   };
 
@@ -1253,6 +1230,7 @@ export default function BoardEditor({
   };
   const setSelectedId=(id:string|null,syncWorkbooks=true)=>setSelectedIds(id?[id]:[],syncWorkbooks);
   const groupMoveRef=useRef<{pointerId:number;x:number;y:number;elements:BoardElement[];ids:Set<string>;changed:boolean;preview:'box'|'realistic';latest?:BoardElement[]}|null>(null);
+  const pendingPixelFillClickRef=useRef<{id:string;pointerId:number}|null>(null);
   const selectionOutlineRef=useRef<HTMLDivElement>(null);
   const [customColors, setCustomColors] = useState<Record<string, string[]>>({
     bg: initialEditorSettings.customColors?.bg ?? ["", "", "", ""],
@@ -1556,6 +1534,21 @@ export default function BoardEditor({
   const [fillToolColor, setFillToolColor] = useState<string>(
     initialEditorSettings.fillToolColor ?? '#000000',
   );
+  const [fillNotice, setFillNotice] = useState("");
+  const fillNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const fillInProgressRef = useRef(false);
+  const fillPointerReleasedRef = useRef(false);
+  const showFillNotice = (message: string) => {
+    setFillNotice(message);
+    if (fillNoticeTimerRef.current) window.clearTimeout(fillNoticeTimerRef.current);
+    fillNoticeTimerRef.current = window.setTimeout(() => {
+      fillNoticeTimerRef.current = null;
+      setFillNotice("");
+    }, 3200);
+  };
+  useEffect(() => () => {
+    if (fillNoticeTimerRef.current) window.clearTimeout(fillNoticeTimerRef.current);
+  }, []);
   const [eraserMode, setEraserMode] = useState<'element' | 'partial'>(
     initialEditorSettings.eraserMode ?? 'element',
   );
@@ -1778,6 +1771,12 @@ export default function BoardEditor({
   const [respectLayerVisibility, setRespectLayerVisibility] = useState(true);
   const [mainBoardHidden] = useState(false);
   const [currentLayerView, setCurrentLayerView] = useState<string | null>(null);
+  const currentLayerViewRef = useRef(currentLayerView);
+  currentLayerViewRef.current = currentLayerView;
+  const activeToolRef = useRef(activeTool);
+  activeToolRef.current = activeTool;
+  const fillToolColorRef = useRef(fillToolColor);
+  fillToolColorRef.current = fillToolColor;
 
   const [dragOverLayerId, setDragOverLayerId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
@@ -1980,44 +1979,6 @@ export default function BoardEditor({
   const snap = (v: number) =>
     snapToGrid ? Math.round(v / gridSize) * gridSize : v;
 
-  const elementContainsPoint = (
-    element: BoardElement,
-    point: { x: number; y: number },
-  ) => {
-    const width = element.size?.width || 100;
-    const height = element.size?.height || 40;
-    const rotation = element.rotation || 0;
-    const centerX = element.position.x + width / 2;
-    const centerY = element.position.y + height / 2;
-    const rad = (-rotation * Math.PI) / 180;
-    const dx = point.x - centerX;
-    const dy = point.y - centerY;
-    const localX = width / 2 + dx * Math.cos(rad) - dy * Math.sin(rad);
-    const localY = height / 2 + dx * Math.sin(rad) + dy * Math.cos(rad);
-
-    if (element.type === "line" || element.type === "arrow") {
-      const stroke = Math.max(8, element.borderWidth || 4);
-      return localX >= 0 && localX <= width && Math.abs(localY - height / 2) <= stroke;
-    }
-
-    if (element.type === "draw" && element.points && element.points.length > 2) {
-      let inside = false;
-      for (let i = 0, j = element.points.length - 1; i < element.points.length; j = i++) {
-        const xi = element.points[i].x;
-        const yi = element.points[i].y;
-        const xj = element.points[j].x;
-        const yj = element.points[j].y;
-        const intersects =
-          yi > localY !== yj > localY &&
-          localX < ((xj - xi) * (localY - yi)) / (yj - yi) + xi;
-        if (intersects) inside = !inside;
-      }
-      return inside;
-    }
-
-    return localX >= 0 && localX <= width && localY >= 0 && localY <= height;
-  };
-
   const mainSurface = createBoardSurface('main-board', { x: 0, y: 0 }, pageDimensions, boardColor, -9999);
 
   const isPointInsideBounds = (
@@ -2037,6 +1998,18 @@ export default function BoardEditor({
     return boardSurfaceBounds(board);
   };
 
+  const isElementHitAtPoint = (element: BoardElement, point: { x: number; y: number }) => {
+    const sourceElements = elementsRef.current;
+    if (!isPointInVisibleElementArea(
+      element,
+      sourceElements,
+      point,
+      elementBoardBoundary(element, sourceElements, pageDimensions, elementHierarchy),
+      elementHierarchy,
+    )) return false;
+    return !element.isPixelFill || isPixelFillOpaqueAtPoint(element, point) !== false;
+  };
+
   const clampPointToBounds = (
     point: { x: number; y: number },
     bounds: { minX: number; minY: number; maxX: number; maxY: number },
@@ -2045,38 +2018,318 @@ export default function BoardEditor({
     y: Math.min(Math.max(point.y, bounds.minY), bounds.maxY),
   });
 
-  const applyFillAtPoint = (point: { x: number; y: number }) => {
-    const target = elementsRef.current
-      .filter(
-        (el) =>
-          el.type !== "layer" &&
-          el.type !== "board" &&
-          !el.isEraser &&
-          !isMergedGroupMember(el,elementHierarchy) &&
-          elementHierarchy.isVisible(el.id, respectLayerVisibility) &&
-          !elementHierarchy.isLocked(el.id) &&
-          (!currentLayerView ||
-            el.parentId === currentLayerView ||
-            elementHierarchy.isDescendantOf(el.id, currentLayerView)),
-      )
-      .sort((a, b) => compareElementStack(b, a, elementsRef.current))
-      .find((el) => elementContainsPoint(el, point));
+  const fillSurfaceBackground = (surface: BoardElement, color: string) => {
+    if (surface.id === mainSurface.id) {
+      if (presentationRef.current.boardColor === color) return;
+      presentationRef.current = { ...presentationRef.current, boardColor: color };
+      setBoardColor(color);
+      pushDocument(elementsRef.current, sectionSheetsRef.current);
+    } else if (surface.color !== color) {
+      updateElement(surface.id, { color });
+    }
+  };
 
-    if (!target) {
-      const boardTarget = getBoardElementAtPoint(point);
-      if (boardTarget) {
-        updateElement(boardTarget.id, { color: fillToolColor });
-      } else {
-        setBoardColor(fillToolColor);
+  const hasVisibleContentOnSurface = (sourceElements: BoardElement[], surfaceId: string) =>
+    sourceElements.some((element) => {
+      if (element.type === "board" || element.type === "layer" || element.type === "group" ||
+          element.isEraser || element.opacity === 0 ||
+          !elementHierarchy.isVisible(element.id, respectLayerVisibility)) return false;
+      const owner = resolveElementBoardOwner(element, sourceElements, pageDimensions, elementHierarchy);
+      return owner?.id === surfaceId;
+    });
+
+  const prepareFillCapture = (
+    clientPoint: { x: number; y: number },
+    surfaceBounds: ReturnType<typeof getInteractionBoundsAtPoint>,
+    state: {
+      sourceElements: BoardElement[];
+      layerAtStart: string | undefined;
+      fillColorAtStart: string;
+      targetSurface: BoardElement;
+      boardColorAtStart: string;
+    },
+  ) => {
+    const captureRoot = boardSurfaceRef.current;
+    const viewport = containerRef.current;
+    const boardRect = captureRoot?.getBoundingClientRect();
+    const viewportRect = viewport?.getBoundingClientRect();
+    const nativeCapture = window.noteboardAPI?.captureBoardRegion;
+    const boardScale = zoomRef.current;
+    if (!boardRect || !viewportRect || !surfaceBounds || !Number.isFinite(boardScale) || boardScale <= 0)
+      return null;
+
+    const surfaceRect = {
+      left: boardRect.left + surfaceBounds.minX * boardScale,
+      top: boardRect.top + surfaceBounds.minY * boardScale,
+      right: boardRect.left + surfaceBounds.maxX * boardScale,
+      bottom: boardRect.top + surfaceBounds.maxY * boardScale,
+    };
+    const requestedRect = {
+      left: Math.max(viewportRect.left, surfaceRect.left),
+      top: Math.max(viewportRect.top, surfaceRect.top),
+      right: Math.min(viewportRect.right, surfaceRect.right),
+      bottom: Math.min(viewportRect.bottom, surfaceRect.bottom),
+    };
+    const pointerIsOutsideRegion = clientPoint.x < requestedRect.left || clientPoint.x >= requestedRect.right ||
+      clientPoint.y < requestedRect.top || clientPoint.y >= requestedRect.bottom;
+    if (requestedRect.right <= requestedRect.left || requestedRect.bottom <= requestedRect.top || pointerIsOutsideRegion)
+      return null;
+
+    if (!nativeCapture) {
+      const pointTarget = document.elementFromPoint(clientPoint.x, clientPoint.y);
+      if (pointTarget instanceof HTMLElement && pointTarget.closest('webview, iframe')) {
+        showFillNotice("The browser preview cannot capture pixels inside embedded Web content.");
+        return null;
       }
-      return;
     }
 
-    if(target.type==='group')return;
-    if (target.type === "line" || target.type === "arrow" || target.type === "draw") {
-      updateElement(target.id, { borderColor: fillToolColor });
-    } else {
-      updateElement(target.id, { color: fillToolColor });
+    const wholeSurfaceVisible = requestedRect.left <= surfaceRect.left + 1 &&
+      requestedRect.top <= surfaceRect.top + 1 &&
+      requestedRect.right >= surfaceRect.right - 1 &&
+      requestedRect.bottom >= surfaceRect.bottom - 1;
+    return {
+      ...state,
+      targetBoardAtStart: state.targetSurface.id,
+      captureRoot: captureRoot!,
+      viewport: viewport!,
+      boardRect,
+      boardScale,
+      nativeCapture,
+      requestedRect,
+      wholeSurfaceVisible,
+      scrollAtStart: { left: viewport!.scrollLeft, top: viewport!.scrollTop },
+      rectAtStart: {
+        board: { x: boardRect.x, y: boardRect.y, width: boardRect.width, height: boardRect.height },
+        viewport: { x: viewportRect.x, y: viewportRect.y, width: viewportRect.width, height: viewportRect.height },
+      },
+    };
+  };
+
+  type FillCaptureResult = {
+    dataUrl: string;
+    rect: { x: number; y: number; width: number; height: number };
+    excludedRects?: Array<{ x: number; y: number; width: number; height: number }>;
+  };
+
+  const captureVisibleBoardRegion = async (state: NonNullable<ReturnType<typeof prepareFillCapture>>): Promise<FillCaptureResult> => {
+    const captureStyle = document.createElement("style");
+    captureStyle.textContent = `
+      html[data-noteboard-fill-capture="true"] [data-selection-tool],
+      html[data-noteboard-fill-capture="true"] [data-selection-outline],
+      html[data-noteboard-fill-capture="true"] [data-multi-selection],
+      html[data-noteboard-fill-capture="true"] [data-selection-region],
+      html[data-noteboard-fill-capture="true"] [data-selection-area-toolbar],
+      html[data-noteboard-fill-capture="true"] [data-board-placement-preview],
+      html[data-noteboard-fill-capture="true"] [data-new-board-preview],
+      html[data-noteboard-fill-capture="true"] [data-main-board-resize],
+      html[data-noteboard-fill-capture="true"] [data-element-preview],
+      html[data-noteboard-fill-capture="true"] [data-resize-handle],
+      html[data-noteboard-fill-capture="true"] [data-fill-notice],
+      html[data-noteboard-fill-capture="true"] [data-bottom-toolbar],
+      html[data-noteboard-fill-capture="true"] [data-smart-guides] { visibility: hidden !important; }
+    `;
+    const documentRoot = document.documentElement;
+    const previousCaptureFlag = documentRoot.dataset.noteboardFillCapture;
+    documentRoot.dataset.noteboardFillCapture = "true";
+    document.head.appendChild(captureStyle);
+    const backgroundTargets = Array.from(document.querySelectorAll<HTMLElement>(
+      '#workspace-bg, [data-board-surface="true"], #main-board',
+    ));
+    const originalBackgrounds = backgroundTargets.map(node => node.style.backgroundImage);
+    backgroundTargets.forEach(node => { node.style.backgroundImage = "none"; });
+    try {
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      await new Promise<void>(resolve => window.setTimeout(resolve, 50));
+      const rect = state.requestedRect;
+      return state.nativeCapture
+        ? await state.nativeCapture({
+            x: rect.left,
+            y: rect.top,
+            width: rect.right - rect.left,
+            height: rect.bottom - rect.top,
+          })
+        : await captureBoardRegionFromDOM(state.captureRoot, rect, state.boardScale);
+    } finally {
+      backgroundTargets.forEach((node, index) => { node.style.backgroundImage = originalBackgrounds[index]; });
+      captureStyle.remove();
+      if (previousCaptureFlag === undefined) delete documentRoot.dataset.noteboardFillCapture;
+      else documentRoot.dataset.noteboardFillCapture = previousCaptureFlag;
+    }
+  };
+
+  const fillCaptureViewIsCurrent = (
+    state: NonNullable<ReturnType<typeof prepareFillCapture>>,
+    point: { x: number; y: number },
+  ) => {
+    const latestBoardRect = state.captureRoot.getBoundingClientRect();
+    const latestViewportRect = state.viewport.getBoundingClientRect();
+    const sameRect = (a: DOMRect, b: { x: number; y: number; width: number; height: number }) =>
+      a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    const activeBoardNow = (getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]))?.id;
+    const viewChanged = boardSurfaceRef.current !== state.captureRoot ||
+      containerRef.current !== state.viewport || zoomRef.current !== state.boardScale || activeToolRef.current !== "fill" ||
+      currentLayerViewRef.current !== state.layerAtStart || fillToolColorRef.current !== state.fillColorAtStart ||
+      elementsRef.current !== state.sourceElements || presentationRef.current.boardColor !== state.boardColorAtStart ||
+      state.viewport.scrollLeft !== state.scrollAtStart.left || state.viewport.scrollTop !== state.scrollAtStart.top ||
+      !sameRect(latestBoardRect, state.rectAtStart.board) || !sameRect(latestViewportRect, state.rectAtStart.viewport) ||
+      activeBoardNow !== state.targetBoardAtStart;
+    if (viewChanged) showFillNotice("The board view changed while Fill was preparing. Try again.");
+    return !viewChanged;
+  };
+
+  const rasterizeVisibleFill = async (
+    state: NonNullable<ReturnType<typeof prepareFillCapture>>,
+    capture: Awaited<ReturnType<typeof captureVisibleBoardRegion>>,
+    point: { x: number; y: number },
+    clientPoint: { x: number; y: number },
+  ) => {
+    const sourceImage = new Image();
+    sourceImage.src = capture.dataUrl;
+    await sourceImage.decode();
+    if (!fillCaptureViewIsCurrent(state, point)) return null;
+    const pixelWidth = sourceImage.naturalWidth;
+    const pixelHeight = sourceImage.naturalHeight;
+    if (!pixelWidth || !pixelHeight || pixelWidth * pixelHeight > 10_000_000) {
+      showFillNotice("The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size.");
+      return null;
+    }
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = pixelWidth;
+    sourceCanvas.height = pixelHeight;
+    const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
+    if (!sourceContext) {
+      showFillNotice("Could not read the visible board pixels.");
+      return null;
+    }
+    sourceContext.drawImage(sourceImage, 0, 0);
+    const sourcePixels = sourceContext.getImageData(0, 0, pixelWidth, pixelHeight);
+    const seedX = Math.floor((clientPoint.x - capture.rect.x) * pixelWidth / capture.rect.width);
+    const seedY = Math.floor((clientPoint.y - capture.rect.y) * pixelHeight / capture.rect.height);
+    if (capture.excludedRects?.length && !applyPixelFillBarriers(
+      sourcePixels.data,
+      pixelWidth,
+      pixelHeight,
+      capture.excludedRects,
+      seedX,
+      seedY,
+    )) {
+      showFillNotice("The fill point is inside content that the browser preview cannot capture.");
+      return null;
+    }
+    const result = fillConnectedPixels(sourcePixels.data, pixelWidth, pixelHeight, seedX, seedY, state.fillColorAtStart);
+    if (!result) return null;
+    if (result.touchesEdge && !state.wholeSurfaceVisible) {
+      showFillNotice("This color continues beyond the visible area. Zoom out to show the whole region before filling.");
+      return null;
+    }
+    const fillCanvas = document.createElement("canvas");
+    fillCanvas.width = result.bounds.width;
+    fillCanvas.height = result.bounds.height;
+    const fillContext = fillCanvas.getContext("2d");
+    if (!fillContext) {
+      showFillNotice("Could not create the filled region.");
+      return null;
+    }
+    fillContext.putImageData(sourcePixels, -result.bounds.x, -result.bounds.y);
+    const fillContent = fillCanvas.toDataURL("image/png");
+    rememberPixelFillAlphaMask(
+      fillContent,
+      fillContext.getImageData(0, 0, result.bounds.width, result.bounds.height).data,
+      result.bounds.width,
+      result.bounds.height,
+    );
+    const cssPerPixelX = capture.rect.width / pixelWidth;
+    const cssPerPixelY = capture.rect.height / pixelHeight;
+    const imageLeft = capture.rect.x + result.bounds.x * cssPerPixelX;
+    const imageTop = capture.rect.y + result.bounds.y * cssPerPixelY;
+    return {
+      fillContent,
+      position: {
+        x: (imageLeft - state.boardRect.left) / state.boardScale,
+        y: (imageTop - state.boardRect.top) / state.boardScale,
+      },
+      size: {
+        width: Math.max(0.1, result.bounds.width * cssPerPixelX / state.boardScale),
+        height: Math.max(0.1, result.bounds.height * cssPerPixelY / state.boardScale),
+      },
+    };
+  };
+
+  const commitVisibleFill = (
+    point: { x: number; y: number },
+    state: NonNullable<ReturnType<typeof prepareFillCapture>>,
+    raster: Awaited<ReturnType<typeof rasterizeVisibleFill>>,
+  ) => {
+    if (!raster) return;
+    const latestElements = elementsRef.current;
+    const filledElement: BoardElement = {
+      id: generateId(),
+      type: "image",
+      name: "Filled region",
+      content: raster.fillContent,
+      color: "transparent",
+      borderColor: "transparent",
+      borderWidth: 0,
+      keepRatio: false,
+      isPixelFill: true,
+      pixelFillBoardId: state.targetBoardAtStart,
+      position: raster.position,
+      size: raster.size,
+      zIndex: latestElements.reduce((highest, element) => Math.max(highest, element.zIndex), 0) + 1,
+      parentId: creationParentId(point) ??
+        (state.targetBoardAtStart !== mainSurface.id ? state.targetBoardAtStart : undefined),
+    };
+    pushElements([...latestElements, filledElement]);
+  };
+
+  const applyFillAtPoint = async (
+    point: { x: number; y: number },
+    clientPoint: { x: number; y: number },
+  ) => {
+    if (fillInProgressRef.current) return;
+    fillInProgressRef.current = true;
+    fillPointerReleasedRef.current = false;
+    try {
+      if (currentLayerView && elementHierarchy.isLocked(currentLayerView)) {
+        showFillNotice("The current layer is locked.");
+        return;
+      }
+      const sourceElements = elementsRef.current;
+      const layerAtStart = currentLayerView;
+      const fillColorAtStart = fillToolColor;
+      const targetSurface = getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]);
+      if (!targetSurface) return;
+      if (targetSurface.id !== mainSurface.id && elementHierarchy.isLocked(targetSurface.id)) {
+        showFillNotice("The selected board is locked.");
+        return;
+      }
+      const surfaceBounds = getInteractionBoundsAtPoint(point);
+      if (!surfaceBounds) return;
+      if (!hasVisibleContentOnSurface(sourceElements, targetSurface.id)) {
+        fillSurfaceBackground(targetSurface, fillColorAtStart);
+        return;
+      }
+      const state = prepareFillCapture(clientPoint, surfaceBounds, {
+        sourceElements,
+        layerAtStart,
+        fillColorAtStart,
+        targetSurface,
+        boardColorAtStart: boardColor,
+      });
+      if (!state) return;
+      const capture = await captureVisibleBoardRegion(state);
+      const raster = await rasterizeVisibleFill(state, capture, point, clientPoint);
+      commitVisibleFill(point, state, raster);
+    } catch (error) {
+      showFillNotice(error instanceof Error && /too large to fill/i.test(error.message)
+        ? "The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size."
+        : "Could not fill this visible region. Reduce the captured area and try again.");
+    } finally {
+      fillInProgressRef.current = false;
+      if (fillPointerReleasedRef.current) {
+        fillPointerReleasedRef.current = false;
+        if (activeToolRef.current === "fill") finishToolUse("fill");
+      }
     }
   };
 
@@ -4064,7 +4317,9 @@ export default function BoardEditor({
                 key={mode}
                 type="button"
                 aria-pressed={settings.deviceMode === mode}
-                onClick={() => updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } })}
+                onClick={() => {
+                  if (mode !== settings.deviceMode) updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } });
+                }}
                 className={cn(
                   "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors",
                   settings.deviceMode === mode
@@ -5204,6 +5459,13 @@ export default function BoardEditor({
     updates: Partial<BoardElement>,
     skipHistory = false,
   ) => {
+    const existing = elementsRef.current.find(element => element.id === id);
+    if (existing?.type === 'embed' && updates.webDeviceMode !== undefined &&
+        normalizeWebDeviceMode(existing.webDeviceMode) !== normalizeWebDeviceMode(updates.webDeviceMode) &&
+        window.noteboardAPI?.configureWebViewport && normalizeWebUrl(existing.content) &&
+        normalizeWebUrl(existing.content) !== 'about:blank' &&
+        !window.confirm('Changing the device mode reloads this page. Unsaved input on the page may be lost. Continue?')) return;
+
     const applyElementUpdate = (source: BoardElement[]) => {
       const resizing=secondaryResizeRef.current;
       const previous = source.find((element) => element.id === id);
@@ -5220,7 +5482,8 @@ export default function BoardEditor({
     };
 
     if (skipHistory) {
-      const next = applyElementUpdate(elementsRef.current);
+      const previous = elementsRef.current;
+      const next = reconcilePixelFillBoardOwners(applyElementUpdate(previous), pageDimensions, previous);
       elementsRef.current = next;
       setElements(next);
     } else {
@@ -5823,6 +6086,26 @@ export default function BoardEditor({
     setLayerPreviewOrder(next);
   };
 
+  const getLayerDropPlacement = (
+    event: React.DragEvent<HTMLElement>,
+    target: BoardElement,
+  ): "before" | "after" | null => {
+    if (target.type === "board") return "before";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointerRatio = rect.height > 0
+      ? (event.clientY - rect.top) / rect.height
+      : 0.5;
+    if (pointerRatio < 0.44) return "before";
+    if (pointerRatio > 0.56) return "after";
+    return null;
+  };
+
+  const clearLayerReorderTimer = () => {
+    if (layerReorderTimerRef.current === null) return;
+    window.clearTimeout(layerReorderTimerRef.current);
+    layerReorderTimerRef.current = null;
+  };
+
   const previewLayerOrderFromPointer = (
     event: React.DragEvent<HTMLElement>,
     target: BoardElement,
@@ -5831,26 +6114,10 @@ export default function BoardEditor({
     const draggedId = draggedLayerIdRef.current;
     if (!draggedId || draggedId === target.id) return;
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerRatio = rect.height > 0
-      ? (event.clientY - rect.top) / rect.height
-      : 0.5;
-    const placement = target.type === "board"
-      ? "before"
-      : pointerRatio < 0.44
-        ? "before"
-        : pointerRatio > 0.56
-          ? "after"
-          : null;
+    const placement = getLayerDropPlacement(event, target);
 
     if (!placement) {
-      if (layerReorderTimerRef.current !== null) {
-        window.clearTimeout(layerReorderTimerRef.current);
-        layerReorderTimerRef.current = null;
-      }
-      layerReorderPendingRef.current = null;
-      setDragOverLayerId(null);
-      setLayerDropTarget(null);
+      cancelLayerReorderPending();
       return;
     }
 
@@ -5860,10 +6127,7 @@ export default function BoardEditor({
     const pending = layerReorderPendingRef.current;
 
     if (force) {
-      if (layerReorderTimerRef.current !== null) {
-        window.clearTimeout(layerReorderTimerRef.current);
-        layerReorderTimerRef.current = null;
-      }
+      clearLayerReorderTimer();
       previewLayerOrder(target.id, placement);
       layerReorderPendingRef.current = null;
       return;
@@ -5871,9 +6135,7 @@ export default function BoardEditor({
 
     if (pending?.key === key) return;
 
-    if (layerReorderTimerRef.current !== null) {
-      window.clearTimeout(layerReorderTimerRef.current);
-    }
+    clearLayerReorderTimer();
     layerReorderPendingRef.current = { key, since: performance.now() };
     layerReorderTimerRef.current = window.setTimeout(() => {
       if (layerReorderPendingRef.current?.key !== key) return;
@@ -5884,10 +6146,7 @@ export default function BoardEditor({
   };
 
   const cancelLayerReorderPending = () => {
-    if (layerReorderTimerRef.current !== null) {
-      window.clearTimeout(layerReorderTimerRef.current);
-      layerReorderTimerRef.current = null;
-    }
+    clearLayerReorderTimer();
     layerReorderPendingRef.current = null;
     setDragOverLayerId(null);
     setLayerDropTarget(null);
@@ -6241,39 +6500,96 @@ export default function BoardEditor({
     setSelectedId(id);
   };
 
-  const handlePointerDown = (e: React.PointerEvent) => {
-    if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
-    if (
-      activePointerIdRef.current !== null &&
-      activePointerIdRef.current !== e.pointerId
-    ) {
-      return;
+  const findTopPixelFillAtPoint = (point: { x: number; y: number }) =>
+    elementsRef.current
+      .filter(element => element.isPixelFill &&
+        elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
+        !elementHierarchy.isLocked(element.id) && isElementHitAtPoint(element, point))
+      .sort((left, right) => elementHierarchy.compare(right, left))[0];
+
+  const beginPixelFillSelectionGesture = (event: React.PointerEvent) => {
+    if (activeTool !== "select" || event.button !== 0) return false;
+    const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
+    const target = event.target as HTMLElement;
+    const targetId = target.closest<HTMLElement>("[data-board-element-id]")?.dataset.boardElementId;
+    const targetElement = targetId ? elementHierarchy.byId.get(targetId) : undefined;
+    if (!surfaceRect || !targetElement) return false;
+
+    const point = {
+      x: (event.clientX - surfaceRect.left) / zoomRef.current,
+      y: (event.clientY - surfaceRect.top) / zoomRef.current,
+    };
+    const fill = findTopPixelFillAtPoint(point);
+    if (!fill || elementHierarchy.compare(fill, targetElement) <= 0) return false;
+
+    event.stopPropagation();
+    if (selectedIds.includes(fill.id)) {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      setQuickAddRegion(null);
+      groupMoveRef.current = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        elements: elementsRef.current,
+        ids: selectionTreeIds(),
+        changed: false,
+        preview: getEffectiveToolMenuSettings("select").previewMode,
+      };
+      captureSurfacePointer(event);
+      setIsInteracting(true);
+      return true;
     }
+    handlePointerDown(event, true);
+    if (selectMode === "rectangle" && areaGestureRef.current?.pointerId === event.pointerId) {
+      pendingPixelFillClickRef.current = { id: fill.id, pointerId: event.pointerId };
+    }
+    return true;
+  };
+
+  const shouldIgnorePointerDown = (event: React.PointerEvent) => {
+    if ((event.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return true;
+    pendingPixelFillClickRef.current = null;
+    if (activeTool === "fill" && event.button !== 0) return true;
+    if (activeTool === "select" && selectMode !== "rectangle" && event.button === 1) return true;
+    if (outlineSelection.begin(event)) {
+      setIsMainBoardSelected(false);
+      closeAllDropdowns();
+      return true;
+    }
+    if (activePointerIdRef.current !== null && activePointerIdRef.current !== event.pointerId)
+      return true;
     if ((window as any).justLinkedElement) {
-      // Allow drop-down states to clear, but do not change selection
+      // Allow drop-down states to clear, but do not change selection.
       (window as any).justLinkedElement = false;
-      return;
+      return true;
     }
-    if (e.button === 0) {
-      e.preventDefault();boardSurfaceRef.current?.focus({preventScroll:true});
-      clearSavedTextRange();window.getSelection()?.removeAllRanges();
+    if (event.button === 0) {
+      event.preventDefault();
+      boardSurfaceRef.current?.focus({ preventScroll: true });
+      clearSavedTextRange();
+      window.getSelection()?.removeAllRanges();
     }
     setContextMenuPos(null);
     setQuickAddRegion(null);
-    if (activeTool === "pan") {
-      closeAllDropdowns();
-      captureSurfacePointer(e);
-      setIsInteracting(true);
-      setPanStart({ x: e.clientX, y: e.clientY });
-      activeSurfaceBoundsRef.current = null;
-      return;
-    }
+    return false;
+  };
 
-    const target = e.target as HTMLElement;
-    const targetId = target.id;
+  const beginWorkspacePanFromPointerDown = (event: React.PointerEvent) => {
+    if (activeTool !== "pan") return false;
+    closeAllDropdowns();
+    captureSurfacePointer(event);
+    setIsInteracting(true);
+    setPanStart({ x: event.clientX, y: event.clientY });
+    activeSurfaceBoundsRef.current = null;
+    return true;
+  };
+
+  const getPointerDownContext = (event: React.PointerEvent) => {
+    const target = event.target as HTMLElement;
     const rect = boardSurfaceRef.current!.getBoundingClientRect();
-    const exactX = (e.clientX - rect.left) / zoom;
-    const exactY = (e.clientY - rect.top) / zoom;
+    const exactX = (event.clientX - rect.left) / zoom;
+    const exactY = (event.clientY - rect.top) / zoom;
     const pointerPoint = { x: exactX, y: exactY };
     const interactionBounds = getInteractionBoundsAtPoint(pointerPoint);
     const isElementTarget = !!target.closest?.('[data-board-element="true"]');
@@ -6282,7 +6598,7 @@ export default function BoardEditor({
     );
     const isBoardSurface = isBoardPlacementSurface({
       hasBoardSurfaceMarker:
-        targetId === "main-board" ||
+        target.id === "main-board" ||
         target === boardSurfaceRef.current ||
         target.dataset.boardSurface === "true" ||
         !!target.closest?.('[data-board-surface="true"]'),
@@ -6292,121 +6608,143 @@ export default function BoardEditor({
     closeAllDropdowns({
       preservePresetPicking: shouldPreservePresetPicking({
         hasActivePreset: Boolean(pickingObjectPresetId),
-        isPrimaryPointer: e.button === 0,
+        isPrimaryPointer: event.button === 0,
         isElementTarget,
       }),
     });
     setIsMainBoardSelected(isBoardSurface && !secondaryBoardSurface);
 
+    return { exactX, exactY, pointerPoint, interactionBounds, isElementTarget, isBoardSurface };
+  };
+
+  const handleImmediateToolPointerDown = (
+    event: React.PointerEvent,
+    context: ReturnType<typeof getPointerDownContext>,
+  ) => {
     if (activeTool === "board") {
       activeSurfaceBoundsRef.current = null;
-      return;
+      return true;
     }
-
     if (activeTool === "zoom") {
       activeSurfaceBoundsRef.current = null;
       const zoomStep = 0.5 * clickZoomSensitivity;
-      if (e.button === 0) { // left click
-         zoomAtPoint(zoomStep, e.clientX, e.clientY);
-      } else if (e.button === 2) { // right click
-         zoomAtPoint(-zoomStep, e.clientX, e.clientY);
-      }
+      if (event.button === 0) zoomAtPoint(zoomStep, event.clientX, event.clientY);
+      else if (event.button === 2) zoomAtPoint(-zoomStep, event.clientX, event.clientY);
+      return true;
+    }
+    if (event.button !== 2) return false;
+
+    activeSurfaceBoundsRef.current = null;
+    const element = elements
+      .slice()
+      .reverse()
+      .find(candidate =>
+        candidate.type !== "layer" &&
+        elementHierarchy.isVisible(candidate.id, respectLayerVisibility) &&
+        isElementHitAtPoint(candidate, context.pointerPoint),
+      );
+    if (element) {
+      setSelectedId(element.id);
+      setContextMenuPos({ x: event.clientX, y: event.clientY });
+    }
+    return true;
+  };
+
+  const canStartSurfaceGesture = (
+    context: ReturnType<typeof getPointerDownContext>,
+    allowElementSelectionGesture: boolean,
+  ) => Boolean(context.interactionBounds) && (
+    context.isBoardSurface || activeTool === "fill" || allowElementSelectionGesture
+  );
+
+  const beginEraserPointerGesture = (
+    event: React.PointerEvent,
+    point: { x: number; y: number },
+  ) => {
+    setIsInteracting(true);
+    beginAreaGesture(point, event.pointerId, activeTool);
+    if (eraserMode === "partial") {
+      setCurrentDrawPoints([point]);
       return;
     }
+    const element = elements
+      .slice()
+      .reverse()
+      .find(candidate =>
+        candidate.type !== "board" && candidate.type !== "layer" &&
+        !elementHierarchy.isLocked(candidate.id) &&
+        elementHierarchy.isVisible(candidate.id, respectLayerVisibility) &&
+        isElementHitAtPoint(candidate, point),
+      );
+    if (element) removeElement(element.id);
+  };
 
-    if (e.button === 2) {
-      activeSurfaceBoundsRef.current = null;
-      // Right click: verify if we hit any element based on coordinates to show its context menu
-      const el = elements
-        .slice()
-        .reverse()
-        .find((el) => {
-          const ew = el.size?.width || 100;
-          const eh = el.size?.height || 40;
-          return (
-            exactX >= el.position.x &&
-            exactX <= el.position.x + ew &&
-            exactY >= el.position.y &&
-            exactY <= el.position.y + eh
-          );
-        });
-      if (el) {
-        setSelectedId(el.id);
-        setContextMenuPos({ x: e.clientX, y: e.clientY });
-      }
-      return;
+  const beginAreaToolPointerGesture = (
+    event: React.PointerEvent,
+    point: { x: number; y: number },
+  ) => {
+    switch (activeTool) {
+      case "eraser":
+        beginEraserPointerGesture(event, point);
+        return true;
+      case "fill":
+        setIsInteracting(true);
+        beginAreaGesture(point, event.pointerId, activeTool);
+        void applyFillAtPoint(point, { x: event.clientX, y: event.clientY });
+        return true;
+      case "draw":
+        setIsInteracting(true);
+        beginAreaGesture(point, event.pointerId, activeTool);
+        setCurrentDrawPoints([point]);
+        return true;
+      default:
+        return false;
     }
+  };
 
-    // Only capture on the board surface or main board for other tools
-    if (!isBoardSurface || !interactionBounds) return;
+  const handlePointerDown = (event: React.PointerEvent, allowElementSelectionGesture = false) => {
+    if (shouldIgnorePointerDown(event)) return;
+    if (beginWorkspacePanFromPointerDown(event)) return;
+
+    const context = getPointerDownContext(event);
+    if (handleImmediateToolPointerDown(event, context)) return;
+    if (!canStartSurfaceGesture(context, allowElementSelectionGesture)) return;
+    const interactionBounds = context.interactionBounds;
+    if (!interactionBounds) return;
+
     activeSurfaceBoundsRef.current = interactionBounds;
     // Keep the active gesture alive when the pointer crosses the board edge.
     // Without capture, Select receives a synthetic pointer-up/leave and the
     // marquee becomes a small stale region instead of following the pointer.
-    captureSurfacePointer(e);
+    captureSurfacePointer(event);
 
     if (activeTool === "link") {
-      if (!getEffectiveToolMenuSettings("link").alwaysOnTop) {
-        setSelectedId(null);
-      }
+      if (!getEffectiveToolMenuSettings("link").alwaysOnTop) setSelectedId(null);
       return;
     }
 
     setSelectedId(null);
+    if (beginAreaToolPointerGesture(event, context.pointerPoint)) return;
 
-    if (activeTool === "eraser") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      if (eraserMode === 'partial') {
-         setCurrentDrawPoints([{ x: exactX, y: exactY }]);
-      } else {
-         // Delete any element under cursor immediately
-         const el = elements
-           .slice()
-           .reverse()
-           .find((el) => {
-             if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
-             const ew = el.size?.width || 100;
-             const eh = el.size?.height || 40;
-             return (
-               exactX >= el.position.x &&
-               exactX <= el.position.x + ew &&
-               exactY >= el.position.y &&
-               exactY <= el.position.y + eh
-             );
-           });
-         if (el) removeElement(el.id);
-      }
-      return;
+    // Pixel fills pass pointer events through their transparent pixels. When
+    // the canvas receives that event, use the same alpha-aware hit test as the
+    // Eraser so opaque fill pixels remain selectable and draggable.
+    if (activeTool === "select" && !context.isElementTarget) {
+      const fill = findTopPixelFillAtPoint(context.pointerPoint);
+      if (fill) pendingPixelFillClickRef.current = { id: fill.id, pointerId: event.pointerId };
     }
 
-    if (activeTool === "fill") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      applyFillAtPoint({ x: exactX, y: exactY });
-      return;
-    }
-
-    if (activeTool === "draw") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      setCurrentDrawPoints([{ x: exactX, y: exactY }]);
-      return;
-    }
-
-    // Select uses the actual pointer coordinates. Snapping its marquee to the
-    // grid made upper-left drags jump sides and could lose a fast gesture.
-    const x = activeTool === "select" ? exactX : snap(exactX);
-    const y = activeTool === "select" ? exactY : snap(exactY);
+    // Select uses actual pointer coordinates. Snapping its marquee to the grid
+    // made upper-left drags jump sides and could lose a fast gesture.
+    const x = activeTool === "select" ? context.exactX : snap(context.exactX);
+    const y = activeTool === "select" ? context.exactY : snap(context.exactY);
     const snappedPoint = clampPointToBounds({ x, y }, interactionBounds);
-
-    beginAreaGesture(snappedPoint, e.pointerId, activeTool, pointerPoint);
+    beginAreaGesture(snappedPoint, event.pointerId, activeTool, context.pointerPoint);
     setIsInteracting(true);
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if(groupMoveRef.current){moveSelection(e);return;}
-    if(outlineSelection.move(e))return;
     const activeAreaGesture = areaGestureRef.current;
     if (
       activePointerIdRef.current !== null &&
@@ -6428,6 +6766,7 @@ export default function BoardEditor({
       setPanStart({ x: e.clientX, y: e.clientY });
       return;
     }
+    if(outlineSelection.move(e))return;
 
     if (activeTool === "eraser" && activeAreaGesture && boardSurfaceRef.current) {
       const rect = boardSurfaceRef.current.getBoundingClientRect();
@@ -6449,33 +6788,18 @@ export default function BoardEditor({
            .slice()
            .reverse()
            .find((el) => {
-             if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
-             const ew = el.size?.width || 100;
-             const eh = el.size?.height || 40;
-             return (
-               exactX >= el.position.x &&
-               exactX <= el.position.x + ew &&
-               exactY >= el.position.y &&
-               exactY <= el.position.y + eh
-             );
+              if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) {
+                return false;
+              }
+              return isElementHitAtPoint(el, { x: exactX, y: exactY });
            });
          if (el) removeElement(el.id);
       }
       return;
     }
 
-    if (activeTool === "fill" && activeAreaGesture && boardSurfaceRef.current) {
-      const rect = boardSurfaceRef.current.getBoundingClientRect();
-      const exactX = (e.clientX - rect.left) / zoom;
-      const exactY = (e.clientY - rect.top) / zoom;
-      const bounds =
-        activeSurfaceBoundsRef.current ??
-        getInteractionBoundsAtPoint(activeAreaGesture.start);
-      if (bounds && isPointInsideBounds({ x: exactX, y: exactY }, bounds)) {
-        applyFillAtPoint({ x: exactX, y: exactY });
-      }
-      return;
-    }
+    // Fill is a bucket action: one pointer-down fills one connected region.
+    if (activeTool === "fill" && activeAreaGesture) return;
 
     if (activeTool === "draw" && currentDrawPoints && activeAreaGesture && boardSurfaceRef.current) {
       const rect = boardSurfaceRef.current.getBoundingClientRect();
@@ -6717,6 +7041,40 @@ export default function BoardEditor({
       if(moved.changed&&moved.latest)pushElements(moved.latest);
       setIsInteracting(false);setVisibleGuides([]);return;
     }
+    const pendingPixelFillClick = pendingPixelFillClickRef.current;
+    pendingPixelFillClickRef.current = null;
+    if (
+      pendingPixelFillClick &&
+      eventPointerId === pendingPixelFillClick.pointerId &&
+      activeTool === "select" &&
+      !activeAreaGesture?.moved &&
+      event &&
+      "clientX" in event
+    ) {
+      const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
+      const fill = elementsRef.current.find(element => element.id === pendingPixelFillClick.id);
+      if (surfaceRect && fill && elementHierarchy.isVisible(fill.id, respectLayerVisibility) &&
+          !elementHierarchy.isLocked(fill.id) && isElementHitAtPoint(fill, {
+            x: (event.clientX - surfaceRect.left) / zoomRef.current,
+            y: (event.clientY - surfaceRect.top) / zoomRef.current,
+          })) {
+        setSelectedId(fill.id);
+        setIsMainBoardSelected(false);
+        setShowLinkInput(false);
+        setShowTargetInput(false);
+        setLinkSystemMode("start");
+        if (autoToolOnSelect && activeTool === "select") setActiveTool(toolForSelectedElement(fill));
+        setVisibleGuides([]);
+        clearAreaGesture();
+        return;
+      }
+    }
+    if (panStart) {
+      setPanStart(null);
+      setIsInteracting(false);
+      activeSurfaceBoundsRef.current = null;
+      return;
+    }
     if(outlineSelection.end(event))return;
     setVisibleGuides([]);
     const latestElements = elementsRef.current;
@@ -6727,13 +7085,6 @@ export default function BoardEditor({
         : null);
     const activeDragStart = activeAreaGesture?.start ?? dragStart;
     const activeDragCurrent = activeAreaGesture?.current ?? dragCurrent;
-
-    if (panStart) {
-      setPanStart(null);
-      setIsInteracting(false);
-      activeSurfaceBoundsRef.current = null;
-      return;
-    }
 
     if (activeTool === "eraser") {
       if (eraserMode === 'partial' && currentDrawPoints && currentDrawPoints.length > 0) {
@@ -6773,7 +7124,8 @@ export default function BoardEditor({
       clearAreaGesture();
       setIsInteracting(false);
       activeSurfaceBoundsRef.current = null;
-      finishToolUse("fill");
+      if (fillInProgressRef.current) fillPointerReleasedRef.current = true;
+      else finishToolUse("fill");
       return;
     }
 
@@ -7047,6 +7399,7 @@ export default function BoardEditor({
   const handlePointerCancel = (event: React.PointerEvent | PointerEvent) => {
     const pointerId = activePointerIdRef.current;
     if (pointerId === null || event.pointerId !== pointerId) return;
+    pendingPixelFillClickRef.current = null;
     const captureTarget = pointerCaptureTargetRef.current;
     try {
       if (captureTarget?.hasPointerCapture?.(pointerId)) {
@@ -7131,7 +7484,10 @@ export default function BoardEditor({
     start.changed=true;
     const bounds=selectedBounds(start.elements,[...start.ids]);
     if(bounds){const position=updateSmartGuides({id:'__group-selection',type:'rectangle',content:'',position:{x:bounds.x,y:bounds.y},size:bounds,zIndex:0},{x:bounds.x+dx,y:bounds.y+dy},true,start.ids);dx=position.x-bounds.x;dy=position.y-bounds.y;}
-    const next=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
+    const moved=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
+    const next=start.elements.some(element=>start.ids.has(element.id)&&element.isPixelFill)
+      ? reconcilePixelFillBoardOwners(moved,pageDimensions,start.elements)
+      : moved;
     start.latest=next;
     if(start.preview==='box'){
       if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform=`translate(${dx}px,${dy}px)`;selectionOutlineRef.current.style.backgroundColor='rgba(59,130,246,.08)';}
@@ -8481,6 +8837,16 @@ export default function BoardEditor({
 
       {/* Main Workspace Area with Paint-like resizable board */}
       <div className="flex-1 flex overflow-hidden relative">
+        {fillNotice && (
+          <div
+            data-fill-notice="true"
+            role="status"
+            aria-live="polite"
+            className="fixed bottom-24 left-1/2 z-[10000] -translate-x-1/2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 shadow-lg pointer-events-none"
+          >
+            {fillNotice}
+          </div>
+        )}
         <div
           className="workspace-scroll flex-1 relative overflow-auto select-none"
           ref={containerRef}
@@ -8623,7 +8989,21 @@ export default function BoardEditor({
                       : "crosshair",
                 }}
                 onPointerDown={handlePointerDown}
-                onPointerDownCapture={startSelectionMove}
+                onPointerDownCapture={(event) => {
+                  if ((event.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
+                  if (activeTool === "select" && selectMode !== "rectangle") {
+                    if (event.button !== 0) return;
+                    event.stopPropagation();
+                    handlePointerDown(event);
+                    return;
+                  }
+                  if (beginPixelFillSelectionGesture(event)) return;
+                  startSelectionMove(event);
+                  if (activeTool === "fill" && event.button === 0) {
+                    handlePointerDown(event);
+                    event.stopPropagation();
+                  }
+                }}
                 onContextMenu={(e) => e.preventDefault()}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -10663,14 +11043,14 @@ export default function BoardEditor({
                                             : "border-transparent hover:border-gray-300 hover:bg-white hover:text-gray-900",
                                         )}
                                         title={WEB_DEVICE_PROFILES[mode].label}
-                                        onClick={() =>
-                                          onUpdateTarget({
+                                        onClick={() => {
+                                          if (!active) onUpdateTarget({
                                             webDeviceMode: mode,
                                             size:
                                               WEB_DEVICE_PROFILES[mode]
                                                 .defaultSize,
-                                          })
-                                        }
+                                          });
+                                        }}
                                       >
                                         <Icon className="w-4 h-4" />
                                       </button>
@@ -11090,6 +11470,14 @@ function BoardElementNode({
   >(null);
   const activePointerGestureCleanupRef = useRef<(() => void) | null>(null);
   const resolvedPreviewMode = element.previewMode ?? globalPreviewMode;
+
+  useEffect(() => {
+    if (!element.isPixelFill || !element.content) return;
+    isPixelFillOpaqueAtPoint(element, {
+      x: element.position.x + (element.size?.width ?? 0) / 2,
+      y: element.position.y + (element.size?.height ?? 0) / 2,
+    });
+  }, [element.content, element.isPixelFill]);
 
   const captureElementPointer = (event: React.PointerEvent) => {
     const pointerId = event.pointerId;
@@ -11961,6 +12349,32 @@ function BoardElementNode({
         )
       : null;
 
+  const linePointerClass = () => {
+    if (!canInteract) return "pointer-events-none";
+    return canMove ? "cursor-move pointer-events-auto" : "pointer-events-auto";
+  };
+
+  const nonInteractivePointerClass = () => {
+    if (hasPlayableMediaControls) return "cursor-default pointer-events-auto";
+    return element.linkToId ? "cursor-pointer pointer-events-auto" : "pointer-events-none";
+  };
+
+  const interactivePointerClass = () => {
+    if (element.linkToId && activeTool !== "link") return "cursor-pointer pointer-events-auto";
+    if (activeTool === "pan") return "pointer-events-auto";
+    if (activeTool === "link") return "cursor-pointer pointer-events-auto";
+    if (isBoardInteraction && !isBoardMoveEnabled) return "pointer-events-auto";
+    return canMove ? "cursor-move pointer-events-auto" : "pointer-events-auto";
+  };
+
+  const elementPointerClass = () => {
+    if ((element.isPixelFill && !isSelected) || isInteractionLocked) return "pointer-events-none";
+    if (element.type === "board" && !canInteract) return "cursor-crosshair pointer-events-auto";
+    if (element.type === "line") return linePointerClass();
+    if (!canInteract) return nonInteractivePointerClass();
+    return interactivePointerClass();
+  };
+
   return (
     <>
     <motion.div
@@ -11972,33 +12386,7 @@ function BoardElementNode({
       className={cn(
         "absolute",
         canInteract && "touch-none",
-        isInteractionLocked
-          ? "pointer-events-none"
-        : element.type === "board" && !canInteract
-          ? "cursor-crosshair pointer-events-auto"
-          : element.type === "line"
-          ? canInteract
-            ? canMove
-              ? "cursor-move pointer-events-auto"
-              : "pointer-events-auto"
-            : "pointer-events-none"
-          : canInteract
-          ? element.linkToId && activeTool !== "link"
-            ? "cursor-pointer pointer-events-auto"
-            : activeTool === "pan"
-              ? "pointer-events-auto"
-              : activeTool === "link"
-                ? "cursor-pointer pointer-events-auto"
-                : isBoardInteraction && !isBoardMoveEnabled
-                  ? "pointer-events-auto"
-                  : canMove
-                    ? "cursor-move pointer-events-auto"
-                    : "pointer-events-auto"
-          : hasPlayableMediaControls
-            ? "cursor-default pointer-events-auto"
-          : element.linkToId
-            ? "cursor-pointer pointer-events-auto"
-            : "pointer-events-none",
+        elementPointerClass(),
       )}
       data-board-surface={element.type === "board" ? "true" : undefined}
       data-board-element={isGroupMember?"false":"true"}
@@ -12021,7 +12409,7 @@ function BoardElementNode({
         }
         // If it's a link and we're not using the link tool, block board interaction and just wait for the click.
         if (element.linkToId && activeTool !== "link") {
-          e.stopPropagation();
+          if (e.button !== 1) e.stopPropagation();
           return;
         }
 

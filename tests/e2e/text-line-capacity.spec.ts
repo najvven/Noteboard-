@@ -61,6 +61,18 @@ const board = {
       textSnapToGrid: false,
       zIndex: 3,
     },
+    {
+      id: 'unruled-empty',
+      type: 'text',
+      position: { x: 700, y: 330 },
+      size: { width: 260, height: 61.99 },
+      content: '',
+      fontSize: 16,
+      textScale: 1,
+      textScaling: false,
+      textSnapToGrid: false,
+      zIndex: 4,
+    },
   ],
 };
 
@@ -341,6 +353,57 @@ test('Text accepts only full rows and keeps overflow text selectable, hidden, an
     expect((limitedCanonical.match(/<div/g) ?? []).length).toBe(4);
     expect(naturalCanonical).toContain('TAIL');
     expect(naturalCanonical).not.toContain('data-noteboard-text-presentation');
+  } finally {
+    await deleteFixtureBoard(request, `/api/pages/${boardId}`);
+  }
+});
+
+test('Empty Enter at unruled text capacity keeps the caret visible', async ({ page, request }) => {
+  await seedBoard(request);
+  try {
+    await openBoard(page);
+    const editor = page.locator('[data-board-element-editor-id="unruled-empty"]');
+    await expect.poll(() => editor.getAttribute('data-text-line-viewport-rows')).not.toBeNull();
+    const capacity = Number(await editor.getAttribute('data-text-line-viewport-rows'));
+    expect(capacity).toBeGreaterThan(0);
+    const lineHeight = await editor.evaluate((element) => Number.parseFloat(getComputedStyle(element).lineHeight));
+    const clickY = Math.min((capacity - 0.5) * lineHeight, (await editor.boundingBox())!.height - 2);
+    await editor.click();
+    for (let index = 0; index < capacity; index += 1) await editor.press('Enter');
+    await editor.click({ position: { x: 5, y: clickY } });
+
+    await editor.evaluate((element) => {
+      const events: Array<{ inputType: string; defaultPrevented: boolean }> = [];
+      element.addEventListener('beforeinput', (event) => {
+        const input = event as InputEvent;
+        events.push({ inputType: input.inputType, defaultPrevented: input.defaultPrevented });
+      });
+      (window as any).__unruledEnterEvents = events;
+    });
+    const beforeHtml = await editor.evaluate((element) => element.innerHTML);
+    await editor.press('Enter');
+    const state = await editor.evaluate((element) => {
+      const editorBox = element.getBoundingClientRect();
+      const selection = window.getSelection();
+      const anchor = selection?.anchorNode;
+      const anchorElement = anchor instanceof Element ? anchor : anchor?.parentElement;
+      const line = anchorElement?.closest<HTMLElement>('p,div,li,blockquote,h1,h2,h3');
+      const lineBox = line?.getBoundingClientRect();
+      return {
+        events: (window as any).__unruledEnterEvents,
+        inside: Boolean(window.getSelection()?.anchorNode && element.contains(window.getSelection()!.anchorNode)),
+        html: element.innerHTML,
+        lineIndex: line ? Array.from(element.children).indexOf(line) : -1,
+        lineBox: lineBox ? { top: lineBox.top, bottom: lineBox.bottom } : null,
+        editorBox: { top: editorBox.top, bottom: editorBox.bottom },
+      };
+    });
+    expect(state.events).toEqual([{ inputType: 'insertParagraph', defaultPrevented: true }]);
+    expect(state.inside).toBe(true);
+    expect(state.html).toBe(beforeHtml);
+    expect(state.lineIndex).toBe(capacity - 1);
+    expect(state.lineBox?.top).toBeGreaterThanOrEqual(state.editorBox.top);
+    expect(state.lineBox?.bottom).toBeLessThanOrEqual(state.editorBox.bottom + 0.75);
   } finally {
     await deleteFixtureBoard(request, `/api/pages/${boardId}`);
   }

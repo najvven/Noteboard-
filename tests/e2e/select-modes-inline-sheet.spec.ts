@@ -1,5 +1,10 @@
 import { test, expect, type Page } from "./test";
 import { createWorkbookDocument } from "../../src/features/spreadsheet/workbook";
+import {
+  SPREADSHEET_BORDER,
+  SPREADSHEET_COLUMN_HEADER_HEIGHT,
+  SPREADSHEET_ROW_HEADER_WIDTH,
+} from "../../src/features/spreadsheet/grid-geometry";
 
 const board = (id: string, elements: any[] = [], settings = {}) => ({
   id,
@@ -71,11 +76,9 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
   await grid.click({ position: { x: 90, y: 32 } });
   await page.keyboard.type("12");
   await page.keyboard.press("Enter");
-  const gridBounds = (await grid.boundingBox())!;
-  await page.mouse.move(gridBounds.x + 190, gridBounds.y + 56);
-  await page.mouse.down();
-  await page.mouse.move(gridBounds.x + 90, gridBounds.y + 32, { steps: 6 });
-  await page.mouse.up();
+  // Enter advances from A1 to A2; move to B2 with the same keyboard navigation
+  // a spreadsheet user can use, independent of device scaling and canvas bounds.
+  await page.keyboard.press("ArrowRight");
   const panel = page.getByRole("complementary", {
     name: "Spreadsheet settings",
   });
@@ -136,6 +139,36 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
   expect((await read(page)).workbook.sheets['sheet-1'].cellData[0][0].v).toBe(12);
   expect((await read(page)).workbook.sheets['sheet-1'].cellData[1][1].v).toBe(99);
   expect(errors).toEqual([]);
+});
+
+test("dragging a spreadsheet column boundary changes the column width", async ({ page, request }) => {
+  await request.post("/api/pages", {
+    data: [board("sheet-column-drag", [sheet("sheet", 100, 100)])],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open sheet-column-drag", exact: true }).click();
+  const object = page.locator('[data-board-element-id="sheet"]');
+  await object.click({ position: { x: 80, y: 15 } });
+  await expect(page.locator("[data-spreadsheet-inline]").getByRole("status")).toHaveCount(0, { timeout: 30000 });
+  const grid = page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
+  await expect(grid).toBeVisible();
+  const bounds = await grid.boundingBox();
+  expect(bounds).not.toBeNull();
+  const sheetData = (await read(page)).workbook.sheets["sheet-1"];
+  const before = sheetData.columnData?.[0]?.w ?? sheetData.defaultColumnWidth ?? 100;
+  const rowHeaderWidth = sheetData.rowHeader?.hidden === 1
+    ? 0
+    : sheetData.rowHeader?.width ?? SPREADSHEET_ROW_HEADER_WIDTH;
+  const firstColumnBoundary = bounds!.x + SPREADSHEET_BORDER + rowHeaderWidth + before;
+  const headerY = bounds!.y + SPREADSHEET_COLUMN_HEADER_HEIGHT / 2;
+  await page.mouse.move(firstColumnBoundary, headerY);
+  await page.mouse.down();
+  await page.mouse.move(firstColumnBoundary + 40, headerY, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const current = (await read(page)).workbook.sheets["sheet-1"];
+    return current.columnData?.[0]?.w ?? current.defaultColumnWidth ?? 100;
+  }).toBeGreaterThan(before);
 });
 
 test("Select has exactly three variations and polygon stays open until the first vertex is connected", async ({

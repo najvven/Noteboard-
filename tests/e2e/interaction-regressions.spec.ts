@@ -12,6 +12,54 @@ async function clickAreaAction(page:Page,name:string){
   const box=(await button.boundingBox())!;await page.mouse.click(box.x+box.width/2,box.y+box.height/2);
 }
 
+test('marquee selection still starts when dragging over a full-board raster fill',async({page,request})=>{
+  const content='data:image/svg+xml;base64,'+Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>').toString('base64');
+  const data={...seed('Filled board marquee','select',[
+    {id:'background-fill',type:'image',position:{x:0,y:0},size:{width:700,height:500},content,isPixelFill:true,pixelFillBoardId:'main-board',zIndex:1},
+    shape('marquee-target',200,170,{zIndex:2}),
+  ],{isSelectionLockEnabled:false}),width:700,height:500,boardX:0,boardY:0,workspaceWidth:1400,workspaceHeight:900,viewportCenterX:600,viewportCenterY:350};
+  await request.post('/api/pages',{data:[data]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Filled board marquee',exact:true}).click();
+  const fill=page.locator('[data-board-element-id="background-fill"]');
+  const before=(await fill.boundingBox())!;
+  const shapeBefore=await page.locator('[data-board-element-id="marquee-target"]').boundingBox();
+  await drag(page,{x:before.x+100,y:before.y+100},{x:before.x+300,y:before.y+250},0);
+  await expect(page.locator('[data-selection-area-toolbar="true"]')).toBeVisible();
+  expect(await fill.boundingBox()).toEqual(before);
+  expect(await page.locator('[data-board-element-id="marquee-target"]').boundingBox()).toEqual(shapeBefore);
+});
+
+test('moving a pixel fill to another board updates its owner and remains visible',async({page,request})=>{
+  const content='data:image/svg+xml;base64,'+Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>').toString('base64');
+  const data={...seed('Pixel fill board move','select',[
+    {id:'lower-layer',type:'layer',position:{x:0,y:0},name:'Lower',content:'',zIndex:1},
+    {id:'upper-layer',type:'layer',position:{x:0,y:0},name:'Upper',content:'',zIndex:10},
+    {id:'raster-under',type:'image',parentId:'lower-layer',position:{x:220,y:180},size:{width:80,height:60},content,isPixelFill:true,pixelFillBoardId:'main-board',zIndex:100},
+    {id:'raster-fill',type:'image',parentId:'upper-layer',position:{x:220,y:180},size:{width:80,height:60},content,isPixelFill:true,pixelFillBoardId:'main-board',zIndex:1},
+    {id:'destination-board',type:'board',position:{x:900,y:100},size:{width:260,height:240},content:'',zIndex:-2},
+  ]),width:700,height:500,boardX:0,boardY:0,workspaceWidth:1800,workspaceHeight:900,viewportCenterX:600,viewportCenterY:350};
+  await request.post('/api/pages',{data:[data]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Pixel fill board move',exact:true}).click();
+  const fill=page.locator('[data-board-element-id="raster-fill"]');
+  const destination=page.locator('[data-board-element-id="destination-board"]');
+  await expect(fill).toBeVisible();await expect(destination).toBeVisible();
+  const source=(await fill.boundingBox())!,target=(await destination.boundingBox())!;
+  await page.mouse.click(source.x+source.width/2,source.y+source.height/2);
+  await expect(fill.locator('.ring-blue-500')).toBeVisible();
+  await drag(page,{x:source.x+source.width/2,y:source.y+source.height/2},{x:target.x+target.width/2,y:target.y+target.height/2},0);
+  await expect.poll(async()=>{
+    const response=await request.get('/api/pages');
+    const pages=await response.json() as Array<{id:string;elements:Array<{id:string;pixelFillBoardId?:string}>}>;
+    return pages.find(item=>item.id===data.id)?.elements.find(element=>element.id==='raster-fill')?.pixelFillBoardId;
+  }).toBe('destination-board');
+  const saved=await request.get('/api/pages');
+  const pages=await saved.json() as Array<{id:string;elements:Array<{id:string;pixelFillBoardId?:string}>}>;
+  expect(pages.find(item=>item.id===data.id)?.elements.find(element=>element.id==='raster-under')?.pixelFillBoardId).toBe('main-board');
+  const moved=(await fill.boundingBox())!;
+  expect(moved.x).toBeGreaterThan(target.x);
+  expect(moved.x+ moved.width).toBeLessThanOrEqual(target.x+target.width+1);
+});
+
 for(const tool of ['ellipse','line','rectangle','section'])test(`${tool} uses Lock in time for both previews and placement`,async({page,request})=>{
   await request.post('/api/pages',{data:[seed(`Lock ${tool}`,tool,[],{isSelectionLockEnabled:true,selectionLockTime:400})]});
   await page.goto('/');await page.getByRole('button',{name:`Open Lock ${tool}`,exact:true}).click();
@@ -130,19 +178,27 @@ test('Merge area creates one object and layer entry; move, copy, undo, reopen an
   await request.post('/api/pages',{data:[seed('Merge area','select',elements)]});
   await page.goto('/');await page.getByRole('button',{name:'Open Merge area',exact:true}).click();
   const root=(await page.locator('[data-board-root]').boundingBox())!;
-  const a=page.locator('[data-board-element-id="a"]'),before=(await a.boundingBox())!;
+  const a=page.locator('[data-board-element-id="a"]');
+  const boardPosition=async(node:typeof a)=>node.evaluate(element=>{
+    const surface=document.querySelector<HTMLElement>('[data-board-root="true"]');
+    if(!surface)throw new Error('Board surface is unavailable.');
+    const zoom=new DOMMatrixReadOnly(getComputedStyle(surface).transform).a;
+    return {x:(element.getBoundingClientRect().x-surface.getBoundingClientRect().x)/zoom,zoom};
+  });
+  const before=await boardPosition(a);expect(before.zoom).toBeGreaterThan(0);
   await drag(page,{x:root.x+80,y:root.y+130},{x:root.x+390,y:root.y+260});
   await clickAreaAction(page,'Merge area');
   const group=page.locator('[data-board-element-type="group"]');await expect(group).toHaveCount(1);
-  await expect(a).toHaveAttribute('data-board-element','false');expect((await a.boundingBox())!.x).toBeCloseTo(before.x,0);
+  await expect(a).toHaveAttribute('data-board-element','false');expect((await boardPosition(a)).x).toBeCloseTo(before.x,0);
   await page.getByRole('button',{name:'Open Layers Panel',exact:true}).click();
   await expect(page.locator('[data-layer-tile-id="layer-a"]')).toHaveCount(0);await expect(page.locator('[data-layer-tile-id="layer-b"]')).toHaveCount(0);
   await expect(page.locator('[data-layer-tile-id]')).toHaveCount(2);
   await page.getByRole('button',{name:'Open Layers Panel',exact:true}).click();
-  const box=(await group.boundingBox())!;await drag(page,{x:box.x+20,y:box.y+20},{x:box.x+120,y:box.y+70},0);
-  expect((await a.boundingBox())!.x).toBeCloseTo(before.x+100,0);
-  await page.keyboard.press('Control+z');expect((await a.boundingBox())!.x).toBeCloseTo(before.x,0);
-  await page.keyboard.press('Control+Shift+z');expect((await a.boundingBox())!.x).toBeCloseTo(before.x+100,0);
+  const box=(await group.boundingBox())!,zoom=(await boardPosition(a)).zoom;
+  await drag(page,{x:box.x+20,y:box.y+20},{x:box.x+20+100*zoom,y:box.y+20+50*zoom},0);
+  expect((await boardPosition(a)).x).toBeCloseTo(before.x+100,0);
+  await page.keyboard.press('Control+z');expect((await boardPosition(a)).x).toBeCloseTo(before.x,0);
+  await page.keyboard.press('Control+Shift+z');expect((await boardPosition(a)).x).toBeCloseTo(before.x+100,0);
   await group.click();await page.keyboard.press('Control+c');await page.keyboard.press('Control+v');await expect(group).toHaveCount(2);
   await expect(page.getByRole('button',{name:'Ungroup',exact:true})).toBeVisible();
   await page.keyboard.press('Delete');await expect(group).toHaveCount(1);
@@ -150,6 +206,6 @@ test('Merge area creates one object and layer entry; move, copy, undo, reopen an
   await page.keyboard.press('Control+z');await expect(group).toHaveCount(1);
   await page.getByRole('button',{name:'Back',exact:true}).click();await page.reload();await page.getByRole('button',{name:'Open Merge area',exact:true}).click();
   await expect(group).toHaveCount(1);await group.click();await page.getByRole('button',{name:'Ungroup',exact:true}).click();await expect(group).toHaveCount(0);
-  await expect(a).toHaveAttribute('data-board-element','true');expect((await a.boundingBox())!.x).toBeCloseTo(before.x+100,0);
+  await expect(a).toHaveAttribute('data-board-element','true');expect((await boardPosition(a)).x).toBeCloseTo(before.x+100,0);
   await page.getByRole('button',{name:'Open Layers Panel',exact:true}).click();await expect(page.locator('[data-layer-tile-id="layer-a"]')).toBeVisible();await expect(page.locator('[data-layer-tile-id="layer-b"]')).toBeVisible();
 });

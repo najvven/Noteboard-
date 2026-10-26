@@ -222,6 +222,31 @@ test('deleting inside Layers keeps the current container view', async ({ page, r
   await expect(menu.getByTitle('Move element', {exact:true})).toHaveCount(0);
 });
 
+test('layer tiles reorder on drops near either edge of a tile', async ({ page, request }) => {
+  await openFixture(page, request, [
+    { id: 'layer-a', type: 'layer', name: 'Layer A', position: { x: 0, y: 0 }, content: '', zIndex: 1 },
+    { id: 'layer-b', type: 'layer', name: 'Layer B', position: { x: 0, y: 0 }, content: '', zIndex: 2 },
+  ]);
+  await page.getByRole('button', { name: 'Open Layers Panel' }).click();
+  const panel = page.locator('[data-toolbar-item="layers"] > .toolbar-dropdown');
+  const layerA = panel.locator('[data-layer-tile-id="layer-a"]');
+  const layerB = panel.locator('[data-layer-tile-id="layer-b"]');
+  const order = () => panel.locator('[data-layer-tile-id]').evaluateAll(elements =>
+    elements.map(element => (element as HTMLElement).dataset.layerTileId),
+  );
+
+  await expect.poll(order).toEqual(['layer-b', 'layer-a']);
+  const targetBounds = (await layerB.boundingBox())!;
+  await layerA.dragTo(layerB, { targetPosition: { x: targetBounds.width / 2, y: 2 } });
+  await expect.poll(order).toEqual(['layer-a', 'layer-b']);
+
+  const lowerTargetBounds = (await layerB.boundingBox())!;
+  await layerA.dragTo(layerB, {
+    targetPosition: { x: lowerTargetBounds.width / 2, y: lowerTargetBounds.height * 0.75 },
+  });
+  await expect.poll(order).toEqual(['layer-b', 'layer-a']);
+});
+
 test('flipping an element does not reverse the section clipping boundary', async ({ page, request }) => {
   await openFixture(page, request, [
     {id:'section',type:'section',position:{x:500,y:100},size:{width:240,height:220},content:'',color:'#f1f5f9',zIndex:-1},

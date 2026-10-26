@@ -179,6 +179,7 @@ const assertSettingsElementShape = (element, label, partial = false) => {
     [
       ["parentId", "string", 200],
       ["groupOriginalParentId", "string", 200],
+      ["pixelFillBoardId", "string", 200],
       ["linkToId", "string", 2_048],
       ["color", "string", 200],
       ["borderColor", "string", 200],
@@ -254,6 +255,9 @@ const assertSettingsElementShape = (element, label, partial = false) => {
   ) {
     throw new Error(`${label}.groupOriginalParentId is invalid.`);
   }
+  if (element.pixelFillBoardId !== undefined && !isSafeId(element.pixelFillBoardId)) {
+    throw new Error(`${label}.pixelFillBoardId is invalid.`);
+  }
   if (element.points !== undefined) {
     if (!Array.isArray(element.points) || element.points.length > 1_000_000) {
       throw new Error(`${label}.points is invalid.`);
@@ -285,6 +289,7 @@ const assertSettingsElementShape = (element, label, partial = false) => {
     "isHidden",
     "isLocked",
     "isEraser",
+    "isPixelFill",
     "isLinkTarget",
     "textSnapToGrid",
   ]) {

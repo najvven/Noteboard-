@@ -40,6 +40,7 @@ export interface SpreadsheetBridge {
   capturePreview(): Promise<string>;
   replaceContent(content: string): Promise<void>;
   setCellDimensions(width: number, height: number): Promise<string>;
+  scrollToCell(row: number, column: number): Promise<string>;
   action(action: SpreadsheetAction): Promise<string>;
   importSheets(bytes: ArrayBuffer, name: string): Promise<string[]>;
   exportFile(format: "xlsx" | "csv"): Promise<ArrayBuffer>;

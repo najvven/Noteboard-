@@ -23,6 +23,43 @@ test('stale saves and duplicate batch ids cannot replace the current persisted b
   await deleteFixtureBoard(request, '/api/pages/revision-check');
 });
 
+test('a failed editor save cannot expose its unacknowledged draft through Home', async ({page,request}) => {
+  const id='failed-editor-save-home';
+  await deleteFixtureBoard(request,`/api/pages/${id}`);
+  const original={id,title:'Failed editor save',version:4,width:900,height:600,updatedAt:Date.now(),
+    editorSettings:{activeTool:'text',keepToolActive:true},
+    elements:[{id:'draft-text',type:'text',position:{x:80,y:80},size:{width:400,height:100},content:'Saved original',zIndex:1}]};
+  expect((await putFixtureBoard(request,`/api/pages/${id}`,{data:original})).ok()).toBe(true);
+  let failedWrites=0;
+  await page.route(`**/api/pages/${id}`,route=>{
+    if(route.request().method()==='PUT'){failedWrites++;return route.abort('connectionreset');}
+    return route.continue();
+  });
+  try {
+    await page.goto('/');
+    await page.getByRole('button',{name:'Open Failed editor save',exact:true}).click();
+    const editor=page.locator('[data-board-element-editor-id="draft-text"]');
+    await expect(editor).toContainText('Saved original');
+    await editor.fill('Unacknowledged local draft');
+    await page.getByRole('button',{name:'Back',exact:true}).click();
+    await expect.poll(()=>failedWrites).toBeGreaterThan(0);
+    await expect(page.locator('[data-board-root]')).toBeVisible();
+    await expect(page.getByRole('alert')).toContainText('Could not save');
+    await expect(page.getByRole('button',{name:'Open Failed editor save',exact:true})).toHaveCount(0);
+    const persisted=(await (await request.get('/api/pages')).json()).find((page:any)=>page.id===id);
+    expect(persisted.elements[0].content).toBe('Saved original');
+
+    await page.unroute(`**/api/pages/${id}`);
+    await page.getByRole('button',{name:'Back',exact:true}).click();
+    await expect(page.getByRole('button',{name:'Open Failed editor save',exact:true})).toBeVisible();
+    const acknowledged=(await (await request.get('/api/pages')).json()).find((page:any)=>page.id===id);
+    expect(acknowledged.elements[0].content).toBe('Unacknowledged local draft');
+  } finally {
+    await page.unroute(`**/api/pages/${id}`);
+    await deleteFixtureBoard(request,`/api/pages/${id}`);
+  }
+});
+
 test('Home import shortcuts do not consume paste while the New Noteboard dialog is open', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'New Noteboard', exact: true }).click();

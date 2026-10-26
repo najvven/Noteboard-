@@ -484,7 +484,7 @@ test('Ctrl+wheel over native Web zooms the board around the cursor, including fo
   await expect.poll(()=>run('scrollY')).toBeGreaterThan(0);assert.equal(await scale(),beforePlain);
   await run(`scrollTo(0,0);document.body.innerHTML='<iframe src="${origin.replace('127.0.0.1','localhost')}/child" style="width:900px;height:400px;border:0"></iframe>'; void 0`);
   await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.length)).toBe(2);
-  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.find(frame=>frame.url.endsWith('/child'))?.executeJavaScript('document.readyState'))).toBe('complete');
+  await expect.poll(()=>app.evaluate(({webContents})=>webContents.getAllWebContents().find(c=>c.getType()==='webview').mainFrame.framesInSubtree.find(frame=>frame.url.endsWith('/child'))?.executeJavaScript('document.readyState')).catch(()=>undefined)).toBe('complete');
   const childBox=await window.locator('[data-web-viewport]').boundingBox();beforePlain=await scale();
   await window.mouse.click(childBox.x+90,childBox.y+90);await window.keyboard.down('Control');await window.mouse.wheel(0,-100);await window.keyboard.up('Control');
   await expect.poll(scale).toBeGreaterThan(beforePlain);

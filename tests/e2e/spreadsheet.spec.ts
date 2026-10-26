@@ -166,7 +166,7 @@ test('canceled beforeunload keeps the spreadsheet API alive and a later iframe r
 
   await iframe.evaluate(frame=>(frame as HTMLIFrameElement).contentWindow?.location.reload()).catch(()=>undefined);
   await expect.poll(documentId).not.toBe(initialDocumentId);
-  await expect.poll(ready).toBe(true);
+  await expect.poll(ready,{timeout:15000}).toBe(true);
   await expect.poll(()=>readCell(0,0)).toBe('first draft');
   await expect.poll(()=>readCell(1,0)).toBe('latest draft');
   await page.getByRole('button',{name:'Done',exact:true}).click();

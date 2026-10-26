@@ -72,6 +72,7 @@
     "@ghostery/adblocker-electron-preload": "2.18.2",
     "@univerjs/core": "1.0.2",
     "@univerjs/design": "1.0.2",
+    "@univerjs/docs-ui": "1.0.2",
     "@univerjs/engine-render": "1.0.2",
     "@univerjs/preset-sheets-conditional-formatting": "1.0.2",
     "@univerjs/preset-sheets-core": "1.0.2",

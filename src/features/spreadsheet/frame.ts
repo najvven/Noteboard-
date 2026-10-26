@@ -1,4 +1,5 @@
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
+import { IEditorService } from "@univerjs/docs-ui";
 import { SetCellEditVisibleWithF2Operation } from "@univerjs/sheets-ui";
 import { DeviceInputEventType } from "@univerjs/engine-render";
 import { KeyCode } from "@univerjs/ui";
@@ -78,6 +79,7 @@ let historyBaseline = "",
   historyDirty = false,
   viewDirty = false,
   ready = false;
+let reloadDraftRestoring = false;
 const FORMULA_CALCULATION_DEADLINE_MS = 5_000;
 
 class FormulaCalculationTimeoutError extends Error {
@@ -479,6 +481,7 @@ async function replaceContent(content: string) {
   clearTimeout(timer);
   renderRevision++;
   ready = false;
+  reloadDraftRestoring = false;
   historyBaseline = content;
   historyDirty = false;
   viewDirty = false;
@@ -602,7 +605,7 @@ async function action(action: SpreadsheetAction) {
 
 (window as any).noteboardSheet = {
   documentId,
-  isReady: () => ready,
+  isReady: () => ready && !reloadDraftRestoring,
   observeReloadDraft: (observer:(draft:SpreadsheetReloadDraft)=>void) => {reloadDraftObserver=observer;},
   snapshot,
   historySnapshot,
@@ -673,6 +676,7 @@ window.addEventListener("message", async (event) => {
         ],
       });
       api = created.univerAPI;
+      const editorService = created.univer.__getInjector().get(IEditorService);
       mode=document.mode;
       api.updateMenuConfig({'sheet.menu.zoom-ratio':{disabled:mode==='simple'}});
       api.registerUIPart(api.Enum.BuiltInUIPart.CUSTOM_HEADER, () => React.createElement(SheetRibbon,{targetId:message.ribbonTarget}));
@@ -760,6 +764,7 @@ window.addEventListener("message", async (event) => {
       ready = true;
       const editingCell = message.reloadDraftEditingCell;
       if (interactive && editingCell && book.getSheetBySheetId(editingCell.sheetId)) {
+        reloadDraftRestoring = true;
         book.setActiveSheet(editingCell.sheetId);
         const activeRange = book.getActiveSheet().getRange(editingCell.address);
         activeRange.activate();
@@ -859,11 +864,43 @@ window.addEventListener("message", async (event) => {
           await waitFrame(100);
           restoreCaret();
           await repaint();
+          if (expectedInput !== undefined) {
+            const targetEditorId = editorIds.find(id => {
+              const editor = getEditor(id);
+              const dataStream = editor?.getBody?.().dataStream;
+              return typeof dataStream === "string" && cleanInput(dataStream) === expectedInput &&
+                Boolean(editorService.getEditor(id));
+            });
+            const targetEditor = targetEditorId ? editorService.getEditor(targetEditorId) : undefined;
+            if (!targetEditor)
+              throw new Error("Could not locate the active spreadsheet edit cursor.");
+            const caret = cleanInput(expectedInput).length;
+            const caretIsRestored = () => {
+              const currentInput = targetEditor.getDocumentData().body?.dataStream;
+              return typeof currentInput === "string" && cleanInput(currentInput) === expectedInput &&
+                targetEditor.getCursorPosition() === caret && targetEditor.isFocus();
+            };
+            const caretDeadline = performance.now() + 5_000;
+            let stableFrames = 0;
+            for (let frame = 0; frame < 50 && performance.now() < caretDeadline && stableFrames < 3; frame++) {
+              if (caretIsRestored()) stableFrames++;
+              else {
+                stableFrames = 0;
+                restoreCaret();
+                targetEditor.focus();
+              }
+              await waitFrame(100);
+            }
+            if (stableFrames < 3)
+              throw new Error("Could not restore the active spreadsheet edit cursor.");
+          }
         }
       }
+      reloadDraftRestoring = false;
       send("loaded");
       sendSelection();
     } catch (error) {
+      reloadDraftRestoring = false;
       send("error", {
         message:
           error instanceof Error

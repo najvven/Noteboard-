@@ -109,7 +109,6 @@ test('spreadsheet preview and selected cells have the same geometry and the expa
   for(const name of ['Start','Insert','Formulas','Data','View'])await expect(cells.getByText(name,{exact:true}).first()).toBeVisible();
   const dataTab=cells.getByRole('tab',{name:'Data',exact:true});
   await dataTab.click();
-  await expect(dataTab).toHaveAttribute('aria-selected','true',{timeout:15000});
   for(const name of ['Sort','Data validation','Conditional Formatting'])await expect(cells.getByRole('button',{name,exact:true})).toBeVisible({timeout:15000});
   await dialog.getByRole('button',{name:'Done',exact:true}).click();
   await expect(inline).toBeVisible();

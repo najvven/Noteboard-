@@ -824,6 +824,13 @@ window.addEventListener("message", async (event) => {
             }
           | undefined;
         const cleanInput = (value: string) => value.replace(/\r\n$/, "");
+        const findStableEditors = (
+          candidates: NonNullable<ReturnType<typeof getEditor>>[],
+        ) => candidates.filter((editor) => {
+          const currentInput = editor.getBody?.().dataStream;
+          return typeof currentInput === "string" &&
+            (expectedInput === undefined || cleanInput(currentInput) === expectedInput);
+        });
         const restorationDeadline = performance.now() + 15_000;
         const restoredEditors = await new Promise<NonNullable<ReturnType<typeof getEditor>>[]>((resolve) => {
           let checks = 0;
@@ -852,11 +859,7 @@ window.addEventListener("message", async (event) => {
               }
               const confirmRemaining = Math.max(0, restorationDeadline - performance.now());
               scheduleAfterFrame(Math.min(100, confirmRemaining), () => {
-                const stableEditors = candidates.filter((editor) => {
-                  const currentInput = editor.getBody?.().dataStream;
-                  return typeof currentInput === "string" &&
-                    (expectedInput === undefined || cleanInput(currentInput) === expectedInput);
-                });
+                const stableEditors = findStableEditors(candidates);
                 if (stableEditors.length) resolve(stableEditors);
                 else poll();
               });

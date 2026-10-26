@@ -238,6 +238,13 @@ type XmlScannerState = {
   rootSeen: boolean;
 };
 
+type XmlElementContext = {
+  open: number;
+  name: string;
+  localName: string;
+  parentLocalName: string | undefined;
+};
+
 function getXmlLocalName(name: string, malformed: () => never) {
   const separator = name.indexOf(":");
   if (separator === 0 || separator === name.length - 1 ||
@@ -283,77 +290,97 @@ function skipXmlWhitespace(xml: string, start: number) {
 
 function readClosingXmlElement(
   xml: string,
-  open: number,
-  name: string,
-  localName: string,
-  parentLocalName: string | undefined,
+  element: XmlElementContext,
   index: number,
   state: XmlScannerState,
   visit: (token: XmlToken) => void,
   malformed: () => never,
 ) {
   const endMarker = skipXmlWhitespace(xml, index);
-  if (xml[endMarker] !== ">" || state.stack.at(-1)?.name !== name) malformed();
-  visit({ type: "end", name, localName, parentLocalName, start: open, end: endMarker + 1 });
+  if (xml[endMarker] !== ">" || state.stack.at(-1)?.name !== element.name) malformed();
+  visit({
+    type: "end",
+    name: element.name,
+    localName: element.localName,
+    parentLocalName: element.parentLocalName,
+    start: element.open,
+    end: endMarker + 1,
+  });
   state.stack.pop();
   return endMarker + 1;
 }
 
+function readXmlAttribute(xml: string, start: number, malformed: () => never) {
+  const attribute = readXmlName(xml, start, malformed);
+  let index = skipXmlWhitespace(xml, attribute.end);
+  if (xml[index] !== "=") malformed();
+  index = skipXmlWhitespace(xml, index + 1);
+  const quote = xml[index];
+  if (quote !== "\"" && quote !== "'") malformed();
+  const valueStart = index + 1;
+  index = valueStart;
+  while (index < xml.length && xml[index] !== quote) {
+    if (xml[index] === "<") malformed();
+    index += 1;
+  }
+  if (index >= xml.length) malformed();
+  return { name: attribute.name, value: xml.slice(valueStart, index), end: index + 1 };
+}
+
+function readXmlOpeningAttributes(xml: string, start: number, malformed: () => never) {
+  const attributes = new Map<string, string>();
+  let index = start;
+  let selfClosing = false;
+  while (index < xml.length) {
+    index = skipXmlWhitespace(xml, index);
+    if (xml[index] === ">") return { attributes, selfClosing, index: index + 1 };
+    if (xml[index] === "/") {
+      if (xml[index + 1] !== ">") malformed();
+      selfClosing = true;
+      return { attributes, selfClosing, index: index + 2 };
+    }
+    const attribute = readXmlAttribute(xml, index, malformed);
+    if (attributes.has(attribute.name) || attributes.size >= MAX_XML_ATTRIBUTES) malformed();
+    attributes.set(attribute.name, attribute.value);
+    index = attribute.end;
+  }
+  return malformed();
+}
+
 function readOpeningXmlElement(
   xml: string,
-  open: number,
-  name: string,
-  localName: string,
-  parentLocalName: string | undefined,
+  element: XmlElementContext,
   startIndex: number,
   state: XmlScannerState,
   visit: (token: XmlToken) => void,
   malformed: () => never,
 ) {
-  const attributes = new Map<string, string>();
-  let index = startIndex;
-  let selfClosing = false;
-  while (index < xml.length) {
-    index = skipXmlWhitespace(xml, index);
-    if (xml[index] === ">") {
-      index += 1;
-      break;
-    }
-    if (xml[index] === "/") {
-      if (xml[index + 1] !== ">") malformed();
-      selfClosing = true;
-      index += 2;
-      break;
-    }
-    const attribute = readXmlName(xml, index, malformed);
-    index = skipXmlWhitespace(xml, attribute.end);
-    if (xml[index] !== "=") malformed();
-    index = skipXmlWhitespace(xml, index + 1);
-    const quote = xml[index];
-    if (quote !== "\"" && quote !== "'") malformed();
-    index += 1;
-    const valueStart = index;
-    while (index < xml.length && xml[index] !== quote) {
-      if (xml[index] === "<") malformed();
-      index += 1;
-    }
-    if (index >= xml.length || attributes.has(attribute.name) || attributes.size >= MAX_XML_ATTRIBUTES)
-      malformed();
-    attributes.set(attribute.name, xml.slice(valueStart, index));
-    index += 1;
-  }
-  if (index > xml.length || xml[index - 1] !== ">") malformed();
-  if (!state.stack.length) {
-    if (state.rootSeen) malformed();
-    state.rootSeen = true;
-  }
-  visit({ type: "start", name, localName, parentLocalName, attributes, selfClosing, start: open, end: index });
+  const { attributes, selfClosing, index } = readXmlOpeningAttributes(xml, startIndex, malformed);
+  if (!state.stack.length && state.rootSeen) malformed();
+  if (!state.stack.length) state.rootSeen = true;
+  visit({
+    type: "start",
+    name: element.name,
+    localName: element.localName,
+    parentLocalName: element.parentLocalName,
+    attributes,
+    selfClosing,
+    start: element.open,
+    end: index,
+  });
   if (selfClosing) {
-    visit({ type: "end", name, localName, parentLocalName, start: open, end: index });
+    visit({
+      type: "end",
+      name: element.name,
+      localName: element.localName,
+      parentLocalName: element.parentLocalName,
+      start: element.open,
+      end: index,
+    });
     return index;
   }
   if (state.stack.length >= MAX_XML_DEPTH) malformed();
-  state.stack.push({ name, localName });
+  state.stack.push({ name: element.name, localName: element.localName });
   return index;
 }
 
@@ -367,9 +394,10 @@ function readXmlElement(
   const closing = xml[open + 1] === "/";
   const parsed = readXmlName(xml, open + (closing ? 2 : 1), malformed);
   const parentLocalName = state.stack.at(closing ? -2 : -1)?.localName;
+  const element = { open, name: parsed.name, localName: parsed.localName, parentLocalName };
   if (closing)
-    return readClosingXmlElement(xml, open, parsed.name, parsed.localName, parentLocalName, parsed.end, state, visit, malformed);
-  return readOpeningXmlElement(xml, open, parsed.name, parsed.localName, parentLocalName, parsed.end, state, visit, malformed);
+    return readClosingXmlElement(xml, element, parsed.end, state, visit, malformed);
+  return readOpeningXmlElement(xml, element, parsed.end, state, visit, malformed);
 }
 
 function readXmlMarkup(
@@ -417,7 +445,7 @@ function scanXml(xml: string, visit: (token: XmlToken) => void) {
 }
 
 function parseBoundedInteger(value: string | undefined, maximum: number) {
-  if (value === undefined || !value.length) return undefined;
+  if (!value?.length) return undefined;
   let number = 0;
   for (let index = 0; index < value.length; index += 1) {
     const digit = value.codePointAt(index)! - 0x30;
@@ -492,7 +520,7 @@ async function preflightWorkbookImport(zip: JSZip, warnings: string[]) {
   for (const path in zip.files) {
     const entry = zip.files[path];
     if (entry.dir) continue;
-    const excelJsWorksheetPart = path.match(/xl\/worksheets\/sheet(\d+)[.]xml/);
+    const excelJsWorksheetPart = /xl\/worksheets\/sheet(\d+)[.]xml/.exec(path);
     if (excelJsWorksheetPart && path !== `xl/worksheets/sheet${excelJsWorksheetPart[1]}.xml`)
       throw new Error("The workbook contains an invalid worksheet part path.");
     if (!/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
@@ -684,43 +712,84 @@ function preflightWorksheetXml(xml: string, warnings: string[], budget: Workbook
     : { normalizedXml: undefined };
 }
 
+type FormulaCacheCellState = {
+  address?: string;
+  type?: string;
+  formula: boolean;
+  inValue: boolean;
+  valueHasText: boolean;
+  emptyValue: boolean;
+};
+
+type FormulaCacheScanState = { cell?: FormulaCacheCellState };
+
+function beginFormulaCacheCell(token: XmlToken, state: FormulaCacheScanState) {
+  if (token.localName?.toLowerCase() !== "c" || token.parentLocalName?.toLowerCase() !== "row")
+    return false;
+  state.cell = {
+    address: token.attributes?.get("r"),
+    type: token.attributes?.get("t"),
+    formula: false,
+    inValue: false,
+    valueHasText: false,
+    emptyValue: false,
+  };
+  return true;
+}
+
+function updateFormulaCacheCellStart(token: XmlToken, state: FormulaCacheScanState) {
+  const cell = state.cell;
+  if (!cell) return;
+  const tag = token.localName?.toLowerCase();
+  if (tag === "f") {
+    cell.formula = true;
+    return;
+  }
+  if (tag === "v") {
+    cell.inValue = true;
+    cell.valueHasText = false;
+  }
+}
+
+function updateFormulaCacheCellText(xml: string, token: XmlToken, state: FormulaCacheScanState) {
+  const cell = state.cell;
+  if (!cell?.inValue) return;
+  for (let index = token.start; index < token.end; index += 1) {
+    if (!isXmlWhitespace(xml.codePointAt(index)!)) {
+      cell.valueHasText = true;
+      return;
+    }
+  }
+}
+
+function finishFormulaCacheCell(token: XmlToken, state: FormulaCacheScanState, cells: Set<string>) {
+  const cell = state.cell;
+  if (!cell) return;
+  const tag = token.localName?.toLowerCase();
+  if (tag === "v") {
+    cell.emptyValue = !cell.valueHasText;
+    cell.inValue = false;
+    return;
+  }
+  if (tag !== "c") return;
+  if (cell.address && cell.type === "str" && cell.formula && cell.emptyValue)
+    cells.add(cell.address);
+  state.cell = undefined;
+}
+
 function findEmptyFormulaCacheCells(xml: string) {
   const cells = new Set<string>();
-  let cell: { address?: string; type?: string; formula: boolean; inValue: boolean; valueHasText: boolean; emptyValue: boolean } | undefined;
+  const state: FormulaCacheScanState = {};
   scanXml(xml, token => {
-    const tag = token.localName?.toLowerCase();
-    if (token.type === "start" && tag === "c" && token.parentLocalName?.toLowerCase() === "row") {
-      cell = { address: token.attributes?.get("r"), type: token.attributes?.get("t"), formula: false, inValue: false, valueHasText: false, emptyValue: false };
+    if (token.type === "start") {
+      if (!beginFormulaCacheCell(token, state)) updateFormulaCacheCellStart(token, state);
       return;
     }
-    if (token.type === "start" && tag === "f" && cell) {
-      cell.formula = true;
+    if (token.type === "text") {
+      updateFormulaCacheCellText(xml, token, state);
       return;
     }
-    if (token.type === "start" && tag === "v" && cell) {
-      cell.inValue = true;
-      cell.valueHasText = false;
-      return;
-    }
-    if (token.type === "text" && cell?.inValue) {
-      for (let index = token.start; index < token.end; index += 1) {
-        if (!isXmlWhitespace(xml.codePointAt(index)!)) {
-          cell.valueHasText = true;
-          break;
-        }
-      }
-      return;
-    }
-    if (token.type === "end" && tag === "v" && cell) {
-      cell.emptyValue = !cell.valueHasText;
-      cell.inValue = false;
-      return;
-    }
-    if (token.type === "end" && tag === "c" && cell) {
-      if (cell.address && cell.type === "str" && cell.formula && cell.emptyValue)
-        cells.add(cell.address);
-      cell = undefined;
-    }
+    finishFormulaCacheCell(token, state, cells);
   });
   return cells;
 }
@@ -783,18 +852,21 @@ type ImportedWorksheetModel = {
   merges?: string[];
 };
 
-function hasColumnStyle(column: NonNullable<ImportedWorksheetModel['cols']>[number]) {
+type ImportedWorksheetColumn = NonNullable<ImportedWorksheetModel["cols"]>[number];
+type ImportedWorksheetColumns = NonNullable<ImportedWorksheetModel["cols"]>;
+
+function hasColumnStyle(column: ImportedWorksheetColumn) {
   return Boolean(column.style && Object.keys(column.style).length);
 }
 
-function hasMeaningfulColumnState(column: NonNullable<ImportedWorksheetModel['cols']>[number], defaultWidth: number) {
+function hasMeaningfulColumnState(column: ImportedWorksheetColumn, defaultWidth: number) {
   const width = column.width;
   return column.hidden === true ||
     (typeof width === "number" && Number.isFinite(width) && width > 0 && width !== defaultWidth) ||
     hasColumnStyle(column) || Boolean(column.outlineLevel || column.collapsed || column.bestFit);
 }
 
-function getDeclaredColumnCount(columns: NonNullable<ImportedWorksheetModel['cols']>, defaultWidth: number) {
+function getDeclaredColumnCount(columns: ImportedWorksheetColumns, defaultWidth: number) {
   return columns.reduce((maximum, column) => {
     const first = column.min ?? 0;
     const last = column.max ?? 0;
@@ -843,39 +915,52 @@ function createImportedWorksheet(worksheet: ExcelJS.Worksheet, id: string, requi
 }
 
 function importWorksheetColumns(
-  columns: NonNullable<ImportedWorksheetModel['cols']>,
+  columns: ImportedWorksheetColumns,
   sheet: IWorksheetData,
   defaultWidth: number,
   warnings: string[],
 ) {
   for (const column of columns) {
-    const first = column.min ?? 0;
-    const last = column.max ?? 0;
-    if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first || last > MAX_COLUMNS)
-      throw new Error("The workbook contains invalid column definitions.");
-    const width = column.width;
-    const customWidth = typeof width === "number" && Number.isFinite(width) && width > 0 && width !== defaultWidth;
-    const sourceHasStyle = hasColumnStyle(column);
-    const convertedStyle = column.style ? fromStyle(column.style) : undefined;
-    const style = convertedStyle && Object.keys(convertedStyle).length ? convertedStyle : undefined;
-    if (sourceHasStyle && !style)
-      addWarning(warnings, "Some spreadsheet column styles are not supported and were omitted.");
+    const { first, last } = getImportedColumnSpan(column);
+    const override = getImportedColumnOverride(column, defaultWidth, warnings);
     if (last > sheet.columnCount && hasMeaningfulColumnState(column, defaultWidth))
       addWarning(warnings, "Formatting for empty columns outside the active imported range was omitted.");
     const activeFirst = Math.max(1, first);
     const activeLast = Math.min(last, sheet.columnCount);
     if (activeFirst > activeLast) continue;
-    const override = {
-      ...(customWidth ? { w: excelColumnWidthToPixels(width!) } : {}),
-      ...(column.hidden ? { hd: 1 as const } : {}),
-      ...(style ? { s: style } : {}),
-    };
     if (!Object.keys(override).length) continue;
     // ExcelJS normalizes column definitions into sorted, non-overlapping spans.
     // Clipping each span to active geometry bounds total expansion.
     for (let columnIndex = activeFirst; columnIndex <= activeLast; columnIndex += 1)
       sheet.columnData[columnIndex - 1] = override;
   }
+}
+
+function getImportedColumnSpan(column: ImportedWorksheetColumn) {
+  const first = column.min ?? 0;
+  const last = column.max ?? 0;
+  if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first || last > MAX_COLUMNS)
+    throw new Error("The workbook contains invalid column definitions.");
+  return { first, last };
+}
+
+function getImportedColumnOverride(
+  column: ImportedWorksheetColumn,
+  defaultWidth: number,
+  warnings: string[],
+) {
+  const width = column.width;
+  const customWidth = typeof width === "number" && Number.isFinite(width) && width > 0 && width !== defaultWidth;
+  const sourceHasStyle = hasColumnStyle(column);
+  const convertedStyle = column.style ? fromStyle(column.style) : undefined;
+  const style = convertedStyle && Object.keys(convertedStyle).length ? convertedStyle : undefined;
+  if (sourceHasStyle && !style)
+    addWarning(warnings, "Some spreadsheet column styles are not supported and were omitted.");
+  return {
+    ...(customWidth ? { w: excelColumnWidthToPixels(width!) } : {}),
+    ...(column.hidden ? { hd: 1 as const } : {}),
+    ...(style ? { s: style } : {}),
+  };
 }
 
 function importFormulaCell(
@@ -937,7 +1022,9 @@ function importWorksheetRows(
       if (cell.isMerged && cell.master.address !== cell.address) return;
       const value = importCellValue(cell, emptyFormulaCells);
       value.s = fromStyle(cell.style);
-      (sheet.cellData[rowIndex - 1] ??= {})[columnIndex - 1] = value;
+      const rowData = sheet.cellData[rowIndex - 1] ?? {};
+      rowData[columnIndex - 1] = value;
+      sheet.cellData[rowIndex - 1] = rowData;
     });
   });
   return cellsImported;
@@ -989,6 +1076,19 @@ const csvCell = (cell: ICellData | undefined) => {
     raw = `'${raw}`;
   return /[",\r\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 };
+
+function exportCellValue(cell: ICellData) {
+  if (cell.f) {
+    return {
+      formula: cell.f.replace(/^=/, ""),
+      ...(cell.v != null ? { result: cell.v as any } : {}),
+    };
+  }
+  if (typeof cell.v === "string" || typeof cell.v === "number" || typeof cell.v === "boolean")
+    return cell.v;
+  const richText = cell.p ? cell.p.body?.dataStream : undefined;
+  return richText?.replace(/\r\n$/, "") ?? null;
+}
 
 export async function importSpreadsheet(
   bytes: ArrayBuffer,
@@ -1097,16 +1197,7 @@ export async function exportSpreadsheet(
       )) {
         if (!cell) continue;
         const targetCell = target.getCell(Number(r) + 1, Number(c) + 1);
-        targetCell.value = cell.f
-          ? {
-              formula: cell.f.replace(/^=/, ""),
-              ...(cell.v != null ? { result: cell.v as any } : {}),
-            }
-          : typeof cell.v === "string" ||
-              typeof cell.v === "number" ||
-              typeof cell.v === "boolean"
-            ? cell.v
-              : (cell.p ? cell.p.body?.dataStream?.replace(/\r\n$/, "") ?? null : null);
+        targetCell.value = exportCellValue(cell);
         const style =
           typeof cell.s === "string"
             ? document.workbook.styles?.[cell.s]

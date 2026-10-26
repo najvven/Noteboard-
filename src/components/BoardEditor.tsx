@@ -6086,6 +6086,26 @@ export default function BoardEditor({
     setLayerPreviewOrder(next);
   };
 
+  const getLayerDropPlacement = (
+    event: React.DragEvent<HTMLElement>,
+    target: BoardElement,
+  ): "before" | "after" | null => {
+    if (target.type === "board") return "before";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pointerRatio = rect.height > 0
+      ? (event.clientY - rect.top) / rect.height
+      : 0.5;
+    if (pointerRatio < 0.44) return "before";
+    if (pointerRatio > 0.56) return "after";
+    return null;
+  };
+
+  const clearLayerReorderTimer = () => {
+    if (layerReorderTimerRef.current === null) return;
+    window.clearTimeout(layerReorderTimerRef.current);
+    layerReorderTimerRef.current = null;
+  };
+
   const previewLayerOrderFromPointer = (
     event: React.DragEvent<HTMLElement>,
     target: BoardElement,
@@ -6094,26 +6114,10 @@ export default function BoardEditor({
     const draggedId = draggedLayerIdRef.current;
     if (!draggedId || draggedId === target.id) return;
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerRatio = rect.height > 0
-      ? (event.clientY - rect.top) / rect.height
-      : 0.5;
-    const placement = target.type === "board"
-      ? "before"
-      : pointerRatio < 0.44
-        ? "before"
-        : pointerRatio > 0.56
-          ? "after"
-          : null;
+    const placement = getLayerDropPlacement(event, target);
 
     if (!placement) {
-      if (layerReorderTimerRef.current !== null) {
-        window.clearTimeout(layerReorderTimerRef.current);
-        layerReorderTimerRef.current = null;
-      }
-      layerReorderPendingRef.current = null;
-      setDragOverLayerId(null);
-      setLayerDropTarget(null);
+      cancelLayerReorderPending();
       return;
     }
 
@@ -6123,10 +6127,7 @@ export default function BoardEditor({
     const pending = layerReorderPendingRef.current;
 
     if (force) {
-      if (layerReorderTimerRef.current !== null) {
-        window.clearTimeout(layerReorderTimerRef.current);
-        layerReorderTimerRef.current = null;
-      }
+      clearLayerReorderTimer();
       previewLayerOrder(target.id, placement);
       layerReorderPendingRef.current = null;
       return;
@@ -6134,9 +6135,7 @@ export default function BoardEditor({
 
     if (pending?.key === key) return;
 
-    if (layerReorderTimerRef.current !== null) {
-      window.clearTimeout(layerReorderTimerRef.current);
-    }
+    clearLayerReorderTimer();
     layerReorderPendingRef.current = { key, since: performance.now() };
     layerReorderTimerRef.current = window.setTimeout(() => {
       if (layerReorderPendingRef.current?.key !== key) return;
@@ -6147,10 +6146,7 @@ export default function BoardEditor({
   };
 
   const cancelLayerReorderPending = () => {
-    if (layerReorderTimerRef.current !== null) {
-      window.clearTimeout(layerReorderTimerRef.current);
-      layerReorderTimerRef.current = null;
-    }
+    clearLayerReorderTimer();
     layerReorderPendingRef.current = null;
     setDragOverLayerId(null);
     setLayerDropTarget(null);
@@ -6504,6 +6500,13 @@ export default function BoardEditor({
     setSelectedId(id);
   };
 
+  const findTopPixelFillAtPoint = (point: { x: number; y: number }) =>
+    elementsRef.current
+      .filter(element => element.isPixelFill &&
+        elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
+        !elementHierarchy.isLocked(element.id) && isElementHitAtPoint(element, point))
+      .sort((left, right) => elementHierarchy.compare(right, left))[0];
+
   const beginPixelFillSelectionGesture = (event: React.PointerEvent) => {
     if (activeTool !== "select" || event.button !== 0) return false;
     const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
@@ -6516,11 +6519,7 @@ export default function BoardEditor({
       x: (event.clientX - surfaceRect.left) / zoomRef.current,
       y: (event.clientY - surfaceRect.top) / zoomRef.current,
     };
-    const fill = elementsRef.current
-      .filter(element => element.isPixelFill &&
-        elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
-        !elementHierarchy.isLocked(element.id) && isElementHitAtPoint(element, point))
-      .sort((left, right) => elementHierarchy.compare(right, left))[0];
+    const fill = findTopPixelFillAtPoint(point);
     if (!fill || elementHierarchy.compare(fill, targetElement) <= 0) return false;
 
     event.stopPropagation();
@@ -6548,43 +6547,49 @@ export default function BoardEditor({
     return true;
   };
 
-  const handlePointerDown = (e: React.PointerEvent, allowElementSelectionGesture = false) => {
-    if ((e.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
+  const shouldIgnorePointerDown = (event: React.PointerEvent) => {
+    if ((event.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return true;
     pendingPixelFillClickRef.current = null;
-    if (activeTool === "fill" && e.button !== 0) return;
-    if (activeTool === "select" && selectMode !== "rectangle" && e.button === 1) return;
-    if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
-    if (
-      activePointerIdRef.current !== null &&
-      activePointerIdRef.current !== e.pointerId
-    ) {
-      return;
+    if (activeTool === "fill" && event.button !== 0) return true;
+    if (activeTool === "select" && selectMode !== "rectangle" && event.button === 1) return true;
+    if (outlineSelection.begin(event)) {
+      setIsMainBoardSelected(false);
+      closeAllDropdowns();
+      return true;
     }
+    if (activePointerIdRef.current !== null && activePointerIdRef.current !== event.pointerId)
+      return true;
     if ((window as any).justLinkedElement) {
-      // Allow drop-down states to clear, but do not change selection
+      // Allow drop-down states to clear, but do not change selection.
       (window as any).justLinkedElement = false;
-      return;
+      return true;
     }
-    if (e.button === 0) {
-      e.preventDefault();boardSurfaceRef.current?.focus({preventScroll:true});
-      clearSavedTextRange();window.getSelection()?.removeAllRanges();
+    if (event.button === 0) {
+      event.preventDefault();
+      boardSurfaceRef.current?.focus({ preventScroll: true });
+      clearSavedTextRange();
+      window.getSelection()?.removeAllRanges();
     }
     setContextMenuPos(null);
     setQuickAddRegion(null);
-    if (activeTool === "pan") {
-      closeAllDropdowns();
-      captureSurfacePointer(e);
-      setIsInteracting(true);
-      setPanStart({ x: e.clientX, y: e.clientY });
-      activeSurfaceBoundsRef.current = null;
-      return;
-    }
+    return false;
+  };
 
-    const target = e.target as HTMLElement;
-    const targetId = target.id;
+  const beginWorkspacePanFromPointerDown = (event: React.PointerEvent) => {
+    if (activeTool !== "pan") return false;
+    closeAllDropdowns();
+    captureSurfacePointer(event);
+    setIsInteracting(true);
+    setPanStart({ x: event.clientX, y: event.clientY });
+    activeSurfaceBoundsRef.current = null;
+    return true;
+  };
+
+  const getPointerDownContext = (event: React.PointerEvent) => {
+    const target = event.target as HTMLElement;
     const rect = boardSurfaceRef.current!.getBoundingClientRect();
-    const exactX = (e.clientX - rect.left) / zoom;
-    const exactY = (e.clientY - rect.top) / zoom;
+    const exactX = (event.clientX - rect.left) / zoom;
+    const exactY = (event.clientY - rect.top) / zoom;
     const pointerPoint = { x: exactX, y: exactY };
     const interactionBounds = getInteractionBoundsAtPoint(pointerPoint);
     const isElementTarget = !!target.closest?.('[data-board-element="true"]');
@@ -6593,7 +6598,7 @@ export default function BoardEditor({
     );
     const isBoardSurface = isBoardPlacementSurface({
       hasBoardSurfaceMarker:
-        targetId === "main-board" ||
+        target.id === "main-board" ||
         target === boardSurfaceRef.current ||
         target.dataset.boardSurface === "true" ||
         !!target.closest?.('[data-board-surface="true"]'),
@@ -6603,124 +6608,138 @@ export default function BoardEditor({
     closeAllDropdowns({
       preservePresetPicking: shouldPreservePresetPicking({
         hasActivePreset: Boolean(pickingObjectPresetId),
-        isPrimaryPointer: e.button === 0,
+        isPrimaryPointer: event.button === 0,
         isElementTarget,
       }),
     });
     setIsMainBoardSelected(isBoardSurface && !secondaryBoardSurface);
 
+    return { exactX, exactY, pointerPoint, interactionBounds, isElementTarget, isBoardSurface };
+  };
+
+  const handleImmediateToolPointerDown = (
+    event: React.PointerEvent,
+    context: ReturnType<typeof getPointerDownContext>,
+  ) => {
     if (activeTool === "board") {
       activeSurfaceBoundsRef.current = null;
-      return;
+      return true;
     }
-
     if (activeTool === "zoom") {
       activeSurfaceBoundsRef.current = null;
       const zoomStep = 0.5 * clickZoomSensitivity;
-      if (e.button === 0) { // left click
-         zoomAtPoint(zoomStep, e.clientX, e.clientY);
-      } else if (e.button === 2) { // right click
-         zoomAtPoint(-zoomStep, e.clientX, e.clientY);
-      }
+      if (event.button === 0) zoomAtPoint(zoomStep, event.clientX, event.clientY);
+      else if (event.button === 2) zoomAtPoint(-zoomStep, event.clientX, event.clientY);
+      return true;
+    }
+    if (event.button !== 2) return false;
+
+    activeSurfaceBoundsRef.current = null;
+    const element = elements
+      .slice()
+      .reverse()
+      .find(candidate =>
+        candidate.type !== "layer" &&
+        elementHierarchy.isVisible(candidate.id, respectLayerVisibility) &&
+        isElementHitAtPoint(candidate, context.pointerPoint),
+      );
+    if (element) {
+      setSelectedId(element.id);
+      setContextMenuPos({ x: event.clientX, y: event.clientY });
+    }
+    return true;
+  };
+
+  const canStartSurfaceGesture = (
+    context: ReturnType<typeof getPointerDownContext>,
+    allowElementSelectionGesture: boolean,
+  ) => Boolean(context.interactionBounds) && (
+    context.isBoardSurface || activeTool === "fill" || allowElementSelectionGesture
+  );
+
+  const beginEraserPointerGesture = (
+    event: React.PointerEvent,
+    point: { x: number; y: number },
+  ) => {
+    setIsInteracting(true);
+    beginAreaGesture(point, event.pointerId, activeTool);
+    if (eraserMode === "partial") {
+      setCurrentDrawPoints([point]);
       return;
     }
+    const element = elements
+      .slice()
+      .reverse()
+      .find(candidate =>
+        candidate.type !== "board" && candidate.type !== "layer" &&
+        !elementHierarchy.isLocked(candidate.id) &&
+        elementHierarchy.isVisible(candidate.id, respectLayerVisibility) &&
+        isElementHitAtPoint(candidate, point),
+      );
+    if (element) removeElement(element.id);
+  };
 
-    if (e.button === 2) {
-      activeSurfaceBoundsRef.current = null;
-      // Right click: verify if we hit any element based on coordinates to show its context menu
-      const el = elements
-        .slice()
-        .reverse()
-        .find((el) => {
-          if (el.type === "layer" || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) return false;
-          return isElementHitAtPoint(el, { x: exactX, y: exactY });
-        });
-      if (el) {
-        setSelectedId(el.id);
-        setContextMenuPos({ x: e.clientX, y: e.clientY });
-      }
-      return;
+  const beginAreaToolPointerGesture = (
+    event: React.PointerEvent,
+    point: { x: number; y: number },
+  ) => {
+    switch (activeTool) {
+      case "eraser":
+        beginEraserPointerGesture(event, point);
+        return true;
+      case "fill":
+        setIsInteracting(true);
+        beginAreaGesture(point, event.pointerId, activeTool);
+        void applyFillAtPoint(point, { x: event.clientX, y: event.clientY });
+        return true;
+      case "draw":
+        setIsInteracting(true);
+        beginAreaGesture(point, event.pointerId, activeTool);
+        setCurrentDrawPoints([point]);
+        return true;
+      default:
+        return false;
     }
+  };
 
-    // Only capture on the board surface or main board for other tools
-    // Additional-board objects are rendered as siblings of their surface, so
-    // their DOM target is not necessarily nested under a board-surface marker.
-    // Fill resolves the visible surface from the world point and may proceed
-    // even when the clicked target itself is one of those sibling objects.
-    if ((!isBoardSurface && activeTool !== "fill" && !allowElementSelectionGesture) || !interactionBounds) return;
+  const handlePointerDown = (event: React.PointerEvent, allowElementSelectionGesture = false) => {
+    if (shouldIgnorePointerDown(event)) return;
+    if (beginWorkspacePanFromPointerDown(event)) return;
+
+    const context = getPointerDownContext(event);
+    if (handleImmediateToolPointerDown(event, context)) return;
+    if (!canStartSurfaceGesture(context, allowElementSelectionGesture)) return;
+    const interactionBounds = context.interactionBounds;
+    if (!interactionBounds) return;
+
     activeSurfaceBoundsRef.current = interactionBounds;
     // Keep the active gesture alive when the pointer crosses the board edge.
     // Without capture, Select receives a synthetic pointer-up/leave and the
     // marquee becomes a small stale region instead of following the pointer.
-    captureSurfacePointer(e);
+    captureSurfacePointer(event);
 
     if (activeTool === "link") {
-      if (!getEffectiveToolMenuSettings("link").alwaysOnTop) {
-        setSelectedId(null);
-      }
+      if (!getEffectiveToolMenuSettings("link").alwaysOnTop) setSelectedId(null);
       return;
     }
 
     setSelectedId(null);
-
-    if (activeTool === "eraser") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      if (eraserMode === 'partial') {
-         setCurrentDrawPoints([{ x: exactX, y: exactY }]);
-      } else {
-         // Delete any element under cursor immediately
-         const el = elements
-           .slice()
-           .reverse()
-           .find((el) => {
-              if (el.type === "board" || el.type === "layer" || elementHierarchy.isLocked(el.id) || !elementHierarchy.isVisible(el.id, respectLayerVisibility)) {
-                return false;
-              }
-              return isElementHitAtPoint(el, { x: exactX, y: exactY });
-           });
-         if (el) removeElement(el.id);
-      }
-      return;
-    }
-
-    if (activeTool === "fill") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      void applyFillAtPoint({ x: exactX, y: exactY }, { x: e.clientX, y: e.clientY });
-      return;
-    }
-
-    if (activeTool === "draw") {
-      setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
-      setCurrentDrawPoints([{ x: exactX, y: exactY }]);
-      return;
-    }
+    if (beginAreaToolPointerGesture(event, context.pointerPoint)) return;
 
     // Pixel fills pass pointer events through their transparent pixels. When
     // the canvas receives that event, use the same alpha-aware hit test as the
     // Eraser so opaque fill pixels remain selectable and draggable.
-    if (activeTool === "select" && !isElementTarget) {
-      const fill = elementsRef.current
-        .slice()
-        .sort((a, b) => elementHierarchy.compare(b, a))
-        .find(element =>
-          element.isPixelFill &&
-          elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
-          !elementHierarchy.isLocked(element.id) &&
-          isElementHitAtPoint(element, pointerPoint),
-        );
-      if (fill) pendingPixelFillClickRef.current = { id: fill.id, pointerId: e.pointerId };
+    if (activeTool === "select" && !context.isElementTarget) {
+      const fill = findTopPixelFillAtPoint(context.pointerPoint);
+      if (fill) pendingPixelFillClickRef.current = { id: fill.id, pointerId: event.pointerId };
     }
 
-    // Select uses the actual pointer coordinates. Snapping its marquee to the
-    // grid made upper-left drags jump sides and could lose a fast gesture.
-    const x = activeTool === "select" ? exactX : snap(exactX);
-    const y = activeTool === "select" ? exactY : snap(exactY);
+    // Select uses actual pointer coordinates. Snapping its marquee to the grid
+    // made upper-left drags jump sides and could lose a fast gesture.
+    const x = activeTool === "select" ? context.exactX : snap(context.exactX);
+    const y = activeTool === "select" ? context.exactY : snap(context.exactY);
     const snappedPoint = clampPointToBounds({ x, y }, interactionBounds);
-
-    beginAreaGesture(snappedPoint, e.pointerId, activeTool, pointerPoint);
+    beginAreaGesture(snappedPoint, event.pointerId, activeTool, context.pointerPoint);
     setIsInteracting(true);
   };
 
@@ -12330,22 +12349,30 @@ function BoardElementNode({
         )
       : null;
 
-  const elementPointerClass = () => {
-    if ((element.isPixelFill && !isSelected) || isInteractionLocked) return "pointer-events-none";
-    if (element.type === "board" && !canInteract) return "cursor-crosshair pointer-events-auto";
-    if (element.type === "line") {
-      if (!canInteract) return "pointer-events-none";
-      return canMove ? "cursor-move pointer-events-auto" : "pointer-events-auto";
-    }
-    if (!canInteract) {
-      if (hasPlayableMediaControls) return "cursor-default pointer-events-auto";
-      return element.linkToId ? "cursor-pointer pointer-events-auto" : "pointer-events-none";
-    }
+  const linePointerClass = () => {
+    if (!canInteract) return "pointer-events-none";
+    return canMove ? "cursor-move pointer-events-auto" : "pointer-events-auto";
+  };
+
+  const nonInteractivePointerClass = () => {
+    if (hasPlayableMediaControls) return "cursor-default pointer-events-auto";
+    return element.linkToId ? "cursor-pointer pointer-events-auto" : "pointer-events-none";
+  };
+
+  const interactivePointerClass = () => {
     if (element.linkToId && activeTool !== "link") return "cursor-pointer pointer-events-auto";
     if (activeTool === "pan") return "pointer-events-auto";
     if (activeTool === "link") return "cursor-pointer pointer-events-auto";
     if (isBoardInteraction && !isBoardMoveEnabled) return "pointer-events-auto";
     return canMove ? "cursor-move pointer-events-auto" : "pointer-events-auto";
+  };
+
+  const elementPointerClass = () => {
+    if ((element.isPixelFill && !isSelected) || isInteractionLocked) return "pointer-events-none";
+    if (element.type === "board" && !canInteract) return "cursor-crosshair pointer-events-auto";
+    if (element.type === "line") return linePointerClass();
+    if (!canInteract) return nonInteractivePointerClass();
+    return interactivePointerClass();
   };
 
   return (

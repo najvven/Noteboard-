@@ -17,8 +17,13 @@ export function findBoardSurface(point: Position, boards: readonly BoardElement[
     .find(board => pointInPolygon(point, elementPolygon(board)));
 }
 
+type PixelFillBoardOwnerInput = Pick<
+  BoardElement,
+  'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'
+>;
+
 function resolvePixelFillBoardOwner(
-  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'>,
+  element: PixelFillBoardOwnerInput,
   boards: readonly BoardElement[],
   mainSize: Size,
 ) {

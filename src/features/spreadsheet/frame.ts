@@ -802,15 +802,13 @@ window.addEventListener("message", async (event) => {
             }
           | undefined;
         const cleanInput = (value: string) => value.replace(/\r\n$/, "");
-        let restoredEditor:
-          | ReturnType<typeof getEditor>
-          | undefined;
-        for (let frame = 0; frame < 60 && !restoredEditor; frame++) {
+        let restoredEditors: NonNullable<ReturnType<typeof getEditor>>[] = [];
+        for (let frame = 0; frame < 60 && restoredEditors.length === 0; frame++) {
           await waitFrame();
           if (!book.isCellEditing()) continue;
-          const candidate = editorIds
+          const candidates = editorIds
             .map(getEditor)
-            .find((editor) => {
+            .filter((editor): editor is NonNullable<ReturnType<typeof getEditor>> => {
               const dataStream = editor?.getBody?.().dataStream;
               return (
                 typeof dataStream === "string" &&
@@ -818,23 +816,27 @@ window.addEventListener("message", async (event) => {
                 (expectedInput === undefined || cleanInput(dataStream) === expectedInput)
               );
             });
-          if (!candidate) continue;
+          if (!candidates.length) continue;
           await waitFrame();
-          const currentInput = candidate.getBody?.().dataStream;
-          if (
-            typeof currentInput === "string" &&
-            (expectedInput === undefined || cleanInput(currentInput) === expectedInput)
-          )
-            restoredEditor = candidate;
+          restoredEditors = candidates.filter((editor) => {
+            const currentInput = editor.getBody?.().dataStream;
+            return (
+              typeof currentInput === "string" &&
+              (expectedInput === undefined || cleanInput(currentInput) === expectedInput)
+            );
+          });
         }
-        if (restoredEditor) {
-          // Apply this after the model has stabilized and before the host removes
-          // its loading cover, so the first new keystroke continues the draft.
-          const dataStream = restoredEditor.getBody?.().dataStream;
-          if (typeof dataStream === "string") {
+        if (restoredEditors.length) {
+          // Univer can keep both the in-cell and formula-bar documents mounted.
+          // Align every matching restored editor so the focused one cannot retain
+          // its old start-of-text caret while the other document is updated.
+          for (const editor of restoredEditors) {
+            const dataStream = editor.getBody?.().dataStream;
+            if (typeof dataStream !== "string") continue;
             const caret = cleanInput(dataStream).length;
-            restoredEditor.setSelection?.(caret, caret);
+            editor.setSelection?.(caret, caret);
           }
+          await repaint();
         }
       }
       send("loaded");

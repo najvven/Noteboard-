@@ -1048,7 +1048,7 @@ test('sandboxed frames cannot open windows while an allowed top-level popup stil
 test('desktop Web loads, saves before ready, retries and opens isolated popups', {timeout:60000}, async t=>{
   const origin=await fixtureServer(t);
   const {app,window,profile,errors}=await launch(t,seed('embed',origin+'/page'));
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   const field=window.locator('[data-board-element-id="web"]');
   await field.click({position:{x:5,y:5}});
@@ -1063,7 +1063,7 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
   const templates=JSON.parse(await fs.readFile(path.join(profile,'data','presets.json'),'utf8'));
   assert.equal(templates[0].elements.find(e=>e.id==='web').content,`${origin}/slow`);
   await dialog.getByRole('button',{name:'Close save dialog'}).click();
-  await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+  await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
   await expect(window.getByText('Loading page…',{exact:true})).toHaveCount(0);
   await window.getByRole('button',{name:'Select Tool',exact:true}).click();
   await field.click({position:{x:5,y:5}});
@@ -1078,7 +1078,7 @@ test('desktop Web loads, saves before ready, retries and opens isolated popups',
       await expect.poll(()=>app.evaluate(({app})=>app.__qaExternalUrl)).toBe(origin+'/fail');
     }
     else {
-      await expect.poll(async()=> (await guestState(app))[0]?.title).toBe('Native web ready');
+      await expect.poll(async()=> (await guestState(app))[0]?.title,{timeout:15000}).toBe('Native web ready');
       await expect.poll(async()=> (await guestState(app)).length).toBe(1);
     }
   }

@@ -6504,8 +6504,8 @@ export default function BoardEditor({
     setSelectedId(id);
   };
 
-  const selectTopPixelFillFromPointerCapture = (event: React.PointerEvent) => {
-    if (activeTool !== "select" || event.button !== 0 || selectedIds.length > 1) return false;
+  const beginPixelFillSelectionGesture = (event: React.PointerEvent) => {
+    if (activeTool !== "select" || event.button !== 0) return false;
     const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
     const target = event.target as HTMLElement;
     const targetId = target.closest<HTMLElement>("[data-board-element-id]")?.dataset.boardElementId;
@@ -6523,33 +6523,32 @@ export default function BoardEditor({
       .sort((left, right) => elementHierarchy.compare(right, left))[0];
     if (!fill || elementHierarchy.compare(fill, targetElement) <= 0) return false;
 
-    event.preventDefault();
     event.stopPropagation();
-    window.getSelection()?.removeAllRanges();
-    pendingPixelFillClickRef.current = null;
-    setQuickAddRegion(null);
-    setSelectedId(fill.id);
-    setIsMainBoardSelected(false);
-    setShowLinkInput(false);
-    setShowTargetInput(false);
-    setLinkSystemMode("start");
-    if (autoToolOnSelect) setActiveTool(toolForSelectedElement(fill));
-    setVisibleGuides([]);
-    groupMoveRef.current = {
-      pointerId: event.pointerId,
-      x: event.clientX,
-      y: event.clientY,
-      elements: elementsRef.current,
-      ids: new Set([fill.id]),
-      changed: false,
-      preview: getEffectiveToolMenuSettings("select").previewMode,
-    };
-    captureSurfacePointer(event);
-    setIsInteracting(true);
+    if (selectedIds.includes(fill.id)) {
+      event.preventDefault();
+      window.getSelection()?.removeAllRanges();
+      setQuickAddRegion(null);
+      groupMoveRef.current = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        elements: elementsRef.current,
+        ids: selectionTreeIds(),
+        changed: false,
+        preview: getEffectiveToolMenuSettings("select").previewMode,
+      };
+      captureSurfacePointer(event);
+      setIsInteracting(true);
+      return true;
+    }
+    handlePointerDown(event, true);
+    if (selectMode === "rectangle" && areaGestureRef.current?.pointerId === event.pointerId) {
+      pendingPixelFillClickRef.current = { id: fill.id, pointerId: event.pointerId };
+    }
     return true;
   };
 
-  const handlePointerDown = (e: React.PointerEvent) => {
+  const handlePointerDown = (e: React.PointerEvent, allowElementSelectionGesture = false) => {
     pendingPixelFillClickRef.current = null;
     if (activeTool === "fill" && e.button !== 0) return;
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
@@ -6646,7 +6645,7 @@ export default function BoardEditor({
     // their DOM target is not necessarily nested under a board-surface marker.
     // Fill resolves the visible surface from the world point and may proceed
     // even when the clicked target itself is one of those sibling objects.
-    if ((!isBoardSurface && activeTool !== "fill") || !interactionBounds) return;
+    if ((!isBoardSurface && activeTool !== "fill" && !allowElementSelectionGesture) || !interactionBounds) return;
     activeSurfaceBoundsRef.current = interactionBounds;
     // Keep the active gesture alive when the pointer crosses the board edge.
     // Without capture, Select receives a synthetic pointer-up/leave and the
@@ -8971,7 +8970,12 @@ export default function BoardEditor({
                 }}
                 onPointerDown={handlePointerDown}
                 onPointerDownCapture={(event) => {
-                  if (selectTopPixelFillFromPointerCapture(event)) return;
+                  if (activeTool === "select" && selectMode !== "rectangle") {
+                    event.stopPropagation();
+                    handlePointerDown(event);
+                    return;
+                  }
+                  if (beginPixelFillSelectionGesture(event)) return;
                   startSelectionMove(event);
                   if (activeTool === "fill" && event.button === 0) {
                     handlePointerDown(event);

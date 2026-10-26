@@ -1,7 +1,7 @@
 import { expect, test } from './test';
 import sharp from 'sharp';
 
-const createBoard = (id: string, elements: unknown[]) => ({
+const createBoard = (id: string, elements: unknown[], settings: Record<string, unknown> = {}) => ({
   id,
   title: id,
   width: 700,
@@ -16,8 +16,25 @@ const createBoard = (id: string, elements: unknown[]) => ({
   boardColor: '#ffffff',
   updatedAt: Date.now(),
   elements,
-  editorSettings: { activeTool: 'select', keepToolActive: true, fillToolColor: '#ff0000' },
+  editorSettings: { activeTool: 'select', keepToolActive: true, fillToolColor: '#ff0000', selectMode: 'rectangle', isSelectionLockEnabled: false, ...settings },
 });
+
+const createPixelFillBoard = async (id: string, selectMode: 'lasso' | 'polygon') => {
+  const content = `data:image/png;base64,${(await sharp({
+    create: { width: 164, height: 104, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } },
+  }).png().toBuffer()).toString('base64')}`;
+  return createBoard(id, [
+    {
+      id: 'outlined-square', type: 'rectangle', position: { x: 250, y: 170 }, size: { width: 180, height: 120 },
+      content: '', color: '#ffffff', borderColor: '#000000', borderWidth: 8, zIndex: 1,
+    },
+    {
+      id: 'visible-fill', type: 'image', position: { x: 258, y: 178 }, size: { width: 164, height: 104 },
+      content, color: 'transparent', borderColor: 'transparent', borderWidth: 0, isPixelFill: true,
+      pixelFillBoardId: 'main-board', zIndex: 2,
+    },
+  ], { selectMode });
+};
 
 test('Fill Tool fills the visible pixels inside a simple shape without native capture', async ({ page, request }) => {
   const id = 'browser-fill-visible-pixels';
@@ -88,11 +105,32 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   const shapeBounds = await square.boundingBox();
   expect(fillBounds).not.toBeNull();
   expect(shapeBounds).not.toBeNull();
-  await page.mouse.click(fillBounds!.x + fillBounds!.width / 2, fillBounds!.y + fillBounds!.height / 2);
-  await expect(page.getByText('Replace', { exact: true })).toBeVisible();
 
   const originalPosition = fill.position!;
   const dragStart = { x: fillBounds!.x + fillBounds!.width / 2, y: fillBounds!.y + fillBounds!.height / 2 };
+  await page.mouse.move(dragStart.x, dragStart.y);
+  await page.mouse.down();
+  await page.mouse.move(dragStart.x + 36, dragStart.y + 24, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      elements: Array<{ id: string; position?: { x: number; y: number } }>;
+    }>;
+    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === fill.id)?.position?.x;
+  }).toBe(originalPosition.x);
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      elements: Array<{ id: string; position?: { x: number; y: number } }>;
+    }>;
+    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.position?.x;
+  }).toBe(250);
+
+  await page.keyboard.press('Escape');
+  await page.mouse.click(fillBounds!.x + fillBounds!.width / 2, fillBounds!.y + fillBounds!.height / 2);
+  await expect(page.getByText('Replace', { exact: true })).toBeVisible();
+
   await page.mouse.move(dragStart.x, dragStart.y);
   await page.mouse.down();
   await page.mouse.move(dragStart.x + 36, dragStart.y + 24, { steps: 4 });
@@ -126,6 +164,45 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
     const documents = await current.json() as Array<{ id: string; elements: Array<{ id: string; isPixelFill?: boolean }> }>;
     return documents.find(candidate => candidate.id === id)?.elements.some(element => element.isPixelFill);
   }).toBe(false);
+});
+
+test('Polygon selection starts on an opaque pixel fill', async ({ page, request }) => {
+  const id = 'polygon-selection-on-fill';
+  const created = await request.post('/api/pages', { data: [await createPixelFillBoard(id, 'polygon')] });
+  expect(created.ok()).toBe(true);
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+  const fill = page.locator('[data-board-element-id="visible-fill"]');
+  await expect(fill).toBeVisible();
+  const bounds = (await fill.boundingBox())!;
+  const root = (await page.locator('[data-board-root]').boundingBox())!;
+  await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  const outline = page.locator('[data-selection-outline="polygon"]');
+  await expect(outline.locator('circle')).toHaveCount(1);
+  await page.mouse.click(root.x + 100, root.y + 100);
+  await page.mouse.click(root.x + 100, root.y + 300);
+  await expect(outline.locator('circle')).toHaveCount(3);
+  await page.keyboard.press('Escape');
+});
+
+test('Lasso selection starts on an opaque pixel fill', async ({ page, request }) => {
+  const id = 'lasso-selection-on-fill';
+  const created = await request.post('/api/pages', { data: [await createPixelFillBoard(id, 'lasso')] });
+  expect(created.ok()).toBe(true);
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+  const fill = page.locator('[data-board-element-id="visible-fill"]');
+  await expect(fill).toBeVisible();
+  const bounds = (await fill.boundingBox())!;
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(start.x + 36, start.y + 24, { steps: 6 });
+  await expect(page.locator('[data-selection-outline="lasso"]')).toBeVisible();
+  await page.mouse.up();
+  await expect(page.locator('[data-selection-region="committed"]')).toBeVisible();
+  expect((await fill.boundingBox())?.x).toBe(bounds.x);
+  expect((await fill.boundingBox())?.y).toBe(bounds.y);
 });
 
 test('Fill outside a closed outline preserves the enclosed region and board color', async ({ page, request }) => {

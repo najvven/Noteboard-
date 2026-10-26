@@ -2132,11 +2132,9 @@ export default function BoardEditor({
     const previousCaptureFlag = documentRoot.dataset.noteboardFillCapture;
     documentRoot.dataset.noteboardFillCapture = "true";
     document.head.appendChild(captureStyle);
-    const workspaceBackground = document.querySelector<HTMLElement>("#workspace-bg");
-    const backgroundTargets = [
-      ...(workspaceBackground ? [workspaceBackground] : []),
-      ...Array.from(document.querySelectorAll<HTMLElement>('[data-board-surface="true"]')),
-    ];
+    const backgroundTargets = Array.from(document.querySelectorAll<HTMLElement>(
+      '#workspace-bg, [data-board-surface="true"], #main-board',
+    ));
     const originalBackgrounds = backgroundTargets.map(node => node.style.backgroundImage);
     backgroundTargets.forEach(node => { node.style.backgroundImage = "none"; });
     try {

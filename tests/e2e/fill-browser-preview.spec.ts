@@ -21,7 +21,7 @@ const createBoard = (id: string, elements: unknown[]) => ({
 
 test('Fill Tool fills the visible pixels inside a simple shape without native capture', async ({ page, request }) => {
   const id = 'browser-fill-visible-pixels';
-  const board = createBoard(id, [{
+  const board = Object.assign(createBoard(id, [{
     id: 'outlined-square',
     type: 'rectangle',
     position: { x: 250, y: 170 },
@@ -31,7 +31,12 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
     borderColor: '#000000',
     borderWidth: 8,
     zIndex: 1,
-  }]);
+  }]), {
+    showGrid: true,
+    gridSize: 24,
+    gridThickness: 2,
+    gridColor: '#9ca3af',
+  });
   const created = await request.post('/api/pages', { data: [board] });
   expect(created.ok()).toBe(true);
 
@@ -49,7 +54,7 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
     const pages = await response.json() as Array<{
       id: string;
       boardColor?: string;
-      elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; content?: string }>;
+      elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; content?: string; size?: { width: number; height: number } }>;
     }>;
     const saved = pages.find(candidate => candidate.id === id);
     return saved?.elements.some(element => element.isPixelFill) && saved.elements.find(element => element.id === 'outlined-square')?.color;
@@ -59,7 +64,7 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   const pages = await response.json() as Array<{
     id: string;
     boardColor?: string;
-    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; pixelFillBoardId?: string; content?: string }>;
+    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; pixelFillBoardId?: string; content?: string; size?: { width: number; height: number } }>;
   }>;
   const saved = pages.find(candidate => candidate.id === id)!;
   const squareData = saved.elements.find(element => element.id === 'outlined-square')!;
@@ -68,6 +73,8 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   const fill = saved.elements.find(element => element.isPixelFill)!;
   expect(fill.pixelFillBoardId).toBe('main-board');
   expect(fill.content).toMatch(/^data:image\/png;base64,/);
+  expect(fill.size?.width).toBeGreaterThan(100);
+  expect(fill.size?.height).toBeGreaterThan(60);
   const rendered = await sharp(Buffer.from(fill.content!.split(',')[1], 'base64')).raw().toBuffer({ resolveWithObject: true });
   const pixel = (x: number, y: number) => {
     const offset = (y * rendered.info.width + x) * rendered.info.channels;

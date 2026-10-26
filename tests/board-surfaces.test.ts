@@ -81,3 +81,19 @@ test('reconciled fills retain explicit ownership while still inside an overlappi
   const result=reconcilePixelFillBoardOwners([first,second,fill],{width:100,height:100});
   assert.equal(result.find(element=>element.id==='fill')?.pixelFillBoardId,'first');
 });
+
+test('moving a fill into an overlapping board follows its new stack while a partial owner overlap survives resize',()=>{
+  const first=createBoardSurface('first',{x:0,y:0},{width:200,height:100},'#fff',1);
+  const second=createBoardSurface('second',{x:80,y:0},{width:200,height:100},'#fff',5);
+  const original={id:'fill',type:'image' as const,content:'data:image/png;base64,',isPixelFill:true,pixelFillBoardId:'first',position:{x:40,y:20},size:{width:30,height:20},zIndex:100};
+  const moved={...original,position:{x:90,y:20}};
+  const movedResult=reconcilePixelFillBoardOwners([first,second,moved],{width:200,height:100},[first,second,original]);
+  assert.equal(movedResult.find(element=>element.id==='fill')?.pixelFillBoardId,'second');
+
+  const previousMain=createBoardSurface('main-board',{x:0,y:0},{width:200,height:100},'#fff',-9999);
+  const resizedMain=createBoardSurface('main-board',{x:0,y:0},{width:100,height:100},'#fff',-9999);
+  const neighbor=createBoardSurface('neighbor',{x:100,y:0},{width:200,height:100},'#fff',5);
+  const stationary={...original,pixelFillBoardId:'main-board',position:{x:90,y:20}};
+  const resizedResult=reconcilePixelFillBoardOwners([resizedMain,neighbor,stationary],{width:100,height:100},[previousMain,neighbor,stationary],{width:200,height:100});
+  assert.equal(resizedResult.find(element=>element.id==='fill')?.pixelFillBoardId,'main-board');
+});

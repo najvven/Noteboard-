@@ -1,6 +1,6 @@
 import type { BoardElement, Position, Size } from '../../types';
 import { createElementHierarchy, type ElementHierarchy } from './element-hierarchy';
-import { elementPolygon, pointInPolygon } from './section-clipping';
+import { elementPolygon, pointInPolygon, polygonsOverlap } from './section-clipping';
 
 export function createBoardSurface(id: string, position: Position, size: Size, color = '#ffffff', zIndex = -1): BoardElement {
   return { id, type: 'board', position: { ...position }, size: { ...size }, color, content: '', zIndex };
@@ -31,12 +31,16 @@ export function resolveElementBoardOwner(
           y: element.position.y + element.size.height / 2,
         }
       : element.position;
+    const fillPolygon = element.size ? elementPolygon(element) : undefined;
     const explicitOwner = boards.find(board => board.type === 'board' && board.id === element.pixelFillBoardId);
-    if (explicitOwner && pointInPolygon(fillCenter, elementPolygon(explicitOwner))) return explicitOwner;
+    const overlaps = (board: BoardElement) => fillPolygon
+      ? polygonsOverlap(fillPolygon, elementPolygon(board))
+      : pointInPolygon(fillCenter, elementPolygon(board));
+    if (explicitOwner && overlaps(explicitOwner)) return explicitOwner;
     if (element.pixelFillBoardId === 'main-board') {
       const main = boards.find(board => board.type === 'board' && board.id === 'main-board') ??
-        createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
-      if (pointInPolygon(fillCenter, elementPolygon(main))) return main;
+        createBoardSurface('main-board', { x: 0, y: 0 }, mainSize, '#ffffff', -9999);
+      if (overlaps(main)) return main;
     }
   }
   const visited = new Set<string>();
@@ -70,25 +74,48 @@ export function resolveElementBoardOwner(
 export function reconcilePixelFillBoardOwners(
   elements: BoardElement[],
   mainSize: Size,
+  previousElements: readonly BoardElement[] = [],
+  previousMainSize: Size = mainSize,
 ): BoardElement[] {
   if (!elements.some(element => element.isPixelFill)) return elements;
   const storedMain = elements.find(element => element.type === 'board' && element.id === 'main-board');
-  const main = storedMain ?? createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
+  const main = storedMain ?? createBoardSurface('main-board', { x: 0, y: 0 }, mainSize, '#ffffff', -9999);
   const boards = [main, ...elements.filter(element => element.type === 'board' && element.id !== 'main-board')];
   const hierarchy = createElementHierarchy(elements);
+  const previousById = new Map(previousElements.map(element => [element.id, element]));
 
   return elements.map(element => {
     if (!element.isPixelFill) return element;
-    const width = element.size?.width ?? 0;
-    const height = element.size?.height ?? 0;
-    const center = { x: element.position.x + width / 2, y: element.position.y + height / 2 };
+    const previous = previousById.get(element.id);
+    const positionChanged = Boolean(previous && (
+      previous.position.x !== element.position.x || previous.position.y !== element.position.y
+    ));
     const currentOwner = element.pixelFillBoardId
       ? boards.find(board => board.id === element.pixelFillBoardId)
       : undefined;
-    if (currentOwner && pointInPolygon(center, elementPolygon(currentOwner))) return element;
+    const previousOwner = previous?.pixelFillBoardId === 'main-board'
+      ? createBoardSurface('main-board', { x: 0, y: 0 }, previousMainSize, '#ffffff', -9999)
+      : previous?.pixelFillBoardId
+        ? previousElements.find(board => board.type === 'board' && board.id === previous.pixelFillBoardId)
+        : undefined;
+    const ownerGeometryChanged = Boolean(previousOwner && currentOwner && (
+      previousOwner.position.x !== currentOwner.position.x ||
+      previousOwner.position.y !== currentOwner.position.y ||
+      previousOwner.size?.width !== currentOwner.size?.width ||
+      previousOwner.size?.height !== currentOwner.size?.height ||
+      previousOwner.rotation !== currentOwner.rotation
+    ));
+    if (currentOwner && polygonsOverlap(elementPolygon(element), elementPolygon(currentOwner)) &&
+        (!positionChanged || ownerGeometryChanged || (!previous && element.pixelFillBoardId !== 'main-board'))) return element;
 
     const { pixelFillBoardId: _staleOwner, ...withoutExplicitOwner } = element;
-    const nextOwner = resolveElementBoardOwner(withoutExplicitOwner, elements, mainSize, hierarchy);
+    const center = element.size
+      ? { x: element.position.x + element.size.width / 2, y: element.position.y + element.size.height / 2 }
+      : element.position;
+    const nextOwner = findBoardSurface(center, boards) ??
+      (positionChanged
+        ? undefined
+        : resolveElementBoardOwner(withoutExplicitOwner, elements, mainSize, hierarchy));
     if (nextOwner?.id === element.pixelFillBoardId) return element;
     return { ...element, pixelFillBoardId: nextOwner?.id };
   });

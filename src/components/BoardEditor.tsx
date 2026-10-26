@@ -1136,7 +1136,13 @@ export default function BoardEditor({
     newElements: BoardElement[],
     newSectionSheets: SectionSheet[] = sectionSheetsRef.current,
   ) => {
-    const normalizedElements = reconcilePixelFillBoardOwners(newElements, pageDimensions);
+    const previousBoardGeometry = documentHistoryRef.current.entries[documentHistoryRef.current.index]?.boardGeometry;
+    const normalizedElements = reconcilePixelFillBoardOwners(
+      newElements,
+      pageDimensions,
+      elementsRef.current,
+      previousBoardGeometry?.size ?? pageDimensions,
+    );
     const nextHistory = pushBoardDocumentHistory(
       documentHistoryRef.current,
       { elements: normalizedElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
@@ -1224,6 +1230,7 @@ export default function BoardEditor({
   };
   const setSelectedId=(id:string|null,syncWorkbooks=true)=>setSelectedIds(id?[id]:[],syncWorkbooks);
   const groupMoveRef=useRef<{pointerId:number;x:number;y:number;elements:BoardElement[];ids:Set<string>;changed:boolean;preview:'box'|'realistic';latest?:BoardElement[]}|null>(null);
+  const pendingPixelFillClickRef=useRef<{id:string;pointerId:number}|null>(null);
   const selectionOutlineRef=useRef<HTMLDivElement>(null);
   const [customColors, setCustomColors] = useState<Record<string, string[]>>({
     bg: initialEditorSettings.customColors?.bg ?? ["", "", "", ""],
@@ -5418,7 +5425,8 @@ export default function BoardEditor({
     };
 
     if (skipHistory) {
-      const next = reconcilePixelFillBoardOwners(applyElementUpdate(elementsRef.current), pageDimensions);
+      const previous = elementsRef.current;
+      const next = reconcilePixelFillBoardOwners(applyElementUpdate(previous), pageDimensions, previous);
       elementsRef.current = next;
       setElements(next);
     } else {
@@ -6440,6 +6448,7 @@ export default function BoardEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    pendingPixelFillClickRef.current = null;
     if (activeTool === "fill" && e.button !== 0) return;
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
@@ -6590,30 +6599,14 @@ export default function BoardEditor({
     if (activeTool === "select" && !isElementTarget) {
       const fill = elementsRef.current
         .slice()
-        .sort((a, b) => (Number.isFinite(b.zIndex) ? b.zIndex : 0) - (Number.isFinite(a.zIndex) ? a.zIndex : 0))
+        .sort((a, b) => elementHierarchy.compare(b, a))
         .find(element =>
           element.isPixelFill &&
           elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
           !elementHierarchy.isLocked(element.id) &&
           isElementHitAtPoint(element, pointerPoint),
         );
-      if (fill) {
-        setSelectedId(fill.id);
-        setSelectedIds([fill.id]);
-        setIsMainBoardSelected(false);
-        groupMoveRef.current = {
-          pointerId: e.pointerId,
-          x: e.clientX,
-          y: e.clientY,
-          elements: elementsRef.current,
-          ids: new Set([fill.id]),
-          changed: false,
-          preview: getEffectiveToolMenuSettings("select").previewMode,
-        };
-        captureSurfacePointer(e);
-        setIsInteracting(true);
-        return;
-      }
+      if (fill) pendingPixelFillClickRef.current = { id: fill.id, pointerId: e.pointerId };
     }
 
     // Select uses the actual pointer coordinates. Snapping its marquee to the
@@ -6921,6 +6914,34 @@ export default function BoardEditor({
       if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform='';selectionOutlineRef.current.style.backgroundColor='';}
       if(moved.changed&&moved.latest)pushElements(moved.latest);
       setIsInteracting(false);setVisibleGuides([]);return;
+    }
+    const pendingPixelFillClick = pendingPixelFillClickRef.current;
+    pendingPixelFillClickRef.current = null;
+    if (
+      pendingPixelFillClick &&
+      eventPointerId === pendingPixelFillClick.pointerId &&
+      activeTool === "select" &&
+      !activeAreaGesture?.moved &&
+      event &&
+      "clientX" in event
+    ) {
+      const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
+      const fill = elementsRef.current.find(element => element.id === pendingPixelFillClick.id);
+      if (surfaceRect && fill && elementHierarchy.isVisible(fill.id, respectLayerVisibility) &&
+          !elementHierarchy.isLocked(fill.id) && isElementHitAtPoint(fill, {
+            x: (event.clientX - surfaceRect.left) / zoomRef.current,
+            y: (event.clientY - surfaceRect.top) / zoomRef.current,
+          })) {
+        setSelectedId(fill.id);
+        setIsMainBoardSelected(false);
+        setShowLinkInput(false);
+        setShowTargetInput(false);
+        setLinkSystemMode("start");
+        if (autoToolOnSelect && activeTool === "select") setActiveTool(toolForSelectedElement(fill));
+        setVisibleGuides([]);
+        clearAreaGesture();
+        return;
+      }
     }
     if(outlineSelection.end(event))return;
     setVisibleGuides([]);
@@ -7253,6 +7274,7 @@ export default function BoardEditor({
   const handlePointerCancel = (event: React.PointerEvent | PointerEvent) => {
     const pointerId = activePointerIdRef.current;
     if (pointerId === null || event.pointerId !== pointerId) return;
+    pendingPixelFillClickRef.current = null;
     const captureTarget = pointerCaptureTargetRef.current;
     try {
       if (captureTarget?.hasPointerCapture?.(pointerId)) {
@@ -7339,7 +7361,7 @@ export default function BoardEditor({
     if(bounds){const position=updateSmartGuides({id:'__group-selection',type:'rectangle',content:'',position:{x:bounds.x,y:bounds.y},size:bounds,zIndex:0},{x:bounds.x+dx,y:bounds.y+dy},true,start.ids);dx=position.x-bounds.x;dy=position.y-bounds.y;}
     const moved=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
     const next=start.elements.some(element=>start.ids.has(element.id)&&element.isPixelFill)
-      ? reconcilePixelFillBoardOwners(moved,pageDimensions)
+      ? reconcilePixelFillBoardOwners(moved,pageDimensions,start.elements)
       : moved;
     start.latest=next;
     if(start.preview==='box'){

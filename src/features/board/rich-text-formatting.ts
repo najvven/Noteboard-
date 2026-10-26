@@ -1009,6 +1009,7 @@ function insertCandidateParagraph(editor: HTMLElement, range: Range) {
     : target.cloneNode(false) as HTMLElement;
   newBlock.removeAttribute(TEXT_PRESENTATION_ATTRIBUTE);
   newBlock.removeAttribute(TEXT_LAYOUT_INSERTION_ATTRIBUTE);
+  newBlock.setAttribute(TEXT_LAYOUT_INSERTION_ATTRIBUTE, 'true');
   const trailing = document.createRange();
   trailing.setStart(range.startContainer, range.startOffset);
   trailing.setEnd(target, target.childNodes.length);

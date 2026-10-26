@@ -374,6 +374,58 @@ test('Middle-button panning remains available in Polygon and Lasso Select modes'
   }
 });
 
+test('Middle-button panning reaches linked elements outside the Link tool', async ({ page, request }) => {
+  const id = 'linked-element-middle-pan';
+  const board = createBoard(id, [
+    {
+      id: 'linked-object',
+      type: 'rectangle',
+      position: { x: 250, y: 170 },
+      size: { width: 180, height: 120 },
+      content: '',
+      color: '#ffffff',
+      borderColor: '#000000',
+      borderWidth: 4,
+      linkToId: 'link-target',
+      zIndex: 1,
+    },
+    {
+      id: 'link-target',
+      type: 'rectangle',
+      position: { x: 620, y: 400 },
+      size: { width: 80, height: 60 },
+      content: '',
+      color: '#ffffff',
+      borderColor: '#000000',
+      borderWidth: 2,
+      zIndex: 2,
+    },
+  ]);
+  board.workspaceWidth = 2400;
+  board.workspaceHeight = 1600;
+  board.boardX = 850;
+  board.boardY = 550;
+  board.viewportCenterX = 1200;
+  board.viewportCenterY = 800;
+  const created = await request.post('/api/pages', { data: [board] });
+  expect(created.ok()).toBe(true);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+
+  const workspace = page.locator('.workspace-scroll');
+  const before = await workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop }));
+  const bounds = (await page.locator('[data-board-element-id="linked-object"]').boundingBox())!;
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down({ button: 'middle' });
+  await page.mouse.move(start.x - 80, start.y - 50, { steps: 6 });
+  await page.mouse.up({ button: 'middle' });
+
+  await expect.poll(() => workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop })))
+    .not.toEqual(before);
+});
+
 test('Fill Tool uses a scene raster for a closed freehand contour in browser preview', async ({ page, request }) => {
   test.setTimeout(60000);
   const id = 'browser-fill-drawing-region';

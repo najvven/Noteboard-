@@ -12382,7 +12382,7 @@ function BoardElementNode({
         }
         // If it's a link and we're not using the link tool, block board interaction and just wait for the click.
         if (element.linkToId && activeTool !== "link") {
-          e.stopPropagation();
+          if (e.button !== 1) e.stopPropagation();
           return;
         }
 

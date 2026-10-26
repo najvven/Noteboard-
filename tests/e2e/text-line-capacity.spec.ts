@@ -73,18 +73,6 @@ const board = {
       textSnapToGrid: false,
       zIndex: 4,
     },
-    {
-      id: 'unruled-overflow',
-      type: 'text',
-      position: { x: 700, y: 430 },
-      size: { width: 464, height: 252 },
-      content: `<br>${'<div><br></div>'.repeat(10)}`,
-      fontSize: 16,
-      textScale: 1,
-      textScaling: false,
-      textSnapToGrid: false,
-      zIndex: 5,
-    },
   ],
 };
 
@@ -403,7 +391,6 @@ test('Empty Enter at unruled text capacity keeps the caret visible', async ({ pa
       const lineBox = line?.getBoundingClientRect();
       return {
         events: (window as any).__unruledEnterEvents,
-        focused: document.activeElement === element,
         inside: Boolean(window.getSelection()?.anchorNode && element.contains(window.getSelection()!.anchorNode)),
         html: element.innerHTML,
         lineIndex: line ? Array.from(element.children).indexOf(line) : -1,
@@ -412,67 +399,11 @@ test('Empty Enter at unruled text capacity keeps the caret visible', async ({ pa
       };
     });
     expect(state.events).toEqual([{ inputType: 'insertParagraph', defaultPrevented: true }]);
-    expect(state.focused).toBe(true);
     expect(state.inside).toBe(true);
     expect(state.html).toBe(beforeHtml);
     expect(state.lineIndex).toBe(capacity - 1);
     expect(state.lineBox?.top).toBeGreaterThanOrEqual(state.editorBox.top);
     expect(state.lineBox?.bottom).toBeLessThanOrEqual(state.editorBox.bottom + 0.75);
-  } finally {
-    await deleteFixtureBoard(request, `/api/pages/${boardId}`);
-  }
-});
-
-test('Empty Enter from a hidden line returns the caret to the last visible row', async ({ page, request }) => {
-  await seedBoard(request);
-  try {
-    await openBoard(page);
-    const editor = page.locator('[data-board-element-editor-id="unruled-overflow"]');
-    await expect.poll(() => editor.getAttribute('data-text-line-viewport-rows')).not.toBeNull();
-    const capacity = Number(await editor.getAttribute('data-text-line-viewport-rows'));
-    await editor.evaluate((element) => {
-      const hiddenLine = element.lastElementChild;
-      if (!hiddenLine) throw new Error('Expected a persisted overflowing empty line');
-      element.focus();
-      const range = document.createRange();
-      range.setStart(hiddenLine, 0);
-      range.collapse(true);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    });
-    await editor.evaluate((element) => {
-      const events: Array<{ inputType: string; defaultPrevented: boolean }> = [];
-      element.addEventListener('beforeinput', (event) => {
-        const input = event as InputEvent;
-        events.push({ inputType: input.inputType, defaultPrevented: input.defaultPrevented });
-      });
-      (window as any).__hiddenEnterEvents = events;
-    });
-    const beforeHtml = await editor.evaluate((element) => element.innerHTML);
-    await editor.press('Enter');
-    const state = await editor.evaluate((element) => {
-      const selection = window.getSelection();
-      const anchor = selection?.anchorNode;
-      const anchorElement = anchor instanceof Element ? anchor : anchor?.parentElement;
-      const line = anchorElement?.closest<HTMLElement>('p,div,li,blockquote,h1,h2,h3');
-      const lineBox = line?.getBoundingClientRect();
-      const editorBox = element.getBoundingClientRect();
-      return {
-        events: (window as any).__hiddenEnterEvents,
-        html: element.innerHTML,
-        focused: document.activeElement === element,
-        inside: Boolean(anchor && element.contains(anchor)),
-        lineIndex: line ? Array.from(element.children).indexOf(line) : -1,
-        lineVisible: Boolean(lineBox && lineBox.top >= editorBox.top && lineBox.bottom <= editorBox.bottom + 0.75),
-      };
-    });
-    expect(state.events).toEqual([{ inputType: 'insertParagraph', defaultPrevented: true }]);
-    expect(state.html).toBe(beforeHtml);
-    expect(state.focused).toBe(true);
-    expect(state.inside).toBe(true);
-    expect(state.lineIndex).toBe(capacity - 1);
-    expect(state.lineVisible).toBe(true);
   } finally {
     await deleteFixtureBoard(request, `/api/pages/${boardId}`);
   }

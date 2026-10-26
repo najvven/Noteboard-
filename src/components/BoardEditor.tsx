@@ -13240,7 +13240,6 @@ const ContentEditableText = ({
       const nextLayout = preflightTextInsertion(editor, range, inputType, candidateText, maxHeight);
       if (!nextLayout) {
         if (inputEvent.cancelable) inputEvent.preventDefault();
-        if (inputType === "insertParagraph") focusEmptyTextLineCaret(editor);
         return;
       }
       pendingInsertionLayoutRef.current = nextLayout;

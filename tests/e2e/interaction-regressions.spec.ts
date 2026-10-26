@@ -45,6 +45,7 @@ test('moving a pixel fill to another board updates its owner and remains visible
   await expect(fill).toBeVisible();await expect(destination).toBeVisible();
   const source=(await fill.boundingBox())!,target=(await destination.boundingBox())!;
   await page.mouse.click(source.x+source.width/2,source.y+source.height/2);
+  await expect(fill.locator('.ring-blue-500')).toBeVisible();
   await drag(page,{x:source.x+source.width/2,y:source.y+source.height/2},{x:target.x+target.width/2,y:target.y+target.height/2},0);
   await expect.poll(async()=>{
     const response=await request.get('/api/pages');

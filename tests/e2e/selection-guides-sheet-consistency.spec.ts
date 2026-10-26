@@ -138,6 +138,7 @@ test('keyboard and wheel scrolling retain visible spreadsheet rows and columns o
   await expect(grid).toBeVisible();
   await grid.hover({position:{x:120,y:180}});
   await grid.click({position:{x:120,y:180}});
+  await grid.focus();
   for(let row=0;row<20;row++)await page.keyboard.press('ArrowDown');
   for(let column=0;column<12;column++)await page.keyboard.press('ArrowRight');
   await expect.poll(async()=>(await view())?.sheetViewStartRow??0,{timeout:15000}).toBeGreaterThan(0);

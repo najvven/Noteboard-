@@ -812,8 +812,8 @@ window.addEventListener("message", async (event) => {
           | undefined;
         const cleanInput = (value: string) => value.replace(/\r\n$/, "");
         let restoredEditors: NonNullable<ReturnType<typeof getEditor>>[] = [];
-        const restorationDeadline = performance.now() + 5_000;
-        for (let frame = 0; frame < 60 && restoredEditors.length === 0 && performance.now() < restorationDeadline; frame++) {
+        const restorationDeadline = performance.now() + 15_000;
+        for (let frame = 0; frame < 300 && restoredEditors.length === 0 && performance.now() < restorationDeadline; frame++) {
           await waitFrame(Math.min(100, restorationDeadline - performance.now()));
           if (!book.isCellEditing()) continue;
           const candidates = editorIds

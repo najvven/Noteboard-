@@ -70,14 +70,14 @@ Pełny agregat `20261025T195051958Z-d85b96ea` oraz jego report-only rerun przesz
 - Wypełnienia pikselowe zachowują właściciela przy klonowaniu tablicy, a transfer strony przypisuje wypełnienia Main Board do nowej powierzchni. Po wklejeniu, duplikacji lub przeniesieniu właściciel jest ponownie rozwiązywany, jeśli raster opuścił poprzednią tablicę. Hit test rozpoznaje brak maski alfa jako stan nieznany, aby gumka i zaznaczanie nie przechodziły przez aktywne wypełnienie.
 - W trybie Select kliknięcie nieprzezroczystego piksela zaznacza raster; przeciąganie bez wcześniejszego zaznaczenia nadal rysuje marquee. Po zaznaczeniu wypełnienie przeciąga się standardowo. Wybór nakładających się rasterów korzysta z tej samej hierarchii warstw co renderowanie.
 - Właściciel rastera pozostaje bez zmian po resize, gdy choć część wypełnienia nadal przecina powierzchnię. Ruch w stronę innej tablicy rozwiązuje właściciela z bieżącego położenia.
-- Odtwarzanie szkicu w arkuszu ma limit 5 sekund i awaryjne oczekiwanie między klatkami; ukryta karta nie może trzymać ramki przed komunikatem `loaded` do limitu hosta.
+- Odtwarzanie szkicu w arkuszu ma limit 15 sekund i awaryjne oczekiwanie między klatkami; ukryta karta nie może trzymać ramki przed komunikatem `loaded` do 30-sekundowego limitu hosta.
 - Coverage fixture obsługuje odrzucone `startJSCoverage`, inwentarz błędnej fazy nie przerywa zapisu diagnostyki, checkout CI nie zachowuje tokenu GitHub, a Sonar skanuje wyłącznie po udanym agregacie.
 - Testy arkusza zachowują gest zmiany szerokości kolumny, sprawdzają przewijanie klawiaturą oraz w obu osiach kółkiem myszy i wybierają kartę `Data` po roli dostępnościowej.
 
 ### Weryfikacja
 
 - Typecheck, build, testy źródłowe **428/428** i testy browserowe **12/12** zaliczone. Build nadal zgłasza znany duży chunk arkusza około 7,5 MB.
-- Zestaw Playwright obejmujący wypełnienie, przeniesienie wypełnienia, arkusze, reload szkicu i zmianę kolumny: **11/11**. Po ostatnich zmianach testy arkusza oraz przeciągania wypełnienia w trybie coverage: **4/4**.
+- Zestaw Playwright obejmujący wypełnienie, przeniesienie wypełnienia, arkusze, reload szkicu i zmianę kolumny: **11/11**. Po ostatnich poprawkach testy arkusza, formuły po reloadzie, marquee i przeniesienia wypełnienia w trybie coverage: **5/5**.
 - Na poprzednim headzie `3348b37079d9fe387af753b0e2659492382b8c91` GitHub potwierdził Windows i source/browser, a Linux coverage zebrał LCOV i uruchomił Sonar. Sonar Quality Gate: **passed**, nowe pokrycie **91,8%**, duplikacje **0,0%**, **87 nowych issue**. Ten skan poprzedza bieżące poprawki.
 - Ten sam starszy workflow coverage wykrył dwa nieudane testy arkusza, mimo że osobny source/browser job przeszedł. Test przewijania i wybór karty `Data` zostały poprawione; pełny agregat na nowym headzie pozostaje do potwierdzenia przez CI. Nowy workflow pomija Sonar, jeśli agregat nie przejdzie.
 - Wersja `1.0`, instalator, NoteboardWork i dane tablic nie były zmieniane.

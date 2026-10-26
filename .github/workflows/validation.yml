@@ -93,7 +93,8 @@ jobs:
             echo "SonarCloud scan skipped. Configure the Sonar credentials and CI-based analysis, and produce a nonempty coverage/lcov.info report."
           fi
       - name: Ensure complete Git history for SonarCloud
-        if: ${{ steps.sonar-config.outputs.configured == 'true' }}
+        id: sonar-history
+        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' }}
         run: |
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
             git fetch --unshallow --no-tags origin
@@ -103,7 +104,7 @@ jobs:
             exit 1
           fi
       - name: SonarCloud scan
-        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' && steps.coverage-aggregate.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' && steps.sonar-history.outcome == 'success' }}
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

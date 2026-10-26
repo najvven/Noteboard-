@@ -74,19 +74,20 @@ jobs:
             coverage/lcov.info
       - name: Check SonarCloud configuration
         id: sonar-config
+        if: ${{ always() && !cancelled() }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_ORGANIZATION: ${{ vars.SONAR_ORGANIZATION }}
           SONAR_CI_BASED: ${{ vars.SONAR_CI_BASED }}
         run: |
-          if [ -n "$SONAR_TOKEN" ] && [ -n "$SONAR_ORGANIZATION" ] && [ "$SONAR_CI_BASED" = "true" ]; then
+          if [ -n "$SONAR_TOKEN" ] && [ -n "$SONAR_ORGANIZATION" ] && [ "$SONAR_CI_BASED" = "true" ] && [ -s coverage/lcov.info ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "SonarCloud scan skipped. Configure SONAR_TOKEN and SONAR_ORGANIZATION, switch the project to CI-based analysis, then set SONAR_CI_BASED=true."
+            echo "SonarCloud scan skipped. Configure the Sonar credentials and CI-based analysis, and produce a nonempty coverage/lcov.info report."
           fi
       - name: SonarCloud scan
-        if: steps.sonar-config.outputs.configured == 'true'
+        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' }}
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

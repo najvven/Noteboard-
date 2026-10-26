@@ -900,6 +900,7 @@ window.addEventListener("message", async (event) => {
       send("loaded");
       sendSelection();
     } catch (error) {
+      ready = false;
       reloadDraftRestoring = false;
       send("error", {
         message:

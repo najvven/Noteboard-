@@ -2133,6 +2133,7 @@ export default function BoardEditor({
         html[data-noteboard-fill-capture="true"] [data-element-preview],
         html[data-noteboard-fill-capture="true"] [data-resize-handle],
         html[data-noteboard-fill-capture="true"] [data-fill-notice],
+        html[data-noteboard-fill-capture="true"] [data-bottom-toolbar],
         html[data-noteboard-fill-capture="true"] [data-smart-guides] { visibility: hidden !important; }
       `;
       const documentRoot = document.documentElement;

@@ -107,25 +107,29 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   expect(shapeBounds).not.toBeNull();
 
   const originalPosition = fill.position!;
+  const originalFillPosition = await fillElement.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  const originalShapePosition = await square.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
   const dragStart = { x: fillBounds!.x + fillBounds!.width / 2, y: fillBounds!.y + fillBounds!.height / 2 };
   await page.mouse.move(dragStart.x, dragStart.y);
   await page.mouse.down();
   await page.mouse.move(dragStart.x + 36, dragStart.y + 24, { steps: 4 });
   await page.mouse.up();
-  await expect.poll(async () => {
-    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
-      id: string;
-      elements: Array<{ id: string; position?: { x: number; y: number } }>;
-    }>;
-    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === fill.id)?.position?.x;
-  }).toBe(originalPosition.x);
-  await expect.poll(async () => {
-    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
-      id: string;
-      elements: Array<{ id: string; position?: { x: number; y: number } }>;
-    }>;
-    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.position?.x;
-  }).toBe(250);
+  const unchangedFillPosition = await fillElement.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  const unchangedShapePosition = await square.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  expect(unchangedFillPosition).toEqual(originalFillPosition);
+  expect(unchangedShapePosition).toEqual(originalShapePosition);
 
   await page.keyboard.press('Escape');
   await page.mouse.click(fillBounds!.x + fillBounds!.width / 2, fillBounds!.y + fillBounds!.height / 2);
@@ -135,6 +139,17 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   await page.mouse.down();
   await page.mouse.move(dragStart.x + 36, dragStart.y + 24, { steps: 4 });
   await page.mouse.up();
+  const movedFillPosition = await fillElement.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  const unmovedShapePosition = await square.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  expect(movedFillPosition.x).toBeGreaterThan(originalFillPosition.x + 20);
+  expect(movedFillPosition.y).toBeGreaterThan(originalFillPosition.y + 10);
+  expect(unmovedShapePosition).toEqual(originalShapePosition);
   await expect.poll(async () => {
     const current = await request.get('/api/pages').then(response => response.json()) as Array<{
       id: string;
@@ -200,6 +215,10 @@ test('Lasso selection starts on an opaque pixel fill', async ({ page, request })
   const fill = page.locator('[data-board-element-id="visible-fill"]');
   await expect(fill).toBeVisible();
   const bounds = (await fill.boundingBox())!;
+  const originalPosition = await fill.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
   const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
   await page.mouse.move(start.x, start.y);
   await page.mouse.down();
@@ -211,12 +230,11 @@ test('Lasso selection starts on an opaque pixel fill', async ({ page, request })
   await expect(toolbar).toBeVisible();
   await toolbar.getByTitle('Copy area').click();
   await expect(toolbar).toBeVisible();
-  const pages = await request.get('/api/pages').then(response => response.json()) as Array<{
-    id: string;
-    elements: Array<{ id: string; position?: { x: number; y: number } }>;
-  }>;
-  expect(pages.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'visible-fill')?.position)
-    .toEqual({ x: 258, y: 178 });
+  const afterCopy = await fill.evaluate(element => ({
+    x: Number.parseFloat((element as HTMLElement).style.left),
+    y: Number.parseFloat((element as HTMLElement).style.top),
+  }));
+  expect(afterCopy).toEqual(originalPosition);
 });
 
 test('Fill outside a closed outline preserves the enclosed region and board color', async ({ page, request }) => {
@@ -313,6 +331,47 @@ test('Fill ignores middle-button clicks and preserves workspace panning', async 
   const savedSquare = savedPage.elements.find(element => element.id === 'outlined-square');
   expect(savedSquare?.color).toBe('#ffffff');
   expect(savedPage.elements.some(element => element.isPixelFill)).toBe(false);
+});
+
+test('Middle-button panning remains available in Polygon and Lasso Select modes', async ({ page, request }) => {
+  for (const mode of ['polygon', 'lasso'] as const) {
+    const id = `selection-${mode}-middle-pan`;
+    const board = createBoard(id, [{
+      id: 'outlined-square',
+      type: 'rectangle',
+      position: { x: 250, y: 170 },
+      size: { width: 180, height: 120 },
+      content: '',
+      color: '#ffffff',
+      borderColor: '#000000',
+      borderWidth: 8,
+      zIndex: 1,
+    }], { selectMode: mode });
+    board.workspaceWidth = 2400;
+    board.workspaceHeight = 1600;
+    board.boardX = 850;
+    board.boardY = 550;
+    board.viewportCenterX = 1200;
+    board.viewportCenterY = 800;
+    const created = await request.post('/api/pages', { data: [board] });
+    expect(created.ok()).toBe(true);
+    await page.goto('/');
+    await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+
+    const workspace = page.locator('.workspace-scroll');
+    const before = await workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop }));
+    const bounds = (await page.locator('[data-board-element-id="outlined-square"]').boundingBox())!;
+    const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down({ button: 'middle' });
+    await page.mouse.move(start.x - 80, start.y - 50, { steps: 6 });
+    await page.mouse.up({ button: 'middle' });
+
+    await expect.poll(() => workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop })))
+      .not.toEqual(before);
+    await expect(page.locator('[data-selection-outline]')).toHaveCount(0);
+    await expect(page.locator('[data-board-interacting]')).toHaveCount(0);
+  }
 });
 
 test('Fill Tool uses a scene raster for a closed freehand contour in browser preview', async ({ page, request }) => {

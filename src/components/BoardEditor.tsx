@@ -6552,6 +6552,7 @@ export default function BoardEditor({
     if ((e.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
     pendingPixelFillClickRef.current = null;
     if (activeTool === "fill" && e.button !== 0) return;
+    if (activeTool === "select" && selectMode !== "rectangle" && e.button === 1) return;
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
       activePointerIdRef.current !== null &&
@@ -6725,7 +6726,6 @@ export default function BoardEditor({
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if(groupMoveRef.current){moveSelection(e);return;}
-    if(outlineSelection.move(e))return;
     const activeAreaGesture = areaGestureRef.current;
     if (
       activePointerIdRef.current !== null &&
@@ -6747,6 +6747,7 @@ export default function BoardEditor({
       setPanStart({ x: e.clientX, y: e.clientY });
       return;
     }
+    if(outlineSelection.move(e))return;
 
     if (activeTool === "eraser" && activeAreaGesture && boardSurfaceRef.current) {
       const rect = boardSurfaceRef.current.getBoundingClientRect();
@@ -7049,6 +7050,12 @@ export default function BoardEditor({
         return;
       }
     }
+    if (panStart) {
+      setPanStart(null);
+      setIsInteracting(false);
+      activeSurfaceBoundsRef.current = null;
+      return;
+    }
     if(outlineSelection.end(event))return;
     setVisibleGuides([]);
     const latestElements = elementsRef.current;
@@ -7059,13 +7066,6 @@ export default function BoardEditor({
         : null);
     const activeDragStart = activeAreaGesture?.start ?? dragStart;
     const activeDragCurrent = activeAreaGesture?.current ?? dragCurrent;
-
-    if (panStart) {
-      setPanStart(null);
-      setIsInteracting(false);
-      activeSurfaceBoundsRef.current = null;
-      return;
-    }
 
     if (activeTool === "eraser") {
       if (eraserMode === 'partial' && currentDrawPoints && currentDrawPoints.length > 0) {
@@ -8973,6 +8973,7 @@ export default function BoardEditor({
                 onPointerDownCapture={(event) => {
                   if ((event.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
                   if (activeTool === "select" && selectMode !== "rectangle") {
+                    if (event.button !== 0) return;
                     event.stopPropagation();
                     handlePointerDown(event);
                     return;

@@ -16,6 +16,8 @@ const MAX_CELLS = 200_000;
 const MAX_ROWS = 1_048_576;
 const MIN_COLUMNS = 26;
 const MAX_COLUMNS = 16_384;
+const MAX_EDGE_COLUMN_SPAN = 64;
+const MAX_DECLARED_COLUMN_INDEXES = 400_000;
 const MAX_XML_DEPTH = 128;
 const MAX_XML_ATTRIBUTES = 256;
 const MAX_XML_NAME_LENGTH = 256;
@@ -485,11 +487,15 @@ function addWarning(warnings: string[], warning: string) {
 
 /** Validate worksheet XML and bound materialization before ExcelJS loads it. */
 async function preflightWorkbookImport(zip: JSZip, warnings: string[]) {
-  const budget = { materializedCells: 0, totalRowRecords: 0, normalizedImplicitCells: false };
+  const budget = { materializedCells: 0, totalRowRecords: 0, declaredColumnIndexes: 0, normalizedImplicitCells: false };
   let worksheetPartCount = 0;
   for (const path in zip.files) {
     const entry = zip.files[path];
-    if (entry.dir || !/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
+    if (entry.dir) continue;
+    const excelJsWorksheetPart = path.match(/xl\/worksheets\/sheet(\d+)[.]xml/);
+    if (excelJsWorksheetPart && path !== `xl/worksheets/sheet${excelJsWorksheetPart[1]}.xml`)
+      throw new Error("The workbook contains an invalid worksheet part path.");
+    if (!/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
     if (++worksheetPartCount > 256)
       throw new Error("A workbook can contain up to 256 sheets.");
     const xml = await entry.async("string");
@@ -502,6 +508,7 @@ async function preflightWorkbookImport(zip: JSZip, warnings: string[]) {
 type WorkbookPreflightBudget = {
   materializedCells: number;
   totalRowRecords: number;
+  declaredColumnIndexes: number;
   normalizedImplicitCells: boolean;
 };
 
@@ -668,6 +675,9 @@ function preflightWorksheetXml(xml: string, warnings: string[], budget: Workbook
     implicitAddressInsertions: [],
   };
   scanXml(xml, token => preflightWorksheetToken(token, state, budget, warnings));
+  budget.declaredColumnIndexes += state.columnDefinitionCoverage.lastIndexOf(1) + 1;
+  if (budget.declaredColumnIndexes > MAX_DECLARED_COLUMN_INDEXES)
+    throw new Error("The workbook contains too many declared column indexes.");
   if (state.currentRow) throw new Error("The workbook contains an unclosed worksheet row.");
   return state.implicitAddressInsertions.length
     ? { normalizedXml: applyImplicitAddressInsertions(xml, state.implicitAddressInsertions) }
@@ -788,7 +798,10 @@ function getDeclaredColumnCount(columns: NonNullable<ImportedWorksheetModel['col
   return columns.reduce((maximum, column) => {
     const first = column.min ?? 0;
     const last = column.max ?? 0;
-    const bounded = first === last || (first < last && last < MAX_COLUMNS);
+    // Do not expand broad default or hidden-tail spans through XFD, but retain
+    // small formatted ranges at the right edge instead of dropping their widths.
+    const bounded = first === last || (first < last &&
+      (last < MAX_COLUMNS || (last === MAX_COLUMNS && last - first + 1 <= MAX_EDGE_COLUMN_SPAN)));
     if (!bounded || !hasMeaningfulColumnState(column, defaultWidth)) return maximum;
     return Math.max(maximum, last);
   }, 0);

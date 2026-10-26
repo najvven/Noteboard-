@@ -11,6 +11,7 @@ import {
   collectCoverageSourceInventory,
   coverageSuiteStatus,
   electronCoverageCollectionErrors,
+  deduplicatePlaywrightAttempts,
   hashCoverageToolFiles,
   parseNodeTestStatuses,
   assertNodeTestPhaseHasPassingTests,
@@ -181,7 +182,9 @@ async function buildCoverage(runDirectory, sourceInventory) {
       'Chromium extension service-worker files are included, but these runs do not attach a profiler to that worker; they remain uncovered unless a worker profile is available.',
     ],
   };
-  const playwrightTests = JSON.parse(await fs.readFile(path.join(runDirectory, 'playwright-tests.json'), 'utf8'));
+  const playwrightTests = deduplicatePlaywrightAttempts(
+    JSON.parse(await fs.readFile(path.join(runDirectory, 'playwright-tests.json'), 'utf8')),
+  );
   const playwrightCaptureFailures = playwrightTests.filter(item => item.collectionError);
   for (const phase of phases) {
     const skipReason = phase.skipped || undefined;

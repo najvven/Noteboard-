@@ -173,6 +173,27 @@ test('XLSX import accepts a declared XFD column at the worksheet limit',async()=
   assert.equal(restored.columnData![16_383].w,89);
 });
 
+test('XLSX import and export preserve a short custom column span ending at XFD',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('XFD span');
+  worksheet.getColumn(16_383).width=20;worksheet.getColumn(16_384).width=20;
+  const archive=await source.xlsx.writeBuffer();
+  const zip=await JSZip.loadAsync(archive);
+  const xml=await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  assert.match(xml,/<col min="16383" max="16384" width="20"/);
+
+  const imported=await importSpreadsheet(archive as ArrayBuffer,'XFD-span.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.equal(sheet.columnCount,16_384);
+  assert.equal(sheet.columnData![16_382].w,145);
+  assert.equal(sheet.columnData![16_383].w,145);
+  const exported=await exportSpreadsheet(imported.document,'xlsx');
+  const roundTrip=await importSpreadsheet(exported.buffer as ArrayBuffer,'XFD-span-roundtrip.xlsx');
+  const restored=roundTrip.document.workbook.sheets![roundTrip.document.activeSheetId!];
+  assert.equal(restored.columnCount,16_384);
+  assert.equal(restored.columnData![16_382].w,145);
+  assert.equal(restored.columnData![16_383].w,145);
+});
+
 test('XLSX wide default and hidden-tail column spans do not expand simple or advanced geometry',async()=>{
   const scenarios=[
     {name:'default span',column:'<col min="1" max="16384" width="8.43" customWidth="1"/>',hiddenTail:false},
@@ -265,6 +286,51 @@ test('XLSX rejects more than 256 worksheet parts before ExcelJS loads the workbo
   try{
     await assert.rejects(()=>importSpreadsheet(bytes,'Too many sheets.xlsx'),/up to 256 sheets/);
     assert.equal(loadCalls,0,'worksheet resource limits must be enforced before ExcelJS loads the workbook');
+  }finally{
+    xlsxPrototype.load=originalLoad;
+  }
+});
+
+test('XLSX rejects worksheet paths ExcelJS parses outside the canonical directory before loading',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Path');
+  worksheet.getCell('A1').value='fixture';
+  const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+  const path='xl/worksheets/sheet1.xml',xml=await zip.file(path)!.async('string');
+  zip.remove(path);zip.file(`backup/${path}`,xml);
+  const bytes=await zip.generateAsync({type:'arraybuffer'});
+  const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+  const originalLoad=xlsxPrototype.load;
+  let loadCalls=0;
+  xlsxPrototype.load=function(){loadCalls+=1;throw Error('ExcelJS test load reached');};
+  try{
+    await assert.rejects(()=>importSpreadsheet(bytes,'Non-canonical worksheet path.xlsx'),/invalid worksheet part path/);
+    assert.equal(loadCalls,0,'non-canonical worksheet entries must be rejected before ExcelJS parses them');
+  }finally{
+    xlsxPrototype.load=originalLoad;
+  }
+});
+
+test('XLSX import bounds expanded column definitions across the whole workbook',async()=>{
+  const source=new ExcelJS.Workbook();
+  for(let index=0;index<25;index++){
+    const worksheet=source.addWorksheet(`Wide ${index+1}`);
+    worksheet.getCell('A1').value='fixture';
+  }
+  const zip=await JSZip.loadAsync(await source.xlsx.writeBuffer());
+  for(let index=1;index<=25;index++){
+    const path=`xl/worksheets/sheet${index}.xml`,xml=await zip.file(path)!.async('string');
+    const withWideColumns=xml.replace('<sheetData>', '<cols><col min="1" max="16384" width="8.43" customWidth="1"/></cols><sheetData>');
+    assert.notEqual(withWideColumns,xml,`${path} should include the synthetic full-width column span`);
+    zip.file(path,withWideColumns);
+  }
+  const bytes=await zip.generateAsync({type:'arraybuffer'});
+  const xlsxPrototype=Object.getPrototypeOf(new ExcelJS.Workbook().xlsx) as any;
+  const originalLoad=xlsxPrototype.load;
+  let loadCalls=0;
+  xlsxPrototype.load=function(){loadCalls+=1;throw Error('ExcelJS test load reached');};
+  try{
+    await assert.rejects(()=>importSpreadsheet(bytes,'Too many declared columns.xlsx'),/too many declared column indexes/);
+    assert.equal(loadCalls,0,'column-object expansion must be bounded before ExcelJS materializes worksheets');
   }finally{
     xlsxPrototype.load=originalLoad;
   }

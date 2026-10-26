@@ -12,6 +12,7 @@ import {
   coverageSuiteStatus,
   collectCoverageSourceInventory,
   electronCoverageCollectionErrors,
+  deduplicatePlaywrightAttempts,
   hashCoverageToolFiles,
   parseNodeTestStatuses,
   validateLcovSourcePaths,
@@ -110,6 +111,17 @@ test('coverage inventory preserves each Node test result marker instead of guess
     { title: 'a skipped test', status: 'skipped' },
     { title: 'nested suite > passing child', status: 'passed' },
     { title: 'nested suite > skipped child', status: 'skipped' },
+  ]);
+});
+
+test('coverage inventory retains only the final Playwright retry per test with a string title', () => {
+  assert.deepEqual(deduplicatePlaywrightAttempts([
+    { suite: 'playwright', file: 'tests/e2e/example.spec.ts', title: ['', 'group', 'retries once'], status: 'failed', retry: 0, applicationScripts: 0 },
+    { suite: 'playwright', file: 'tests/e2e/example.spec.ts', title: ['', 'group', 'retries once'], status: 'passed', retry: 1, applicationScripts: 4 },
+    { suite: 'playwright', file: 'tests/e2e/example.spec.ts', title: ['group', 'skipped'], status: 'skipped', retry: 0, applicationScripts: 0 },
+  ]), [
+    { suite: 'playwright', file: 'tests/e2e/example.spec.ts', title: 'group › retries once', status: 'passed', retry: 1, applicationScripts: 4 },
+    { suite: 'playwright', file: 'tests/e2e/example.spec.ts', title: 'group › skipped', status: 'skipped', retry: 0, applicationScripts: 0 },
   ]);
 });
 

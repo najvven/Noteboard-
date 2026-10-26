@@ -115,6 +115,23 @@ export function coverageSuiteStatus({ exitCode, skipReason } = {}) {
   return 'unknown';
 }
 
+export function deduplicatePlaywrightAttempts(attempts) {
+  if (!Array.isArray(attempts)) throw new Error('Playwright test attempts must be an array.');
+  const latestAttempts = new Map();
+  for (const attempt of attempts) {
+    const title = Array.isArray(attempt?.title)
+      ? attempt.title.filter(Boolean).join(' › ')
+      : String(attempt?.title ?? '');
+    const file = String(attempt?.file ?? '');
+    const retry = Number.isInteger(attempt?.retry) && attempt.retry >= 0 ? attempt.retry : 0;
+    const key = JSON.stringify([file, title]);
+    const previous = latestAttempts.get(key);
+    if (!previous || retry >= previous.retry)
+      latestAttempts.set(key, { ...attempt, file, title, retry });
+  }
+  return [...latestAttempts.values()];
+}
+
 export function parseNodeTestStatuses(log) {
   return [...log.matchAll(/^[ \t]*([✔✖﹣])[ \t]+(.+?)[ \t]+\((\d+(?:\.\d+)?)(ms|s)\)(?:[ \t]+#\s*SKIP(?:[ \t]+.*)?)?[ \t]*$/gm)]
     .map(match => ({

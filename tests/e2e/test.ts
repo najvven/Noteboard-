@@ -82,9 +82,10 @@ export const test = base.extend<E2EFixtures>({
       const inventory = {
         suite: 'playwright',
         file: path.relative(process.cwd(), testInfo.file).replaceAll(path.sep, '/'),
-        title: testInfo.titlePath,
+        title: testInfo.titlePath.filter(Boolean).join(' › '),
         status: testInfo.status,
         expectedStatus: testInfo.expectedStatus,
+        retry: testInfo.retry,
         browserPages: tracked.size,
         scripts: scriptCount,
         applicationScripts: appScriptCount,

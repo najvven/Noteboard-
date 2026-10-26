@@ -6504,6 +6504,51 @@ export default function BoardEditor({
     setSelectedId(id);
   };
 
+  const selectTopPixelFillFromPointerCapture = (event: React.PointerEvent) => {
+    if (activeTool !== "select" || event.button !== 0 || selectedIds.length > 1) return false;
+    const surfaceRect = boardSurfaceRef.current?.getBoundingClientRect();
+    const target = event.target as HTMLElement;
+    const targetId = target.closest<HTMLElement>("[data-board-element-id]")?.dataset.boardElementId;
+    const targetElement = targetId ? elementHierarchy.byId.get(targetId) : undefined;
+    if (!surfaceRect || !targetElement) return false;
+
+    const point = {
+      x: (event.clientX - surfaceRect.left) / zoomRef.current,
+      y: (event.clientY - surfaceRect.top) / zoomRef.current,
+    };
+    const fill = elementsRef.current
+      .filter(element => element.isPixelFill &&
+        elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
+        !elementHierarchy.isLocked(element.id) && isElementHitAtPoint(element, point))
+      .sort((left, right) => elementHierarchy.compare(right, left))[0];
+    if (!fill || elementHierarchy.compare(fill, targetElement) <= 0) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+    pendingPixelFillClickRef.current = null;
+    setQuickAddRegion(null);
+    setSelectedId(fill.id);
+    setIsMainBoardSelected(false);
+    setShowLinkInput(false);
+    setShowTargetInput(false);
+    setLinkSystemMode("start");
+    if (autoToolOnSelect) setActiveTool(toolForSelectedElement(fill));
+    setVisibleGuides([]);
+    groupMoveRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      elements: elementsRef.current,
+      ids: new Set([fill.id]),
+      changed: false,
+      preview: getEffectiveToolMenuSettings("select").previewMode,
+    };
+    captureSurfacePointer(event);
+    setIsInteracting(true);
+    return true;
+  };
+
   const handlePointerDown = (e: React.PointerEvent) => {
     pendingPixelFillClickRef.current = null;
     if (activeTool === "fill" && e.button !== 0) return;
@@ -8926,6 +8971,7 @@ export default function BoardEditor({
                 }}
                 onPointerDown={handlePointerDown}
                 onPointerDownCapture={(event) => {
+                  if (selectTopPixelFillFromPointerCapture(event)) return;
                   startSelectionMove(event);
                   if (activeTool === "fill" && event.button === 0) {
                     handlePointerDown(event);

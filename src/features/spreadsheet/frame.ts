@@ -895,40 +895,46 @@ window.addEventListener("message", async (event) => {
                 Boolean(editorService.getEditor(id));
             });
             const targetEditor = targetEditorId ? editorService.getEditor(targetEditorId) : undefined;
-            if (!targetEditor)
-              throw new Error("Could not locate the active spreadsheet edit cursor.");
-            const caret = cleanInput(expectedInput).length;
-            const caretIsRestored = () => {
-              const currentInput = targetEditor.getDocumentData().body?.dataStream;
-              return typeof currentInput === "string" && cleanInput(currentInput) === expectedInput &&
-                targetEditor.getCursorPosition() === caret && targetEditor.isFocus();
-            };
-            const caretDeadline = performance.now() + 5_000;
-            let stableFrames = 0;
-            const caretRestored = await new Promise<boolean>((resolve) => {
-              let checks = 0;
-              const poll = () => {
-                if (checks >= 50 || performance.now() >= caretDeadline) {
-                  resolve(false);
-                  return;
-                }
-                checks += 1;
-                if (caretIsRestored()) stableFrames += 1;
-                else {
-                  stableFrames = 0;
-                  restoreCaret();
-                  targetEditor.focus();
-                }
-                if (stableFrames >= 3) {
-                  scheduleAfterFrame(100, () => resolve(true));
-                  return;
-                }
-                scheduleAfterFrame(100, poll);
-              };
-              poll();
-            });
-            if (!caretRestored)
-              throw new Error("Could not restore the active spreadsheet edit cursor.");
+            if (!targetEditor) {
+              console.warn("Could not locate the active spreadsheet edit cursor.");
+            } else {
+              try {
+                const caret = cleanInput(expectedInput).length;
+                const caretIsRestored = () => {
+                  const currentInput = targetEditor.getDocumentData().body?.dataStream;
+                  return typeof currentInput === "string" && cleanInput(currentInput) === expectedInput &&
+                    targetEditor.getCursorPosition() === caret && targetEditor.isFocus();
+                };
+                const caretDeadline = performance.now() + 5_000;
+                let stableFrames = 0;
+                const caretRestored = await new Promise<boolean>((resolve) => {
+                  let checks = 0;
+                  const poll = () => {
+                    if (checks >= 50 || performance.now() >= caretDeadline) {
+                      resolve(false);
+                      return;
+                    }
+                    checks += 1;
+                    if (caretIsRestored()) stableFrames += 1;
+                    else {
+                      stableFrames = 0;
+                      restoreCaret();
+                      targetEditor.focus();
+                    }
+                    if (stableFrames >= 3) {
+                      scheduleAfterFrame(100, () => resolve(true));
+                      return;
+                    }
+                    scheduleAfterFrame(100, poll);
+                  };
+                  poll();
+                });
+                if (!caretRestored)
+                  console.warn("Could not restore the active spreadsheet edit cursor.");
+              } catch (error) {
+                console.warn("Could not restore the active spreadsheet edit cursor.", error);
+              }
+            }
           }
         }
       }

@@ -64,7 +64,7 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
   const pages = await response.json() as Array<{
     id: string;
     boardColor?: string;
-    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; pixelFillBoardId?: string; content?: string; size?: { width: number; height: number } }>;
+    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; pixelFillBoardId?: string; content?: string; size?: { width: number; height: number }; position?: { x: number; y: number } }>;
   }>;
   const saved = pages.find(candidate => candidate.id === id)!;
   const squareData = saved.elements.find(element => element.id === 'outlined-square')!;
@@ -81,6 +81,45 @@ test('Fill Tool fills the visible pixels inside a simple shape without native ca
     return [...rendered.data.subarray(offset, offset + 4)];
   };
   expect(pixel(Math.floor(rendered.info.width / 2), Math.floor(rendered.info.height / 2))).toEqual([255, 0, 0, 255]);
+
+  await page.getByTitle('Select Tool').click();
+  const fillElement = page.locator(`[data-board-element-id="${fill.id}"]`);
+  const fillBounds = await fillElement.boundingBox();
+  const shapeBounds = await square.boundingBox();
+  expect(fillBounds).not.toBeNull();
+  expect(shapeBounds).not.toBeNull();
+  await page.mouse.click(fillBounds!.x + fillBounds!.width / 2, fillBounds!.y + fillBounds!.height / 2);
+  await expect(page.getByText('Replace', { exact: true })).toBeVisible();
+
+  const originalPosition = fill.position!;
+  const dragStart = { x: fillBounds!.x + fillBounds!.width / 2, y: fillBounds!.y + fillBounds!.height / 2 };
+  await page.mouse.move(dragStart.x, dragStart.y);
+  await page.mouse.down();
+  await page.mouse.move(dragStart.x + 36, dragStart.y + 24, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      elements: Array<{ id: string; position?: { x: number; y: number } }>;
+    }>;
+    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === fill.id)?.position?.x;
+  }).toBeGreaterThan(originalPosition.x + 20);
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      elements: Array<{ id: string; position?: { x: number; y: number } }>;
+    }>;
+    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.position?.x;
+  }).toBe(250);
+
+  await page.keyboard.press('Control+z');
+  await expect.poll(async () => {
+    const current = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      elements: Array<{ id: string; position?: { x: number; y: number } }>;
+    }>;
+    return current.find(candidate => candidate.id === id)?.elements.find(element => element.id === fill.id)?.position?.x;
+  }).toBeCloseTo(originalPosition.x, 0);
   await page.keyboard.press('Control+z');
   await expect.poll(async () => {
     const current = await request.get('/api/pages');

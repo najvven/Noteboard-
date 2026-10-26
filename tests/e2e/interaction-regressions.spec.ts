@@ -12,6 +12,30 @@ async function clickAreaAction(page:Page,name:string){
   const box=(await button.boundingBox())!;await page.mouse.click(box.x+box.width/2,box.y+box.height/2);
 }
 
+test('moving a pixel fill to another board updates its owner and remains visible',async({page,request})=>{
+  const content='data:image/svg+xml;base64,'+Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>').toString('base64');
+  const data={...seed('Pixel fill board move','select',[
+    {id:'raster-fill',type:'image',position:{x:220,y:180},size:{width:80,height:60},content,isPixelFill:true,pixelFillBoardId:'main-board',zIndex:2},
+    {id:'destination-board',type:'board',position:{x:900,y:100},size:{width:260,height:240},content:'',zIndex:-2},
+  ]),width:700,height:500,boardX:0,boardY:0,workspaceWidth:1800,workspaceHeight:900,viewportCenterX:600,viewportCenterY:350};
+  await request.post('/api/pages',{data:[data]});
+  await page.goto('/');await page.getByRole('button',{name:'Open Pixel fill board move',exact:true}).click();
+  const fill=page.locator('[data-board-element-id="raster-fill"]');
+  const destination=page.locator('[data-board-element-id="destination-board"]');
+  await expect(fill).toBeVisible();await expect(destination).toBeVisible();
+  const source=(await fill.boundingBox())!,target=(await destination.boundingBox())!;
+  await page.mouse.click(source.x+source.width/2,source.y+source.height/2);
+  await drag(page,{x:source.x+source.width/2,y:source.y+source.height/2},{x:target.x+target.width/2,y:target.y+target.height/2},0);
+  await expect.poll(async()=>{
+    const response=await request.get('/api/pages');
+    const pages=await response.json() as Array<{id:string;elements:Array<{id:string;pixelFillBoardId?:string}>}>;
+    return pages.find(item=>item.id===data.id)?.elements.find(element=>element.id==='raster-fill')?.pixelFillBoardId;
+  }).toBe('destination-board');
+  const moved=(await fill.boundingBox())!;
+  expect(moved.x).toBeGreaterThan(target.x);
+  expect(moved.x+ moved.width).toBeLessThanOrEqual(target.x+target.width+1);
+});
+
 for(const tool of ['ellipse','line','rectangle','section'])test(`${tool} uses Lock in time for both previews and placement`,async({page,request})=>{
   await request.post('/api/pages',{data:[seed(`Lock ${tool}`,tool,[],{isSelectionLockEnabled:true,selectionLockTime:400})]});
   await page.goto('/');await page.getByRole('button',{name:`Open Lock ${tool}`,exact:true}).click();

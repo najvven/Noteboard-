@@ -20,6 +20,11 @@ export function cloneBoardDocument(
 ): ClonedBoardDocument {
   const elements = upgradeLegacyWorkbooks(source, legacySheets);
   const elementIds = new Map<string,string>(elements.map(element => [element.id, `element-${createId()}`] as const));
+  const boardIds = new Map(
+    elements
+      .filter(element => element.type === 'board')
+      .map(element => [element.id, elementIds.get(element.id)!] as const),
+  );
   return {
     sheets: [],
     elements: elements.map((element, index) => {
@@ -28,6 +33,13 @@ export function cloneBoardDocument(
       return {
         ...element,
         id: elementIds.get(element.id)!,
+        ...(element.isPixelFill && element.pixelFillBoardId
+          ? {
+              pixelFillBoardId: element.pixelFillBoardId === 'main-board'
+                ? 'main-board'
+                : boardIds.get(element.pixelFillBoardId),
+            }
+          : {}),
         parentId: element.parentId ? elementIds.get(element.parentId) ?? (options.preserveExternalParents ? element.parentId : undefined) : undefined,
         groupOriginalParentId:element.groupOriginalParentId?elementIds.get(element.groupOriginalParentId)??(options.preserveExternalParents?element.groupOriginalParentId:undefined):undefined,
         linkToId: element.linkToId ? elementIds.get(element.linkToId) ?? (isHttpBoardLink(element.linkToId) || options.preserveExternalLinks ? element.linkToId : undefined) : undefined,

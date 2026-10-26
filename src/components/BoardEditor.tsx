@@ -59,7 +59,7 @@ import {
   freezeTextLineDefaultsOnEdit,
   resolveTextLineSettings,
 } from "../features/board/text-lines";
-import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner } from "../features/board/board-surfaces";
+import { createBoardSurface, boardSurfaceBounds, findBoardSurface, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner, reconcilePixelFillBoardOwners } from "../features/board/board-surfaces";
 import { elementPolygon, getPlacementSection, getSectionClipPath, isPointInVisibleElementArea } from "../features/board/section-clipping";
 import { getElementPermissions } from "../features/board/interaction-permissions";
 import { isFlippableElementType } from "../features/board/flip";
@@ -1136,16 +1136,17 @@ export default function BoardEditor({
     newElements: BoardElement[],
     newSectionSheets: SectionSheet[] = sectionSheetsRef.current,
   ) => {
+    const normalizedElements = reconcilePixelFillBoardOwners(newElements, pageDimensions);
     const nextHistory = pushBoardDocumentHistory(
       documentHistoryRef.current,
-      { elements: newElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
+      { elements: normalizedElements, sectionSheets: newSectionSheets, boardGeometry: boardGeometryRef.current, presentation:presentationRef.current },
       50,
     );
     documentHistoryRef.current = nextHistory;
     setDocumentHistory(nextHistory);
-    elementsRef.current = newElements;
+    elementsRef.current = normalizedElements;
     sectionSheetsRef.current = newSectionSheets;
-    setElements(newElements);
+    setElements(normalizedElements);
     setSectionSheets(newSectionSheets);
   };
 
@@ -1999,7 +2000,7 @@ export default function BoardEditor({
       elementBoardBoundary(element, sourceElements, pageDimensions, elementHierarchy),
       elementHierarchy,
     )) return false;
-    return !element.isPixelFill || isPixelFillOpaqueAtPoint(element, point);
+    return !element.isPixelFill || isPixelFillOpaqueAtPoint(element, point) !== false;
   };
 
   const clampPointToBounds = (
@@ -5417,7 +5418,7 @@ export default function BoardEditor({
     };
 
     if (skipHistory) {
-      const next = applyElementUpdate(elementsRef.current);
+      const next = reconcilePixelFillBoardOwners(applyElementUpdate(elementsRef.current), pageDimensions);
       elementsRef.current = next;
       setElements(next);
     } else {
@@ -6583,6 +6584,38 @@ export default function BoardEditor({
       return;
     }
 
+    // Pixel fills pass pointer events through their transparent pixels. When
+    // the canvas receives that event, use the same alpha-aware hit test as the
+    // Eraser so opaque fill pixels remain selectable and draggable.
+    if (activeTool === "select" && !isElementTarget) {
+      const fill = elementsRef.current
+        .slice()
+        .sort((a, b) => (Number.isFinite(b.zIndex) ? b.zIndex : 0) - (Number.isFinite(a.zIndex) ? a.zIndex : 0))
+        .find(element =>
+          element.isPixelFill &&
+          elementHierarchy.isVisible(element.id, respectLayerVisibility) &&
+          !elementHierarchy.isLocked(element.id) &&
+          isElementHitAtPoint(element, pointerPoint),
+        );
+      if (fill) {
+        setSelectedId(fill.id);
+        setSelectedIds([fill.id]);
+        setIsMainBoardSelected(false);
+        groupMoveRef.current = {
+          pointerId: e.pointerId,
+          x: e.clientX,
+          y: e.clientY,
+          elements: elementsRef.current,
+          ids: new Set([fill.id]),
+          changed: false,
+          preview: getEffectiveToolMenuSettings("select").previewMode,
+        };
+        captureSurfacePointer(e);
+        setIsInteracting(true);
+        return;
+      }
+    }
+
     // Select uses the actual pointer coordinates. Snapping its marquee to the
     // grid made upper-left drags jump sides and could lose a fast gesture.
     const x = activeTool === "select" ? exactX : snap(exactX);
@@ -7304,7 +7337,10 @@ export default function BoardEditor({
     start.changed=true;
     const bounds=selectedBounds(start.elements,[...start.ids]);
     if(bounds){const position=updateSmartGuides({id:'__group-selection',type:'rectangle',content:'',position:{x:bounds.x,y:bounds.y},size:bounds,zIndex:0},{x:bounds.x+dx,y:bounds.y+dy},true,start.ids);dx=position.x-bounds.x;dy=position.y-bounds.y;}
-    const next=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
+    const moved=start.elements.map(element=>start.ids.has(element.id)?{...element,position:{x:element.position.x+dx,y:element.position.y+dy}}:element);
+    const next=start.elements.some(element=>start.ids.has(element.id)&&element.isPixelFill)
+      ? reconcilePixelFillBoardOwners(moved,pageDimensions)
+      : moved;
     start.latest=next;
     if(start.preview==='box'){
       if(selectionOutlineRef.current){selectionOutlineRef.current.style.transform=`translate(${dx}px,${dy}px)`;selectionOutlineRef.current.style.backgroundColor='rgba(59,130,246,.08)';}

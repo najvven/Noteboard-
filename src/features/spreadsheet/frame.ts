@@ -784,8 +784,17 @@ window.addEventListener("message", async (event) => {
         // declaring the frame loaded. On slower renderers the document unit can
         // exist with an empty body for several frames; moving that empty body's
         // caret to zero is then overwritten when Univer installs the draft.
-        const waitFrame = () =>
-          new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        const waitFrame = (fallbackMs: number) => new Promise<void>((resolve) => {
+          let frameId = 0;
+          const timeoutId = window.setTimeout(() => {
+            cancelAnimationFrame(frameId);
+            resolve();
+          }, fallbackMs);
+          frameId = requestAnimationFrame(() => {
+            window.clearTimeout(timeoutId);
+            resolve();
+          });
+        });
         const activeElement = window.document.activeElement;
         const activeEditorId = activeElement?.id.startsWith("__editor_")
           ? activeElement.id.slice("__editor_".length)
@@ -803,8 +812,9 @@ window.addEventListener("message", async (event) => {
           | undefined;
         const cleanInput = (value: string) => value.replace(/\r\n$/, "");
         let restoredEditors: NonNullable<ReturnType<typeof getEditor>>[] = [];
-        for (let frame = 0; frame < 60 && restoredEditors.length === 0; frame++) {
-          await waitFrame();
+        const restorationDeadline = performance.now() + 5_000;
+        for (let frame = 0; frame < 60 && restoredEditors.length === 0 && performance.now() < restorationDeadline; frame++) {
+          await waitFrame(Math.min(100, restorationDeadline - performance.now()));
           if (!book.isCellEditing()) continue;
           const candidates = editorIds
             .map(getEditor)
@@ -817,7 +827,7 @@ window.addEventListener("message", async (event) => {
               );
             });
           if (!candidates.length) continue;
-          await waitFrame();
+          await waitFrame(Math.min(100, Math.max(0, restorationDeadline - performance.now())));
           restoredEditors = candidates.filter((editor) => {
             const currentInput = editor.getBody?.().dataStream;
             return (
@@ -846,7 +856,7 @@ window.addEventListener("message", async (event) => {
           // Univer may reconcile the active formula-bar document one frame
           // after the body is restored. Re-fetch its live model and apply the
           // final caret after that reconciliation, before unblocking the host.
-          await waitFrame();
+          await waitFrame(100);
           restoreCaret();
           await repaint();
         }

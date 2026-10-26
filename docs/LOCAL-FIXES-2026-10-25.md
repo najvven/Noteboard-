@@ -41,7 +41,7 @@ Poniższe poprawki uzupełniają audyt PR #10; publiczna wersja pozostaje `1.0.0
 | CR7 | Raster Fill przechowuje spakowaną maskę alfa w ograniczonym cache. Context menu i obie ścieżki gumki trafiają tylko w nieprzezroczyste piksele oraz respektują widoczne granice Section. Testy obejmują obrót, odbicie i crop. |
 | XLSX A–D | Wstępna walidacja jest jednokrotnym, ograniczonym tokenizatorem XML; komórki, wiersze, scalenia i liczba arkuszy mają limity przed ExcelJS. Szerokie domyślne/ukryte zakresy kolumn nie rozciągają Simple view, zachowane są rzeczywiste komórki XFD, jawne custom columns i końce scaleń. Pierwsza komórka bez `r` dziedziczy kolumnę A z jawnego numeru wiersza; plik wejściowy nie jest mutowany. Limit archiwum 128 MiB pozostaje zgodny wstecz. |
 | COV-A–E, Q2/Q3, G2/G3/G4, CR1/CR-N | Profil Electron ma per-test JSONL i wymagany udany renderer; agregat kończy się błędem przy braku profilu lub błędzie collect. Inwentarz zachowuje marker ✔/✖/﹣, snapshot obejmuje strony HTML/CSS, wszystkie skrypty buildu, testy i konfigurację Sonar, a raport-only przerywa się po nieudanym rebuildzie. Fixture E2E słucha `context` i nowych stron bez wymuszania dodatkowej strony. |
-| CI i Sonar | CI coverage uruchamia teraz pełny agregat Node/Chromium/Electron na Node 24/Xvfb, zachowując cztery progi 80%, i publikuje artefakty po sukcesie lub błędzie. Sonar dostaje LCOV z tej samej mapy pod `coverage/lcov.info`; przypięty skan uruchomi się, gdy istnieją `SONAR_TOKEN` i `SONAR_ORGANIZATION`. |
+| CI i Sonar | CI coverage uruchamia teraz pełny agregat Node/Chromium/Electron na Node 24/Xvfb, zachowując cztery progi 80%, i publikuje artefakty po sukcesie lub błędzie. Sonar dostaje LCOV z tej samej mapy pod `coverage/lcov.info`; skan wymaga konfiguracji `SONAR_TOKEN`, `SONAR_ORGANIZATION`, `SONAR_CI_BASED=true` oraz udanego agregatu. |
 | Windows check | Test zapisu Web czyta plik z już zweryfikowanego profilu tymczasowego zamiast wykonywać IPC do kontekstu podczas `expect.poll`. Wprowadzanie testowych danych do Web używa jednego `insertText`, by uniknąć niestabilnych, osobnych zdarzeń klawiszy. |
 
 ### Weryfikacja tego follow-upu
@@ -64,3 +64,19 @@ Pełny agregat `20261025T195051958Z-d85b96ea` oraz jego report-only rerun przesz
 - Obsłużono błędy Promise’ów z `win.loadURL`, `win.loadFile` i inicjalizacji `app.whenReady`, które tworzyły trzy średnie problemy Reliability w poprzednim skanie.
 - Weryfikacja lokalna po tych zmianach: typecheck i produkcyjny build zaliczone; testy źródłowe 421/421, przeglądarkowe 12/12, wybrane Playwright 7/7 oraz wybrane natywne scenariusze Electron 5/5. Pełny agregat coverage zostanie ponownie oceniony przez CI po aktualizacji PR.
 - Te wyniki Sonar odnoszą się do historycznego headu `f069237`; nie są wynikiem skanu bieżącego kodu.
+
+## 2026-10-26 — dodatkowe poprawki po review PR #10
+
+- Wypełnienia pikselowe zachowują właściciela przy klonowaniu tablicy, a transfer strony przypisuje wypełnienia Main Board do nowej powierzchni. Po wklejeniu, duplikacji lub przeniesieniu właściciel jest ponownie rozwiązywany, jeśli raster opuścił poprzednią tablicę. Hit test rozpoznaje brak maski alfa jako stan nieznany, aby gumka i zaznaczanie nie przechodziły przez aktywne wypełnienie.
+- W trybie Select rasterowe wypełnienie bezpośrednio pod kursorem może być zaznaczone i przeciągane, mimo że przezroczyste piksele przekazują kliknięcia do płótna.
+- Odtwarzanie szkicu w arkuszu ma limit 5 sekund i awaryjne oczekiwanie między klatkami; ukryta karta nie może trzymać ramki przed komunikatem `loaded` do limitu hosta.
+- Coverage fixture obsługuje odrzucone `startJSCoverage`, inwentarz błędnej fazy nie przerywa zapisu diagnostyki, checkout CI nie zachowuje tokenu GitHub, a Sonar skanuje wyłącznie po udanym agregacie.
+- Testy arkusza zachowują gest zmiany szerokości kolumny, sprawdzają przewijanie klawiaturą oraz w obu osiach kółkiem myszy i wybierają kartę `Data` po roli dostępnościowej.
+
+### Weryfikacja
+
+- Typecheck, build, testy źródłowe **427/427** i testy browserowe **12/12** zaliczone. Build nadal zgłasza znany duży chunk arkusza około 7,5 MB.
+- Zestaw Playwright obejmujący wypełnienie, przeniesienie wypełnienia, arkusze, reload szkicu i zmianę kolumny: **11/11**. Po ostatnich zmianach testy arkusza w trybie coverage: **2/2**.
+- Na poprzednim headzie `3348b37079d9fe387af753b0e2659492382b8c91` GitHub potwierdził Windows i source/browser, a Linux coverage zebrał LCOV i uruchomił Sonar. Sonar Quality Gate: **passed**, nowe pokrycie **91,8%**, duplikacje **0,0%**, **87 nowych issue**. Ten skan poprzedza bieżące poprawki.
+- Ten sam starszy workflow coverage wykrył dwa nieudane testy arkusza, mimo że osobny source/browser job przeszedł. Test przewijania i wybór karty `Data` zostały poprawione; pełny agregat na nowym headzie pozostaje do potwierdzenia przez CI. Nowy workflow pomija Sonar, jeśli agregat nie przejdzie.
+- Wersja `1.0`, instalator, NoteboardWork i dane tablic nie były zmieniane.

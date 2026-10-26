@@ -25,11 +25,19 @@ export function resolveElementBoardOwner(
   hierarchy: ElementHierarchy = createElementHierarchy(boards),
 ) {
   if (element.isPixelFill && element.pixelFillBoardId) {
+    const fillCenter = element.size
+      ? {
+          x: element.position.x + element.size.width / 2,
+          y: element.position.y + element.size.height / 2,
+        }
+      : element.position;
     const explicitOwner = boards.find(board => board.type === 'board' && board.id === element.pixelFillBoardId);
-    if (explicitOwner) return explicitOwner;
-    if (element.pixelFillBoardId === 'main-board')
-      return boards.find(board => board.type === 'board' && board.id === 'main-board') ??
+    if (explicitOwner && pointInPolygon(fillCenter, elementPolygon(explicitOwner))) return explicitOwner;
+    if (element.pixelFillBoardId === 'main-board') {
+      const main = boards.find(board => board.type === 'board' && board.id === 'main-board') ??
         createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
+      if (pointInPolygon(fillCenter, elementPolygon(main))) return main;
+    }
   }
   const visited = new Set<string>();
   let parentId = element.parentId;
@@ -56,6 +64,34 @@ export function resolveElementBoardOwner(
     return boards.find(board => board.type === 'board' && board.id === 'main-board') ??
       createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
   return undefined;
+}
+
+/** Keep raster fills attached to a board that still contains them; otherwise resolve their new surface. */
+export function reconcilePixelFillBoardOwners(
+  elements: BoardElement[],
+  mainSize: Size,
+): BoardElement[] {
+  if (!elements.some(element => element.isPixelFill)) return elements;
+  const storedMain = elements.find(element => element.type === 'board' && element.id === 'main-board');
+  const main = storedMain ?? createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
+  const boards = [main, ...elements.filter(element => element.type === 'board' && element.id !== 'main-board')];
+  const hierarchy = createElementHierarchy(elements);
+
+  return elements.map(element => {
+    if (!element.isPixelFill) return element;
+    const width = element.size?.width ?? 0;
+    const height = element.size?.height ?? 0;
+    const center = { x: element.position.x + width / 2, y: element.position.y + height / 2 };
+    const currentOwner = element.pixelFillBoardId
+      ? boards.find(board => board.id === element.pixelFillBoardId)
+      : undefined;
+    if (currentOwner && pointInPolygon(center, elementPolygon(currentOwner))) return element;
+
+    const { pixelFillBoardId: _staleOwner, ...withoutExplicitOwner } = element;
+    const nextOwner = resolveElementBoardOwner(withoutExplicitOwner, elements, mainSize, hierarchy);
+    if (nextOwner?.id === element.pixelFillBoardId) return element;
+    return { ...element, pixelFillBoardId: nextOwner?.id };
+  });
 }
 
 /** Preview and placed objects use the same owner and polygon clipping boundary. */

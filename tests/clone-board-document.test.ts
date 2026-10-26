@@ -15,6 +15,21 @@ test('cloned Web fields retain privacy choices without sharing the source sessio
   assert.equal(copy.webAdBlock, true); assert.equal(copy.webPopupBlocker, true); assert.equal(copy.webCookieBlocker, 'all');
 });
 
+test('cloning boards remaps pixel-fill ownership and clears references outside the cloned document', () => {
+  const source: BoardElement[] = [
+    { id: 'board', type: 'board', position: { x: 200, y: 0 }, size: { width: 100, height: 100 }, content: '', zIndex: -1 },
+    { id: 'fill', type: 'image', position: { x: 210, y: 10 }, size: { width: 20, height: 20 }, content: 'data:image/png;base64,', isPixelFill: true, pixelFillBoardId: 'board', zIndex: 1 },
+    { id: 'outside-fill', type: 'image', position: { x: 10, y: 10 }, size: { width: 20, height: 20 }, content: 'data:image/png;base64,', isPixelFill: true, pixelFillBoardId: 'external-board', zIndex: 2 },
+    { id: 'main-fill', type: 'image', position: { x: 10, y: 40 }, size: { width: 20, height: 20 }, content: 'data:image/png;base64,', isPixelFill: true, pixelFillBoardId: 'main-board', zIndex: 3 },
+  ];
+  let next = 0;
+  const cloned = cloneBoardDocument(source, [], () => `clone-${++next}`).elements;
+  const board = cloned.find(element => element.type === 'board')!;
+  assert.equal(cloned.find(element => element.zIndex === 1)?.pixelFillBoardId, board.id);
+  assert.equal(cloned.find(element => element.zIndex === 2)?.pixelFillBoardId, undefined);
+  assert.equal(cloned.find(element => element.zIndex === 3)?.pixelFillBoardId, 'main-board');
+});
+
 test("cloning a board remaps element and spreadsheet references without mutating source", () => {
   const elements: BoardElement[] = [
     {

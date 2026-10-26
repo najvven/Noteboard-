@@ -136,6 +136,30 @@ test("cell sizing preserves the live workbook, cell Undo and canvas Undo after s
   expect(errors).toEqual([]);
 });
 
+test("dragging a spreadsheet column boundary changes the column width", async ({ page, request }) => {
+  await request.post("/api/pages", {
+    data: [board("sheet-column-drag", [sheet("sheet", 100, 100)])],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open sheet-column-drag", exact: true }).click();
+  const object = page.locator('[data-board-element-id="sheet"]');
+  await object.click({ position: { x: 80, y: 15 } });
+  await expect(page.locator("[data-spreadsheet-inline]").getByRole("status")).toHaveCount(0, { timeout: 30000 });
+  const grid = page.frameLocator('iframe[title="Spreadsheet cells"]').locator('canvas[id^="univer-sheet-main-canvas_"]');
+  await expect(grid).toBeVisible();
+  const bounds = await grid.boundingBox();
+  expect(bounds).not.toBeNull();
+  const before = (await read(page)).workbook.sheets["sheet-1"].defaultColumnWidth ?? 100;
+  await page.mouse.move(bounds!.x + 150, bounds!.y + 15);
+  await page.mouse.down();
+  await page.mouse.move(bounds!.x + 190, bounds!.y + 15, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => {
+    const current = (await read(page)).workbook.sheets["sheet-1"];
+    return current.columnData?.[0]?.w ?? current.defaultColumnWidth ?? 100;
+  }).toBeGreaterThan(before);
+});
+
 test("Select has exactly three variations and polygon stays open until the first vertex is connected", async ({
   page,
   request,

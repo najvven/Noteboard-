@@ -41,3 +41,8 @@ test('pixel-fill alpha hit testing maps the visible crop back to source pixels',
 test('non-pixel-fill elements keep their regular geometry hit behavior', () => {
   assert.equal(isPixelFillOpaqueAtPoint(element({ isPixelFill: false }), { x: 11, y: 21 }), true);
 });
+
+test('pixel fills report an unknown hit while their alpha mask is unavailable', () => {
+  const unavailable = element({ content: 'data:image/png;base64,alpha-mask-not-yet-loaded' });
+  assert.equal(isPixelFillOpaqueAtPoint(unavailable, { x: 11, y: 21 }), undefined);
+});

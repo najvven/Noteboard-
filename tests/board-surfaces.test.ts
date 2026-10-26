@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createBoardSurface, findBoardSurface, boardSurfaceBounds, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner } from '../src/features/board/board-surfaces.ts';
+import { createBoardSurface, findBoardSurface, boardSurfaceBounds, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner, reconcilePixelFillBoardOwners } from '../src/features/board/board-surfaces.ts';
 test('main and additional boards use the same surface geometry and visuals', () => {
   const main = createBoardSurface('main-board', {x:0,y:0}, {width:100,height:100}, '#fff', -9999);
   const second = createBoardSurface('second', {x:150,y:-20}, {width:100,height:100}, '#fff', -1);
@@ -57,4 +57,27 @@ test('pixel fills keep the surface selected by the fill gesture when boards over
   assert.deepEqual(elementBoardBoundary(fill,[first,overlapping],{width:500,height:400}),[
     {x:0,y:0},{x:200,y:0},{x:200,y:200},{x:0,y:200},
   ]);
+});
+
+test('stale pixel-fill ownership falls back to the board that contains the fill',()=>{
+  const original=createBoardSurface('original',{x:0,y:0},{width:100,height:100},'#fff',1);
+  const destination=createBoardSurface('destination',{x:150,y:0},{width:100,height:100},'#fff',2);
+  const fill={id:'fill',type:'image' as const,content:'data:image/png;base64,',isPixelFill:true,pixelFillBoardId:'original',position:{x:165,y:20},size:{width:30,height:20},zIndex:3};
+  assert.equal(resolveElementBoardOwner(fill,[original,destination],{width:100,height:100})?.id,'destination');
+});
+
+test('moved pixel fills switch owners only after leaving their original surface',()=>{
+  const first=createBoardSurface('first',{x:0,y:0},{width:100,height:100},'#fff',1);
+  const second=createBoardSurface('second',{x:150,y:0},{width:100,height:100},'#fff',2);
+  const fill={id:'fill',type:'image' as const,content:'data:image/png;base64,',isPixelFill:true,pixelFillBoardId:'first',position:{x:170,y:20},size:{width:30,height:20},zIndex:3};
+  const result=reconcilePixelFillBoardOwners([first,second,fill],{width:100,height:100});
+  assert.equal(result.find(element=>element.id==='fill')?.pixelFillBoardId,'second');
+});
+
+test('reconciled fills retain explicit ownership while still inside an overlapping owner',()=>{
+  const first=createBoardSurface('first',{x:0,y:0},{width:200,height:100},'#fff',1);
+  const second=createBoardSurface('second',{x:80,y:0},{width:200,height:100},'#fff',2);
+  const fill={id:'fill',type:'image' as const,content:'data:image/png;base64,',isPixelFill:true,pixelFillBoardId:'first',position:{x:90,y:20},size:{width:30,height:20},zIndex:3};
+  const result=reconcilePixelFillBoardOwners([first,second,fill],{width:100,height:100});
+  assert.equal(result.find(element=>element.id==='fill')?.pixelFillBoardId,'first');
 });

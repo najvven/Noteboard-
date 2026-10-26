@@ -90,13 +90,13 @@ function getMask(content: string) {
   return null;
 }
 
-/** Returns true only when the world point maps to a nontransparent pixel. */
-export function isPixelFillOpaqueAtPoint(element: BoardElement, point: Position): boolean {
+/** Returns undefined while an alpha mask is unavailable, so hit testing cannot fall through. */
+export function isPixelFillOpaqueAtPoint(element: BoardElement, point: Position): boolean | undefined {
   if (!element.isPixelFill) return true;
   const content = element.content || '';
   if (!content) return false;
   const mask = getMask(content);
-  if (!mask) return false;
+  if (!mask) return undefined;
 
   const width = element.size?.width ?? 0;
   const height = element.size?.height ?? 0;

@@ -194,12 +194,14 @@ async function buildCoverage(runDirectory, sourceInventory) {
       ? (await fs.readFile(path.join(runDirectory, phase.log), 'utf8').catch(() => '')).replaceAll(/\u001b\[[0-9;]*m/g, '')
       : '';
     const counts = log.match(/ℹ tests (\d+)\s*\r?\nℹ suites (\d+)\s*\r?\nℹ pass (\d+)\s*\r?\nℹ fail (\d+)\s*\r?\nℹ cancelled (\d+)\s*\r?\nℹ skipped (\d+)/);
-    assertNodeTestPhaseHasPassingTests(phase.name, counts ? {
-      total: Number(counts[1]),
-      passed: Number(counts[3]),
-      failed: Number(counts[4]),
-      skipped: Number(counts[6]),
-    } : undefined);
+    if (status === 'passed') {
+      assertNodeTestPhaseHasPassingTests(phase.name, counts ? {
+        total: Number(counts[1]),
+        passed: Number(counts[3]),
+        failed: Number(counts[4]),
+        skipped: Number(counts[6]),
+      } : undefined);
+    }
     const testStatuses = parseNodeTestStatuses(log);
     const browserCases = phase.name === 'playwright' ? playwrightTests : [];
     const browserPassed = browserCases.filter(item => item.status === 'passed').length;

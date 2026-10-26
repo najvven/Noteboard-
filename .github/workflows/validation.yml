@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -32,6 +34,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -47,6 +51,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -54,6 +59,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium chrome
       - name: Collect multi-runtime coverage and interaction inventory
+        id: coverage-aggregate
         run: xvfb-run -a npm run test:coverage:all
       - name: Upload coverage evidence
         if: always()
@@ -87,7 +93,7 @@ jobs:
             echo "SonarCloud scan skipped. Configure the Sonar credentials and CI-based analysis, and produce a nonempty coverage/lcov.info report."
           fi
       - name: SonarCloud scan
-        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' }}
+        if: ${{ always() && !cancelled() && steps.sonar-config.outputs.configured == 'true' && steps.coverage-aggregate.outcome == 'success' }}
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

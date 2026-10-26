@@ -26,6 +26,7 @@ export const test = base.extend<E2EFixtures>({
         started: target.coverage.startJSCoverage({ resetOnNavigation: false }),
         entries: [],
       };
+      state.started.catch(() => undefined);
       tracked.set(target, state);
       const capture = () => state.stop ??= state.started.then(async () => {
         state.entries = await target.coverage.stopJSCoverage();

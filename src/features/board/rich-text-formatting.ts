@@ -237,13 +237,38 @@ export function focusEmptyTextLineCaret(editor: HTMLElement) {
   }
   if (!line || !editor.contains(line) || !isEmptyTextLine(line)) return;
 
-  const caretRun = line.querySelector<HTMLElement>(
+  const editorRect = editor.getBoundingClientRect();
+  const measuredViewportHeight = Number.parseFloat(editor.dataset.textLineViewportHeight ?? '');
+  const viewportBottom = editorRect.top + (Number.isFinite(measuredViewportHeight) ? measuredViewportHeight : editor.clientHeight);
+  const lineRect = line.getBoundingClientRect();
+  const currentLineVisible = lineRect.top < viewportBottom - 0.75 && lineRect.bottom <= viewportBottom + 0.75;
+  let targetLine: HTMLElement | null = line;
+  if (!currentLineVisible) {
+    const lineSelector = Array.from(TEXT_LINE_TAGS).join(',');
+    const visibleEmptyLines = Array.from(editor.querySelectorAll<HTMLElement>(lineSelector))
+      .filter(isEmptyTextLine)
+      .filter((candidate) => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.bottom > editorRect.top && rect.top < viewportBottom - 0.75 && rect.bottom <= viewportBottom + 0.75;
+      });
+    targetLine = visibleEmptyLines.at(-1) ?? null;
+    if (!targetLine) return;
+  }
+
+  const caretRun = targetLine.querySelector<HTMLElement>(
     `[${TEXT_PRESENTATION_ATTRIBUTE}="${TEXT_PRESENTATION_CARET}"]`,
   );
   const text = caretRun?.firstChild;
-  if (!(text instanceof Text) || text.data !== INTERNAL_CARET_CHARACTER) return;
   const nextRange = document.createRange();
-  nextRange.setStart(text, 1);
+  if (text instanceof Text && text.data === INTERNAL_CARET_CHARACTER) {
+    nextRange.setStart(text, 1);
+  } else if (!currentLineVisible) {
+    const lineBreak = targetLine.querySelector(':scope > br');
+    if (lineBreak) nextRange.setStartBefore(lineBreak);
+    else nextRange.selectNodeContents(targetLine);
+  } else {
+    return;
+  }
   nextRange.collapse(true);
   selection.removeAllRanges();
   selection.addRange(nextRange);

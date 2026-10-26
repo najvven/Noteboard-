@@ -436,6 +436,7 @@ test('Web Select and Hand controls operate the existing native guest and persist
   const {url}=await responsiveServer(t),board=seed('select',url);
   Object.assign(board.editorSettings,{autoToolOnSelect:false});
   const {app,window,errors,profile}=await launch(t,board);
+  await expect.poll(async()=>(await guestState(app))[0]?.title,{timeout:15000}).toBe('Responsive Web');
   await expect.poll(async()=>(await responsiveState(app)).clicks).toBe(0);
   const identity=(await guestState(app))[0].id;
   await clickWebControl(app,window,'#target');assert.equal((await responsiveState(app)).clicks,0);
@@ -604,7 +605,7 @@ test('board capture IPC rejects invalid and off-window regions without main-proc
   assert.deepEqual(errors,[],'Rejected capture requests must not create renderer errors.');
 });
 
-test('Fill Tool updates a simple shape fill, preserves its outline, and supports undo', {timeout:45000},async t=>{
+test('Fill Tool raster-fills visible shape pixels, preserves the outline, and supports undo', {timeout:45000},async t=>{
   const board=seed('select');
   Object.assign(board,{width:700,height:500,workspaceWidth:1400,workspaceHeight:900,boardX:350,boardY:200,viewportCenterX:700,viewportCenterY:450,zoom:1.25,boardColor:'#ffffff'});
   board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
@@ -620,32 +621,34 @@ test('Fill Tool updates a simple shape fill, preserves its outline, and supports
   await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
   await window.mouse.click(interior.x,interior.y);
   const fillLayer=window.locator('[data-board-element-type="image"]');
-  await expect(fillLayer).toHaveCount(0);
+  await expect(fillLayer).toHaveCount(1);
   await expect.poll(async()=>window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
-    return page?.elements.find(element=>element.id==='outlined-square')?.color;
-  })).toBe('#ff0000');
+    return page?.elements.some(element=>element.isPixelFill) && page?.elements.find(element=>element.id==='outlined-square')?.color;
+  })).toBe('#ffffff');
 
   const savedElements=await window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
     return page?.elements??[];
   });
   const savedSquare=savedElements.find(element=>element.id==='outlined-square');
-  assert.equal(savedSquare.color,'#ff0000');
+  assert.equal(savedSquare.color,'#ffffff');
   assert.equal(savedSquare.borderColor,'#000000');
-  assert.equal(savedElements.some(element=>element.isPixelFill),false);
+  const pixelFill=savedElements.find(element=>element.isPixelFill);
+  assert.ok(pixelFill);
+  assert.equal(pixelFill.pixelFillBoardId,'main-board');
   assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),interior),'#ff0000');
   assert.equal(await window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),outline),'#000000');
 
   await window.keyboard.press('Control+z');
   await expect.poll(async()=>window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
-    return page?.elements.find(element=>element.id==='outlined-square')?.color;
-  })).toBe('#ffffff');
+    return page?.elements.some(element=>element.isPixelFill);
+  })).toBe(false);
   assert.deepEqual(errors,[]);
 });
 
-test('Fill Tool clicked on open board background changes that surface and leaves a nearby line unchanged', {timeout:45000},async t=>{
+test('Fill Tool raster-fills open board background and leaves a nearby line unchanged', {timeout:45000},async t=>{
   const board=seed('select');
   Object.assign(board,{width:500,height:350,workspaceWidth:1200,workspaceHeight:900,boardX:100,boardY:100,viewportCenterX:600,viewportCenterY:450,zoom:1,boardColor:'#ffffff'});
   board.editorSettings={...board.editorSettings,fillToolColor:'#ff0000'};
@@ -661,25 +664,27 @@ test('Fill Tool clicked on open board background changes that surface and leaves
   await window.getByRole('button',{name:'Fill Tool',exact:true}).click();
   await window.mouse.click(nearbyBackground.x,nearbyBackground.y);
   const fillLayer=window.locator('[data-board-element-type="image"]');
-  await expect(fillLayer).toHaveCount(0);
+  await expect(fillLayer).toHaveCount(1);
   await expect.poll(async()=>window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
-    return page?.boardColor;
-  })).toBe('#ff0000');
+    return page?.elements.some(element=>element.isPixelFill) && page?.boardColor;
+  })).toBe('#ffffff');
   await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),nearbyBackground)).toBe('#ff0000');
   await expect.poll(()=>window.evaluate(point=>window.noteboardAPI.sampleBoardColor(point),stroke)).toBe('#000000');
 
   const saved=await window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
-    return page?.elements??[];
+    return page;
   });
-  assert.equal(saved.find(element=>element.id==='horizontal-line').borderColor,'#000000');
-  assert.equal(saved.filter(element=>element.isPixelFill).length,0);
+  assert.equal(saved.boardColor,'#ffffff');
+  assert.equal(saved.elements.find(element=>element.id==='horizontal-line').borderColor,'#000000');
+  assert.equal(saved.elements.filter(element=>element.isPixelFill).length,1);
+  assert.equal(saved.elements.find(element=>element.isPixelFill).pixelFillBoardId,'main-board');
   await window.keyboard.press('Control+z');
   await expect.poll(async()=>window.evaluate(async()=>{
     const page=(await window.noteboardAPI.loadPages()).find(value=>value.id==='native-source');
-    return page?.boardColor;
-  })).toBe('#ffffff');
+    return page?.elements.some(element=>element.isPixelFill);
+  })).toBe(false);
   assert.deepEqual(errors,[]);
 });
 
@@ -737,6 +742,7 @@ test('Fill Tool raster-fills a closed drawing on an additional board outside Mai
     return page?.elements.find(element=>element.isPixelFill);
   });
   assert.ok(filled);
+  assert.equal(filled.pixelFillBoardId,'far-board');
   const center={x:filled.position.x+filled.size.width/2,y:filled.position.y+filled.size.height/2};
   assert.ok(center.x>=800&&center.x<=1040&&center.y>=100&&center.y<=280);
   assert.equal(filled.parentId,'far-board');

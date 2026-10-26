@@ -19,8 +19,8 @@ const createBoard = (id: string, elements: unknown[]) => ({
   editorSettings: { activeTool: 'select', keepToolActive: true, fillToolColor: '#ff0000' },
 });
 
-test('Fill Tool changes a simple editable shape without requiring native capture', async ({ page, request }) => {
-  const id = 'browser-fill-semantic';
+test('Fill Tool fills the visible pixels inside a simple shape without native capture', async ({ page, request }) => {
+  const id = 'browser-fill-visible-pixels';
   const board = createBoard(id, [{
     id: 'outlined-square',
     type: 'rectangle',
@@ -46,28 +46,136 @@ test('Fill Tool changes a simple editable shape without requiring native capture
   await page.mouse.click(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
   await expect.poll(async () => {
     const response = await request.get('/api/pages');
-    const pages = await response.json() as Array<{ id: string; elements: Array<{ id: string; color?: string; isPixelFill?: boolean }> }>;
-    return pages.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.color;
-  }).toBe('#ff0000');
+    const pages = await response.json() as Array<{
+      id: string;
+      boardColor?: string;
+      elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; content?: string }>;
+    }>;
+    const saved = pages.find(candidate => candidate.id === id);
+    return saved?.elements.some(element => element.isPixelFill) && saved.elements.find(element => element.id === 'outlined-square')?.color;
+  }).toBe('#ffffff');
 
-  const rendered = await sharp(await square.screenshot()).raw().toBuffer({ resolveWithObject: true });
+  const response = await request.get('/api/pages');
+  const pages = await response.json() as Array<{
+    id: string;
+    boardColor?: string;
+    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean; pixelFillBoardId?: string; content?: string }>;
+  }>;
+  const saved = pages.find(candidate => candidate.id === id)!;
+  const squareData = saved.elements.find(element => element.id === 'outlined-square')!;
+  expect(saved.boardColor).toBe('#ffffff');
+  expect(squareData).toMatchObject({ color: '#ffffff', borderColor: '#000000' });
+  const fill = saved.elements.find(element => element.isPixelFill)!;
+  expect(fill.pixelFillBoardId).toBe('main-board');
+  expect(fill.content).toMatch(/^data:image\/png;base64,/);
+  const rendered = await sharp(Buffer.from(fill.content!.split(',')[1], 'base64')).raw().toBuffer({ resolveWithObject: true });
   const pixel = (x: number, y: number) => {
     const offset = (y * rendered.info.width + x) * rendered.info.channels;
     return [...rendered.data.subarray(offset, offset + 4)];
   };
   expect(pixel(Math.floor(rendered.info.width / 2), Math.floor(rendered.info.height / 2))).toEqual([255, 0, 0, 255]);
-  const response = await request.get('/api/pages');
-  const pages = await response.json() as Array<{ id: string; boardColor?: string; elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean }> }>;
-  const saved = pages.find(candidate => candidate.id === id)!;
-  const squareData = saved.elements.find(element => element.id === 'outlined-square')!;
-  expect(squareData).toMatchObject({ color: '#ff0000', borderColor: '#000000' });
-  expect(saved.elements.some(element => element.isPixelFill)).toBe(false);
   await page.keyboard.press('Control+z');
   await expect.poll(async () => {
     const current = await request.get('/api/pages');
-    const documents = await current.json() as Array<{ id: string; elements: Array<{ id: string; color?: string }> }>;
-    return documents.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'outlined-square')?.color;
-  }).toBe('#ffffff');
+    const documents = await current.json() as Array<{ id: string; elements: Array<{ id: string; isPixelFill?: boolean }> }>;
+    return documents.find(candidate => candidate.id === id)?.elements.some(element => element.isPixelFill);
+  }).toBe(false);
+});
+
+test('Fill outside a closed outline preserves the enclosed region and board color', async ({ page, request }) => {
+  const id = 'browser-fill-outside-loop';
+  const board = createBoard(id, [{
+    id: 'closed-square',
+    type: 'rectangle',
+    position: { x: 250, y: 170 },
+    size: { width: 180, height: 120 },
+    content: '',
+    color: '#ffffff',
+    borderColor: '#000000',
+    borderWidth: 8,
+    zIndex: 1,
+  }]);
+  const created = await request.post('/api/pages', { data: [board] });
+  expect(created.ok()).toBe(true);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+  await page.getByTitle('Fill Tool').click();
+  const surface = page.locator('#main-board');
+  const bounds = await surface.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.click(bounds!.x + 8, bounds!.y + 8);
+
+  await expect.poll(async () => {
+    const pages = await request.get('/api/pages').then(response => response.json()) as Array<{
+      id: string;
+      boardColor?: string;
+      elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean }>;
+    }>;
+    const saved = pages.find(candidate => candidate.id === id);
+    return saved?.elements.filter(element => element.isPixelFill).length;
+  }, { timeout: 45000 }).toBe(1);
+
+  const pages = await request.get('/api/pages').then(response => response.json()) as Array<{
+    id: string;
+    boardColor?: string;
+    elements: Array<{ id: string; color?: string; borderColor?: string; isPixelFill?: boolean }>;
+  }>;
+  const saved = pages.find(candidate => candidate.id === id)!;
+  expect(saved.boardColor).toBe('#ffffff');
+  expect(saved.elements.find(element => element.id === 'closed-square')).toMatchObject({
+    color: '#ffffff',
+    borderColor: '#000000',
+  });
+});
+
+test('Fill ignores middle-button clicks and preserves workspace panning', async ({ page, request }) => {
+  const id = 'browser-fill-middle-pan';
+  const board = createBoard(id, [{
+    id: 'outlined-square',
+    type: 'rectangle',
+    position: { x: 250, y: 170 },
+    size: { width: 180, height: 120 },
+    content: '',
+    color: '#ffffff',
+    borderColor: '#000000',
+    borderWidth: 8,
+    zIndex: 1,
+  }]);
+  board.workspaceWidth = 2400;
+  board.workspaceHeight = 1600;
+  board.boardX = 850;
+  board.boardY = 550;
+  board.viewportCenterX = 1200;
+  board.viewportCenterY = 800;
+  const created = await request.post('/api/pages', { data: [board] });
+  expect(created.ok()).toBe(true);
+
+  await page.goto('/');
+  await page.getByRole('button', { name: `Open ${id}`, exact: true }).click();
+  const workspace = page.locator('.workspace-scroll');
+  const square = page.locator('[data-board-element-id="outlined-square"]');
+  await expect(square).toBeVisible();
+  await page.getByTitle('Fill Tool').click();
+
+  const before = await workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop }));
+  const bounds = (await square.boundingBox())!;
+  const start = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down({ button: 'middle' });
+  await page.mouse.move(start.x - 80, start.y - 50, { steps: 6 });
+  await page.mouse.up({ button: 'middle' });
+  await expect.poll(() => workspace.evaluate(node => ({ left: node.scrollLeft, top: node.scrollTop })))
+    .not.toEqual(before);
+
+  const pages = await request.get('/api/pages').then(response => response.json()) as Array<{
+    id: string;
+    elements: Array<{ id: string; color?: string; isPixelFill?: boolean }>;
+  }>;
+  const savedPage = pages.find(candidate => candidate.id === id)!;
+  const savedSquare = savedPage.elements.find(element => element.id === 'outlined-square');
+  expect(savedSquare?.color).toBe('#ffffff');
+  expect(savedPage.elements.some(element => element.isPixelFill)).toBe(false);
 });
 
 test('Fill Tool uses a scene raster for a closed freehand contour in browser preview', async ({ page, request }) => {

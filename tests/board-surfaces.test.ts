@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createBoardSurface, findBoardSurface, boardSurfaceBounds, boardSurfaceStyle, elementBoardBoundary } from '../src/features/board/board-surfaces.ts';
+import { createBoardSurface, findBoardSurface, boardSurfaceBounds, boardSurfaceStyle, elementBoardBoundary, resolveElementBoardOwner } from '../src/features/board/board-surfaces.ts';
 test('main and additional boards use the same surface geometry and visuals', () => {
   const main = createBoardSurface('main-board', {x:0,y:0}, {width:100,height:100}, '#fff', -9999);
   const second = createBoardSurface('second', {x:150,y:-20}, {width:100,height:100}, '#fff', -1);
@@ -42,6 +42,19 @@ test('explicit board ancestry wins, while hidden implicit boards do not claim co
   ]);
   const hidden={...overlapping,isHidden:true};
   assert.deepEqual(elementBoardBoundary({position:{x:120,y:30},size:{width:150,height:40}},[first,hidden],{width:500,height:400}),[
+    {x:0,y:0},{x:200,y:0},{x:200,y:200},{x:0,y:200},
+  ]);
+});
+
+test('pixel fills keep the surface selected by the fill gesture when boards overlap',()=>{
+  const first=createBoardSurface('first',{x:0,y:0},{width:200,height:200},'#fff',1);
+  const overlapping=createBoardSurface('overlap',{x:100,y:0},{width:200,height:200},'#fff',5);
+  const fill={
+    id:'fill',type:'image' as const,content:'data:image/png;base64,',isPixelFill:true,pixelFillBoardId:'first',
+    position:{x:90,y:40},size:{width:60,height:50},zIndex:8,
+  };
+  assert.equal(resolveElementBoardOwner(fill,[first,overlapping],{width:500,height:400})?.id,'first');
+  assert.deepEqual(elementBoardBoundary(fill,[first,overlapping],{width:500,height:400}),[
     {x:0,y:0},{x:200,y:0},{x:200,y:200},{x:0,y:200},
   ]);
 });

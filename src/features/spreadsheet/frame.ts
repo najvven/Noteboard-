@@ -830,12 +830,24 @@ window.addEventListener("message", async (event) => {
           // Univer can keep both the in-cell and formula-bar documents mounted.
           // Align every matching restored editor so the focused one cannot retain
           // its old start-of-text caret while the other document is updated.
-          for (const editor of restoredEditors) {
-            const dataStream = editor.getBody?.().dataStream;
-            if (typeof dataStream !== "string") continue;
-            const caret = cleanInput(dataStream).length;
-            editor.setSelection?.(caret, caret);
-          }
+          const restoreCaret = () => {
+            for (const editor of editorIds.map(getEditor)) {
+              const dataStream = editor?.getBody?.().dataStream;
+              if (
+                !editor || typeof dataStream !== "string" ||
+                (expectedInput !== undefined && cleanInput(dataStream) !== expectedInput)
+              ) continue;
+              const caret = cleanInput(dataStream).length;
+              editor.setSelection?.(caret, caret);
+            }
+          };
+          restoreCaret();
+          await repaint();
+          // Univer may reconcile the active formula-bar document one frame
+          // after the body is restored. Re-fetch its live model and apply the
+          // final caret after that reconciliation, before unblocking the host.
+          await waitFrame();
+          restoreCaret();
           await repaint();
         }
       }

@@ -143,6 +143,22 @@ test('XLSX import includes defined empty columns when sizing an otherwise empty 
   assert.ok(parseWorkbookDocument(JSON.stringify(imported.document)));
 });
 
+test('XLSX import counts a bounded span of adjacent empty columns with identical formatting',async()=>{
+  const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('Equal widths');
+  worksheet.getColumn(27).width=20;worksheet.getColumn(28).width=20;
+  const archive=await source.xlsx.writeBuffer();
+  const zip=await JSZip.loadAsync(archive);
+  const xml=await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  assert.equal(worksheet.columnCount,0);
+  assert.match(xml,/<col min="27" max="28" width="20"/);
+  const imported=await importSpreadsheet(archive as ArrayBuffer,'Equal-widths.xlsx');
+  const sheet=imported.document.workbook.sheets![imported.document.activeSheetId!];
+  assert.deepEqual(sheet.cellData,{});
+  assert.equal(sheet.columnCount,28);
+  assert.equal(sheet.columnData![26].w,sheet.columnData![27].w);
+  assert.ok(sheet.columnData![26].w!>100);
+});
+
 test('XLSX import accepts a declared XFD column at the worksheet limit',async()=>{
   const source=new ExcelJS.Workbook(),worksheet=source.addWorksheet('XFD');
   worksheet.getColumn(16_384).width=12;

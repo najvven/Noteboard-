@@ -116,11 +116,17 @@ export function coverageSuiteStatus({ exitCode, skipReason } = {}) {
 }
 
 export function parseNodeTestStatuses(log) {
-  return [...log.matchAll(/^[✔✖﹣]\s+(.+?)\s+\((\d+(?:\.\d+)?)(ms|s)\)$/gm)]
+  return [...log.matchAll(/^[ \t]*([✔✖﹣])[ \t]+(.+?)[ \t]+\((\d+(?:\.\d+)?)(ms|s)\)(?:[ \t]+#\s*SKIP(?:[ \t]+.*)?)?[ \t]*$/gm)]
     .map(match => ({
-      title: match[1],
-      status: match[0][0] === '✔' ? 'passed' : match[0][0] === '✖' ? 'failed' : 'skipped',
+      title: match[2],
+      status: match[1] === '✔' ? 'passed' : match[1] === '✖' ? 'failed' : 'skipped',
     }));
+}
+
+export function assertNodeTestPhaseHasPassingTests(phaseName, summary) {
+  if (!['source-tests', 'browser-tests'].includes(phaseName)) return;
+  if (!summary || !Number.isInteger(summary.passed) || summary.passed < 1)
+    throw new Error(`Node test phase ${phaseName} completed without a passing test.`);
 }
 
 export function assertCoverageBuildSucceeded(exitCode, logPath) {

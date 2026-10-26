@@ -6,8 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const helperPath = new URL('../../src/features/board/browser-region-capture.ts', import.meta.url);
 
-test('browser board capture crops visible DOM pixels and suppresses grid and selection overlays', async () => {
-  const bundled = await build({
+const bundleCaptureHelper = () => build({
     entryPoints: [fileURLToPath(helperPath)],
     bundle: true,
     write: false,
@@ -16,6 +15,9 @@ test('browser board capture crops visible DOM pixels and suppresses grid and sel
     platform: 'browser',
     target: 'es2020',
   });
+
+test('browser board capture crops visible DOM pixels and suppresses grid and selection overlays', async () => {
+  const bundled = await bundleCaptureHelper();
   const browser = await chromium.launch({ headless: true, channel: 'chrome' });
   try {
     const page = await browser.newPage();
@@ -66,6 +68,52 @@ test('browser board capture crops visible DOM pixels and suppresses grid and sel
     assert.deepEqual(result.outline, [0, 0, 0]);
     assert.deepEqual(result.interior, [255, 255, 255]);
     assert.deepEqual(result.overlay, [255, 255, 255]);
+  } finally {
+    await browser.close();
+  }
+});
+
+test('browser board capture limits raster work to the requested pixels at high zoom', async () => {
+  const bundled = await bundleCaptureHelper();
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  try {
+    const page = await browser.newPage({ viewport: { width: 180, height: 140 } });
+    await page.setContent(`
+      <style>
+        html,body{margin:0;width:180px;height:140px}
+        [data-board-root]{position:absolute;left:0;top:0;width:6000px;height:4000px;overflow:visible;transform:scale(6);transform-origin:top left}
+        [data-board-surface]{position:absolute;inset:0;background:#fff}
+        [data-board-element=true]{position:absolute}
+        #inside{left:20px;top:15px;width:80px;height:60px;background:#f00}
+        #outside{left:5500px;top:3500px;width:200px;height:200px;background:#0f0}
+      </style>
+      <div data-board-root="true">
+        <div data-board-surface="true"></div>
+        <div id="inside" data-board-element="true"></div>
+        <div id="outside" data-board-element="true"></div>
+      </div>
+    `);
+    await page.addScriptTag({ content: bundled.outputFiles[0].text });
+    const result = await page.evaluate(async () => {
+      const root = document.querySelector('[data-board-root]');
+      const rect = root.getBoundingClientRect();
+      const capture = await BrowserBoardCapture.captureBoardRegionFromDOM(root, {
+        left: rect.left + 30 * 6,
+        top: rect.top + 25 * 6,
+        right: rect.left + 40 * 6,
+        bottom: rect.top + 35 * 6,
+      }, 6);
+      const image = new Image();
+      image.src = capture.dataUrl;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0);
+      return { width: canvas.width, height: canvas.height, pixel: [...context.getImageData(30, 30, 1, 1).data] };
+    });
+    assert.deepEqual(result, { width: 60, height: 60, pixel: [255, 0, 0, 255] });
   } finally {
     await browser.close();
   }

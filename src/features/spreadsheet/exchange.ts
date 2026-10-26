@@ -516,12 +516,8 @@ async function preflightWorkbookImport(zip: JSZip, warnings: string[]) {
         if (cellAddresses.size >= MAX_CELLS)
           throw Error("The workbook contains more than 200,000 cells.");
         cellAddresses.add(key);
-        if (cellAddresses.size > MAX_CELLS)
-          throw Error("The workbook contains more than 200,000 cells.");
         currentRow.previousAddress = address;
         materializedCellBudget += 1;
-        if (materializedCellBudget > MAX_CELLS)
-          throw Error("The workbook contains more than 200,000 cells.");
         return;
       }
       if (tag === "col") {
@@ -721,7 +717,11 @@ export async function importSpreadsheet(
       hasColumnStyle(column) || Boolean(column.outlineLevel || column.collapsed || column.bestFit);
     const declaredColumnCount = declaredColumns.reduce((maximum, column) => {
       const first = column.min ?? 0, last = column.max ?? 0;
-      return first === last && hasMeaningfulColumnState(column) ? Math.max(maximum, last) : maximum;
+      const isSingleColumn = first === last;
+      const isBoundedSpan = first < last && last < MAX_COLUMNS;
+      return (isSingleColumn || isBoundedSpan) && hasMeaningfulColumnState(column)
+        ? Math.max(maximum, last)
+        : maximum;
     }, 0);
     const mergedColumnCount = mergedRanges.reduce((maximum, address) => {
       const endpoint = address.split(":").at(-1) ?? address;

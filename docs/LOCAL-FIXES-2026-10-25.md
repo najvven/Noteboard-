@@ -54,5 +54,13 @@ Pełny agregat `20261025T195051958Z-d85b96ea` oraz jego report-only rerun przesz
 - Profile: Node 142, Chromium 152, Electron renderer 42 (35 uruchomień z profilem i 1 oczekiwane zamknięcie). Błędy collect: 0, nieudane suite’y: 0, nieznane statusy: 0.
 - `coverage/lcov.info`: 112 oryginalnych plików źródłowych, 565 905 bajtów; brak `dist` i plików testów. Report-only odtworzył te same sumy.
 - Nowy browser E2E potwierdził wypełnienie lokalnej planszy bez Electron API. Zewnętrzny embedded Web w browser preview pozostaje niedostępny z powodu izolacji ramek; natywny desktopowy capture działa dla niego.
-- SonarCloud skan nie został zweryfikowany z tego komputera: nie mam dostępu do repozytoryjnego sekretu, klucza organizacji ani ustawień projektu. Aktualny Quality Gate zgłaszał osobny problem Reliability D; raportowanie coverage samo go nie usuwa. Właściciel projektu musi ustawić `SONAR_TOKEN`, `SONAR_ORGANIZATION` i włączyć CI-based analysis.
+- SonarCloud CI został skonfigurowany i potwierdzony skanem PR #10 na headzie `f069237a4c8411415fecfd9139cd5b9d51eba52b`. Skan zaimportował LCOV; pokrycie nowego kodu wyniosło 92,55%, duplikacje 0%. Quality Gate pozostał niezaliczony z powodu Reliability C (wymagane A); na tym headzie widoczne były 3 problemy średniej wagi dotyczące nieobsłużonych Promise’ów w `main.js` oraz 90 nowych zgłoszeń łącznie. Brak informacji o blame wystąpił tylko dla części plików.
 - Uruchomiono lokalnie na Windows; zdalne GitHub Actions i macOS/Linux nie są jeszcze potwierdzone. PR #10 pozostaje niezmergowany do `main`.
+
+## 2026-10-26 — korekty po pierwszym wyniku SonarCloud
+
+- Fill działa na widocznych, połączonych pikselach dla figur, linii i tła. Wypełnienie poza zamkniętym konturem tworzy osobny raster zamiast zmieniać kolor całej tablicy; element zachowuje kolor obramowania, a raster zapisuje identyfikator właściwej planszy także przy nakładaniu tablic.
+- Podgląd przeglądarkowy ogranicza rasteryzację do żądanego, widocznego obszaru, odrzuca elementy poza kadrem i ukrywa komunikat Fill na czas przechwycenia.
+- Obsłużono błędy Promise’ów z `win.loadURL`, `win.loadFile` i inicjalizacji `app.whenReady`, które tworzyły trzy średnie problemy Reliability w poprzednim skanie.
+- Weryfikacja lokalna po tych zmianach: typecheck i produkcyjny build zaliczone; testy źródłowe 421/421, przeglądarkowe 12/12, wybrane Playwright 7/7 oraz wybrane natywne scenariusze Electron 5/5. Pełny agregat coverage zostanie ponownie oceniony przez CI po aktualizacji PR.
+- Te wyniki Sonar odnoszą się do historycznego headu `f069237`; nie są wynikiem skanu bieżącego kodu.

@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   COVERAGE_TOOL_FILES,
   assertCoverageBuildSucceeded,
+  assertNodeTestPhaseHasPassingTests,
   assertCoverageSuitesKnown,
   assertCoveragePhaseInventory,
   coverageSuiteStatus,
@@ -100,12 +101,30 @@ test('coverage inventory preserves each Node test result marker instead of guess
     '✔ a passing test (2.5ms)',
     '✖ a test with an unfortunate failing title (1s)',
     '﹣ a skipped test (0.1ms)',
+    '  ✔ nested suite > passing child (0.4ms)',
+    '    ﹣ nested suite > skipped child (0.1ms) # SKIP optional reason',
   ].join('\n'));
   assert.deepEqual(statuses, [
     { title: 'a passing test', status: 'passed' },
     { title: 'a test with an unfortunate failing title', status: 'failed' },
     { title: 'a skipped test', status: 'skipped' },
+    { title: 'nested suite > passing child', status: 'passed' },
+    { title: 'nested suite > skipped child', status: 'skipped' },
   ]);
+});
+
+test('coverage rejects Node test phases that ran but did not pass any tests', () => {
+  assert.doesNotThrow(() => assertNodeTestPhaseHasPassingTests('source-tests', { passed: 1 }));
+  assert.doesNotThrow(() => assertNodeTestPhaseHasPassingTests('browser-tests', { passed: 2 }));
+  assert.throws(
+    () => assertNodeTestPhaseHasPassingTests('source-tests', { passed: 0, skipped: 8 }),
+    /source-tests completed without a passing test/,
+  );
+  assert.throws(
+    () => assertNodeTestPhaseHasPassingTests('browser-tests', undefined),
+    /browser-tests completed without a passing test/,
+  );
+  assert.doesNotThrow(() => assertNodeTestPhaseHasPassingTests('playwright', undefined));
 });
 
 test('report-only source-map rebuild rejects a nonzero build result with its log path', () => {

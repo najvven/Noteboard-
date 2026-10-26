@@ -121,7 +121,6 @@ import {
 } from "../features/board/placement-interaction";
 import { cloneBoardDocument } from "../features/board/clone-board-document";
 import { fillConnectedPixels } from "../features/board/pixel-fill";
-import { elementContainsFillTargetPoint } from "../features/board/fill-target";
 import { isPixelFillOpaqueAtPoint, rememberPixelFillAlphaMask } from "../features/board/pixel-fill-hit-test";
 import { captureBoardRegionFromDOM } from "../features/board/browser-region-capture";
 import {
@@ -1530,6 +1529,7 @@ export default function BoardEditor({
   const [fillNotice, setFillNotice] = useState("");
   const fillNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
   const fillInProgressRef = useRef(false);
+  const fillPointerReleasedRef = useRef(false);
   const showFillNotice = (message: string) => {
     setFillNotice(message);
     if (fillNoticeTimerRef.current) window.clearTimeout(fillNoticeTimerRef.current);
@@ -2016,6 +2016,7 @@ export default function BoardEditor({
   ) => {
     if (fillInProgressRef.current) return;
     fillInProgressRef.current = true;
+    fillPointerReleasedRef.current = false;
     try {
       if (currentLayerView && elementHierarchy.isLocked(currentLayerView)) {
         showFillNotice("The current layer is locked.");
@@ -2038,7 +2039,7 @@ export default function BoardEditor({
 
       const fillSurfaceBackground = (surface: BoardElement, color: string) => {
         if (surface.id === mainSurface.id) {
-          if (boardColor === color) return;
+          if (presentationRef.current.boardColor === color) return;
           presentationRef.current = { ...presentationRef.current, boardColor: color };
           setBoardColor(color);
           pushDocument(elementsRef.current, sectionSheetsRef.current);
@@ -2047,46 +2048,18 @@ export default function BoardEditor({
         }
       };
 
-      const fillProperty = (element: BoardElement): Partial<BoardElement> | undefined => {
-        if (element.type === "line" || element.type === "arrow" || element.type === "draw")
-          return { borderColor: fillColorAtStart };
-        if (["rectangle", "ellipse", "triangle", "diamond", "hexagon", "sticky", "section",
-          "text", "h1", "h2", "h3", "bullet-list", "numbered-list", "quote", "code", "checklist"]
-          .includes(element.type))
-          return { color: fillColorAtStart };
-        return undefined;
-      };
-      const semanticTarget = sourceElements
-        .filter((element) => {
-          const property = fillProperty(element);
-          const owner = resolveElementBoardOwner(element, sourceElements, pageDimensions, elementHierarchy);
-          return Boolean(
-            property && element.type !== "board" && element.type !== "layer" && element.type !== "group" &&
-            !element.isEraser && !element.isPixelFill && !isMergedGroupMember(element, elementHierarchy) &&
-            elementHierarchy.isVisible(element.id, respectLayerVisibility) && !elementHierarchy.isLocked(element.id) &&
-            (!layerAtStart || element.parentId === layerAtStart || elementHierarchy.isDescendantOf(element.id, layerAtStart)) &&
-            owner?.id === targetBoardAtStart && elementContainsFillTargetPoint(element, point) &&
-            isElementHitAtPoint(element, point)
-          );
-        })
-        .sort((a, b) => elementHierarchy.compare(b, a))[0];
-      if (semanticTarget) {
-        const updates = fillProperty(semanticTarget);
-        if (updates && (updates.color !== semanticTarget.color || updates.borderColor !== semanticTarget.borderColor))
-          updateElement(semanticTarget.id, updates);
-        return;
-      }
-
-      // Empty board surfaces are cheap semantic fills. Capture only when the
-      // same board contains content whose visible pixels can form a region.
-      const hasRasterBoundaries = sourceElements.some((element) => {
-        if (element.type === "board" || element.type === "layer" || element.type === "group" || element.isEraser ||
+      // A truly empty surface has one visible connected region, so changing its
+      // color is equivalent to a raster fill. Once any content is visible, use
+      // the composited pixels for every click so overlaps and outlines remain
+      // the boundaries the user sees.
+      const hasVisibleContent = sourceElements.some((element) => {
+        if (element.type === "board" || element.type === "layer" || element.type === "group" ||
+            element.isEraser || element.opacity === 0 ||
             !elementHierarchy.isVisible(element.id, respectLayerVisibility)) return false;
         const owner = resolveElementBoardOwner(element, sourceElements, pageDimensions, elementHierarchy);
-        return owner?.id === targetBoardAtStart &&
-          ["line", "arrow", "draw", "image", "media", "embed", "table"].includes(element.type);
+        return owner?.id === targetBoardAtStart;
       });
-      if (!hasRasterBoundaries) {
+      if (!hasVisibleContent) {
         fillSurfaceBackground(targetSurface, fillColorAtStart);
         return;
       }
@@ -2151,6 +2124,7 @@ export default function BoardEditor({
         html[data-noteboard-fill-capture="true"] [data-main-board-resize],
         html[data-noteboard-fill-capture="true"] [data-element-preview],
         html[data-noteboard-fill-capture="true"] [data-resize-handle],
+        html[data-noteboard-fill-capture="true"] [data-fill-notice],
         html[data-noteboard-fill-capture="true"] [data-smart-guides] { visibility: hidden !important; }
       `;
       const documentRoot = document.documentElement;
@@ -2195,7 +2169,7 @@ export default function BoardEditor({
         zoomRef.current !== boardScale || activeToolRef.current !== "fill" ||
         currentLayerViewRef.current !== layerAtStart || fillToolColorRef.current !== fillColorAtStart ||
         elementsRef.current !== sourceElements ||
-        boardColor !== boardColorAtStart ||
+        presentationRef.current.boardColor !== boardColorAtStart ||
         viewport!.scrollLeft !== scrollAtStart.left || viewport!.scrollTop !== scrollAtStart.top ||
         !sameRect(latestBoardRect, rectAtStart.board) || !sameRect(latestViewportRect, rectAtStart.viewport) ||
         activeBoardNow !== targetBoardAtStart
@@ -2206,7 +2180,7 @@ export default function BoardEditor({
       const pixelWidth = sourceImage.naturalWidth;
       const pixelHeight = sourceImage.naturalHeight;
       if (!pixelWidth || !pixelHeight || pixelWidth * pixelHeight > 10_000_000) {
-        showFillNotice("The captured area is too large. Reduce the visible area and try again.");
+        showFillNotice("The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size.");
         return;
       }
 
@@ -2235,11 +2209,6 @@ export default function BoardEditor({
         showFillNotice("This color continues beyond the visible area. Zoom out to show the whole region before filling.");
         return;
       }
-      if (result.touchesEdge) {
-        fillSurfaceBackground(targetSurface, fillColorAtStart);
-        return;
-      }
-
       const fillCanvas = document.createElement("canvas");
       fillCanvas.width = result.bounds.width;
       fillCanvas.height = result.bounds.height;
@@ -2272,6 +2241,7 @@ export default function BoardEditor({
         borderWidth: 0,
         keepRatio: false,
         isPixelFill: true,
+        pixelFillBoardId: targetBoardAtStart,
         position: {
           x: (imageLeft - boardRect.left) / boardScale,
           y: (imageTop - boardRect.top) / boardScale,
@@ -2285,10 +2255,16 @@ export default function BoardEditor({
           (targetBoardAtStart !== mainSurface.id ? targetBoardAtStart : undefined),
       };
       pushElements([...latestElements, filledElement]);
-    } catch {
-      showFillNotice("Could not fill this visible region. Reduce the captured area and try again.");
+    } catch (error) {
+      showFillNotice(error instanceof Error && /too large to fill/i.test(error.message)
+        ? "The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size."
+        : "Could not fill this visible region. Reduce the captured area and try again.");
     } finally {
       fillInProgressRef.current = false;
+      if (fillPointerReleasedRef.current) {
+        fillPointerReleasedRef.current = false;
+        if (activeToolRef.current === "fill") finishToolUse("fill");
+      }
     }
   };
 
@@ -6463,6 +6439,7 @@ export default function BoardEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (activeTool === "fill" && e.button !== 0) return;
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
     if (
       activePointerIdRef.current !== null &&
@@ -6968,7 +6945,8 @@ export default function BoardEditor({
       clearAreaGesture();
       setIsInteracting(false);
       activeSurfaceBoundsRef.current = null;
-      finishToolUse("fill");
+      if (fillInProgressRef.current) fillPointerReleasedRef.current = true;
+      else finishToolUse("fill");
       return;
     }
 
@@ -8678,6 +8656,7 @@ export default function BoardEditor({
       <div className="flex-1 flex overflow-hidden relative">
         {fillNotice && (
           <div
+            data-fill-notice="true"
             role="status"
             aria-live="polite"
             className="fixed bottom-24 left-1/2 z-[10000] -translate-x-1/2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm text-slate-700 shadow-lg pointer-events-none"
@@ -8829,7 +8808,7 @@ export default function BoardEditor({
                 onPointerDown={handlePointerDown}
                 onPointerDownCapture={(event) => {
                   startSelectionMove(event);
-                  if (activeTool === "fill") {
+                  if (activeTool === "fill" && event.button === 0) {
                     handlePointerDown(event);
                     event.stopPropagation();
                   }

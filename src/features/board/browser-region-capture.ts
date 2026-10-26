@@ -24,55 +24,49 @@ export async function captureBoardRegionFromDOM(
     throw new Error('Invalid visible board capture region.');
 
   const rootRect = root.getBoundingClientRect();
-  let minX = 0, minY = 0;
-  let maxX = root.clientWidth, maxY = root.clientHeight;
-  const contentNodes = root.querySelectorAll<HTMLElement>('[data-board-element="true"], [data-board-surface="true"]');
-  for (const node of contentNodes) {
-    const rect = node.getBoundingClientRect();
-    minX = Math.min(minX, (rect.left - rootRect.left) / zoom);
-    minY = Math.min(minY, (rect.top - rootRect.top) / zoom);
-    maxX = Math.max(maxX, (rect.right - rootRect.left) / zoom);
-    maxY = Math.max(maxY, (rect.bottom - rootRect.top) / zoom);
-  }
-
-  const width = Math.ceil(maxX - minX);
-  const height = Math.ceil(maxY - minY);
-  const rasterWidth = Math.ceil(width * zoom);
-  const rasterHeight = Math.ceil(height * zoom);
+  const requestedWidth = requested.right - requested.left;
+  const requestedHeight = requested.bottom - requested.top;
+  const rasterWidth = Math.ceil(requestedWidth);
+  const rasterHeight = Math.ceil(requestedHeight);
   if (!Number.isSafeInteger(rasterWidth * rasterHeight) || rasterWidth * rasterHeight > MAX_CAPTURE_PIXELS)
-    throw new Error('The visible board is too large to capture. Reduce the board area and try again.');
+    throw new Error('The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size.');
 
+  const sourceX = (requested.left - rootRect.left) / zoom;
+  const sourceY = (requested.top - rootRect.top) / zoom;
   const { toCanvas } = await import('html-to-image');
   const source = await toCanvas(root, {
-    width,
-    height,
+    width: requestedWidth / zoom,
+    height: requestedHeight / zoom,
     pixelRatio: zoom,
     backgroundColor: 'transparent',
     style: {
       position: 'relative',
       left: '0px',
       top: '0px',
-      transform: `translate(${-minX}px, ${-minY}px)`,
+      transform: `translate(${-sourceX}px, ${-sourceY}px)`,
       transformOrigin: 'top left',
       overflow: 'visible',
     },
     filter: node => {
       if (!(node instanceof HTMLElement)) return true;
       const tag = node.tagName.toLowerCase();
-      return tag !== 'webview' && tag !== 'iframe' && !node.hasAttribute('data-board-fill-capture-exclude');
+      if (tag === 'webview' || tag === 'iframe' || node.hasAttribute('data-board-fill-capture-exclude')) return false;
+      if (node !== root && node.hasAttribute('data-board-element')) {
+        const rect = node.getBoundingClientRect();
+        const padding = 24;
+        return rect.right > requested.left - padding && rect.left < requested.right + padding &&
+          rect.bottom > requested.top - padding && rect.top < requested.bottom + padding;
+      }
+      return true;
     },
   });
 
-  const sourceX = requested.left - rootRect.left - minX * zoom;
-  const sourceY = requested.top - rootRect.top - minY * zoom;
-  const cropWidth = Math.ceil(requested.right - requested.left);
-  const cropHeight = Math.ceil(requested.bottom - requested.top);
   const output = document.createElement('canvas');
-  output.width = cropWidth;
-  output.height = cropHeight;
+  output.width = rasterWidth;
+  output.height = rasterHeight;
   const context = output.getContext('2d');
   if (!context) throw new Error('Could not create the visible board capture.');
-  context.drawImage(source, sourceX, sourceY, requested.right - requested.left, requested.bottom - requested.top, 0, 0, cropWidth, cropHeight);
+  context.drawImage(source, 0, 0, source.width, source.height, 0, 0, rasterWidth, rasterHeight);
 
   return {
     dataUrl: output.toDataURL('image/png'),

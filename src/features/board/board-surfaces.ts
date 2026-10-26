@@ -19,11 +19,18 @@ export function findBoardSurface(point: Position, boards: readonly BoardElement[
 
 /** Resolve implicit ownership from the placement origin; explicit board ancestry wins. */
 export function resolveElementBoardOwner(
-  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill'>,
+  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'>,
   boards: readonly BoardElement[],
   mainSize: Size,
   hierarchy: ElementHierarchy = createElementHierarchy(boards),
 ) {
+  if (element.isPixelFill && element.pixelFillBoardId) {
+    const explicitOwner = boards.find(board => board.type === 'board' && board.id === element.pixelFillBoardId);
+    if (explicitOwner) return explicitOwner;
+    if (element.pixelFillBoardId === 'main-board')
+      return boards.find(board => board.type === 'board' && board.id === 'main-board') ??
+        createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
+  }
   const visited = new Set<string>();
   let parentId = element.parentId;
   while (parentId && !visited.has(parentId)) {
@@ -53,7 +60,7 @@ export function resolveElementBoardOwner(
 
 /** Preview and placed objects use the same owner and polygon clipping boundary. */
 export function elementBoardBoundary(
-  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill'>,
+  element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'>,
   boards: readonly BoardElement[],
   mainSize: Size,
   hierarchy?: ElementHierarchy,

@@ -516,9 +516,13 @@ function createWindow() {
   });
 
   if (process.env.NODE_ENV === 'development') {
-    win.loadURL('http://localhost:3000');
+    void win.loadURL('http://localhost:3000').catch(error => {
+      console.error('Could not load the development application.', error);
+    });
   } else {
-    win.loadFile(PRODUCTION_ENTRY);
+    void win.loadFile(PRODUCTION_ENTRY).catch(error => {
+      console.error('Could not load the production application.', error);
+    });
   }
 
   ensureDataDirs().then(() => {
@@ -612,6 +616,9 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+}).catch(error => {
+  console.error('Could not initialize the desktop application.', error);
+  app.quit();
 });
 
 app.on('window-all-closed', () => {

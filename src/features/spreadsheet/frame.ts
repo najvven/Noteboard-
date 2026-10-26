@@ -1,4 +1,7 @@
 import { createUniver, LocaleType, mergeLocales } from "@univerjs/presets";
+import { SetCellEditVisibleWithF2Operation } from "@univerjs/sheets-ui";
+import { DeviceInputEventType } from "@univerjs/engine-render";
+import { KeyCode } from "@univerjs/ui";
 import { UniverSheetsCorePreset, ScrollCommand, SetWorksheetActiveOperation, SetScrollOperation, SetZoomRatioOperation } from "@univerjs/preset-sheets-core";
 import { CommandType, Injector } from "@univerjs/core";
 import {ISidebarService, IDialogService, IUIPartsService, UniverUIPlugin, IUIController, DesktopUIController, type IUniverUIConfig} from '@univerjs/ui';
@@ -765,11 +768,18 @@ window.addEventListener("message", async (event) => {
           typeof savedInput === "string" || typeof savedInput === "number"
             ? String(savedInput)
             : undefined;
-        // startEditing() is a no-op if Univer retained its editor-bridge
-        // visibility across a browsing-context reload. Reopen the persisted
-        // cell draft so the normal edit-start path places the cursor at its end.
+        // startEditing() uses a double-click editor transition. If Univer kept
+        // its editor bridge visible across reload, that transition can be a
+        // no-op and leave a formula caret at offset zero. Reopen the persisted
+        // draft through Univer's F2 operation, whose edit path restores the
+        // caret at the end of the existing cell text.
         await book.endEditingAsync(false);
-        book.startEditing();
+        await api.executeCommand(SetCellEditVisibleWithF2Operation.id, {
+          unitId: book.getId(),
+          visible: true,
+          eventType: DeviceInputEventType.Keyboard,
+          keycode: KeyCode.F2,
+        });
         // Wait for the active edit document to contain the restored input before
         // declaring the frame loaded. On slower renderers the document unit can
         // exist with an empty body for several frames; moving that empty body's

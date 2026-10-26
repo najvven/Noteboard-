@@ -176,13 +176,19 @@ test('Polygon selection starts on an opaque pixel fill', async ({ page, request 
   await expect(fill).toBeVisible();
   const bounds = (await fill.boundingBox())!;
   const root = (await page.locator('[data-board-root]').boundingBox())!;
-  await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  const polygonStart = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  await page.mouse.click(polygonStart.x, polygonStart.y);
   const outline = page.locator('[data-selection-outline="polygon"]');
   await expect(outline.locator('circle')).toHaveCount(1);
   await page.mouse.click(root.x + 100, root.y + 100);
   await page.mouse.click(root.x + 100, root.y + 300);
   await expect(outline.locator('circle')).toHaveCount(3);
-  await page.keyboard.press('Escape');
+  await page.mouse.click(polygonStart.x, polygonStart.y);
+  await expect(outline).toHaveCount(0);
+  const toolbar = page.locator('[data-selection-area-toolbar="true"]');
+  await expect(toolbar).toBeVisible();
+  await toolbar.getByTitle('Copy area').click();
+  await expect(toolbar).toBeVisible();
 });
 
 test('Lasso selection starts on an opaque pixel fill', async ({ page, request }) => {
@@ -201,8 +207,16 @@ test('Lasso selection starts on an opaque pixel fill', async ({ page, request })
   await expect(page.locator('[data-selection-outline="lasso"]')).toBeVisible();
   await page.mouse.up();
   await expect(page.locator('[data-selection-region="committed"]')).toBeVisible();
-  expect((await fill.boundingBox())?.x).toBe(bounds.x);
-  expect((await fill.boundingBox())?.y).toBe(bounds.y);
+  const toolbar = page.locator('[data-selection-area-toolbar="true"]');
+  await expect(toolbar).toBeVisible();
+  await toolbar.getByTitle('Copy area').click();
+  await expect(toolbar).toBeVisible();
+  const pages = await request.get('/api/pages').then(response => response.json()) as Array<{
+    id: string;
+    elements: Array<{ id: string; position?: { x: number; y: number } }>;
+  }>;
+  expect(pages.find(candidate => candidate.id === id)?.elements.find(element => element.id === 'visible-fill')?.position)
+    .toEqual({ x: 258, y: 178 });
 });
 
 test('Fill outside a closed outline preserves the enclosed region and board color', async ({ page, request }) => {

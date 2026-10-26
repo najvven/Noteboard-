@@ -6549,6 +6549,7 @@ export default function BoardEditor({
   };
 
   const handlePointerDown = (e: React.PointerEvent, allowElementSelectionGesture = false) => {
+    if ((e.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
     pendingPixelFillClickRef.current = null;
     if (activeTool === "fill" && e.button !== 0) return;
     if(outlineSelection.begin(e)){setIsMainBoardSelected(false);closeAllDropdowns();return;}
@@ -8970,6 +8971,7 @@ export default function BoardEditor({
                 }}
                 onPointerDown={handlePointerDown}
                 onPointerDownCapture={(event) => {
+                  if ((event.target as HTMLElement).closest?.('[data-selection-area-toolbar="true"]')) return;
                   if (activeTool === "select" && selectMode !== "rectangle") {
                     event.stopPropagation();
                     handlePointerDown(event);

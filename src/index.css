@@ -1,12 +1,6 @@
 @import "tailwindcss";
 @source not "../build/web-filters";
 
-[data-web-viewport]:fullscreen {
-  width: 100vw;
-  height: 100vh;
-  background: #000;
-}
-
 @layer base {
   button, [role="button"], label, input[type="file"], input[type="checkbox"], input[type="color"] {
     cursor: pointer;

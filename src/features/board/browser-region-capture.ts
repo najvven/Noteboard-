@@ -8,8 +8,6 @@ export interface ClientRegion {
 export interface CapturedRegion {
   dataUrl: string;
   rect: { x: number; y: number; width: number; height: number };
-  /** Raster-space barriers for embedded content omitted from the preview capture. */
-  excludedRects: { x: number; y: number; width: number; height: number }[];
 }
 
 const MAX_CAPTURE_PIXELS = 10_000_000;
@@ -30,23 +28,6 @@ export async function captureBoardRegionFromDOM(
   const requestedHeight = requested.bottom - requested.top;
   const rasterWidth = Math.ceil(requestedWidth);
   const rasterHeight = Math.ceil(requestedHeight);
-  const excludedRects = Array.from(root.querySelectorAll<HTMLElement>(
-    'iframe, webview, [data-board-fill-capture-exclude]',
-  )).flatMap(node => {
-    const bounds = node.getBoundingClientRect();
-    const left = Math.max(requested.left, bounds.left);
-    const top = Math.max(requested.top, bounds.top);
-    const right = Math.min(requested.right, bounds.right);
-    const bottom = Math.min(requested.bottom, bounds.bottom);
-    if (right <= left || bottom <= top) return [];
-    const scaleX = rasterWidth / requestedWidth;
-    const scaleY = rasterHeight / requestedHeight;
-    const x = Math.max(0, Math.floor((left - requested.left) * scaleX));
-    const y = Math.max(0, Math.floor((top - requested.top) * scaleY));
-    const rasterRight = Math.min(rasterWidth, Math.ceil((right - requested.left) * scaleX));
-    const rasterBottom = Math.min(rasterHeight, Math.ceil((bottom - requested.top) * scaleY));
-    return [{ x, y, width: rasterRight - x, height: rasterBottom - y }];
-  });
   if (!Number.isSafeInteger(rasterWidth * rasterHeight) || rasterWidth * rasterHeight > MAX_CAPTURE_PIXELS)
     throw new Error('The visible area is too large to fill. Zoom out until the board fits inside the window, or reduce the window size.');
 
@@ -69,8 +50,8 @@ export async function captureBoardRegionFromDOM(
     filter: node => {
       if (!(node instanceof HTMLElement)) return true;
       const tag = node.tagName.toLowerCase();
-      if (tag === 'webview' || tag === 'iframe' || node.dataset.boardFillCaptureExclude !== undefined) return false;
-      if (node !== root && node.dataset.boardElement !== undefined) {
+      if (tag === 'webview' || tag === 'iframe' || node.hasAttribute('data-board-fill-capture-exclude')) return false;
+      if (node !== root && node.hasAttribute('data-board-element')) {
         const rect = node.getBoundingClientRect();
         const padding = 24;
         return rect.right > requested.left - padding && rect.left < requested.right + padding &&
@@ -90,6 +71,5 @@ export async function captureBoardRegionFromDOM(
   return {
     dataUrl: output.toDataURL('image/png'),
     rect: { x: requested.left, y: requested.top, width: requested.right - requested.left, height: requested.bottom - requested.top },
-    excludedRects,
   };
 }

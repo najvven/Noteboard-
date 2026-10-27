@@ -26,11 +26,13 @@ type Props = {
 export default function NativeWebView(props: Props) {
   const hostZoom = () => window.noteboardAPI?.getWebHostZoom?.() || 1;
   const [displayZoom, setDisplayZoom] = useState(hostZoom);
+  const [guestFullscreen, setGuestFullscreen] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const latest = useRef(props);
   latest.current = props;
   const requestNavigation = useRef<(() => void) | null>(null);
   const committedUrl = useRef('');
+  const fullscreenRequestPending = useRef(false);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -125,8 +127,18 @@ export default function NativeWebView(props: Props) {
       }
     };
     const crashed = () => reportError('The Web page stopped responding. Please retry.');
-    const enterFullscreen = () => { void window.noteboardAPI?.enterWebFullscreen(guest.getWebContentsId()).catch(error => console.warn('Could not enter Web fullscreen.', error)); };
-    const leaveFullscreen = () => { if (document.fullscreenElement === viewport) void document.exitFullscreen().catch(() => undefined); };
+    const enterFullscreen = () => {
+      fullscreenRequestPending.current = true;
+      setGuestFullscreen(true);
+    };
+    const leaveFullscreen = () => {
+      if (document.fullscreenElement === guest) {
+        void document.exitFullscreen().catch(() => setGuestFullscreen(false));
+      } else setGuestFullscreen(false);
+    };
+    const syncHostFullscreen = () => {
+      if (document.fullscreenElement !== guest) setGuestFullscreen(false);
+    };
     guest.addEventListener('dom-ready', ready);
     guest.addEventListener('did-navigate', navigated);
     guest.addEventListener('did-navigate-in-page', navigated);
@@ -137,6 +149,7 @@ export default function NativeWebView(props: Props) {
     guest.addEventListener('render-process-gone', crashed);
     guest.addEventListener('enter-html-full-screen', enterFullscreen);
     guest.addEventListener('leave-html-full-screen', leaveFullscreen);
+    document.addEventListener('fullscreenchange', syncHostFullscreen);
     const observer = new ResizeObserver(resized);
     observer.observe(viewport);
     window.addEventListener('resize', resized);
@@ -158,8 +171,25 @@ export default function NativeWebView(props: Props) {
       guest.removeEventListener('render-process-gone', crashed);
       guest.removeEventListener('enter-html-full-screen', enterFullscreen);
       guest.removeEventListener('leave-html-full-screen', leaveFullscreen);
+      document.removeEventListener('fullscreenchange', syncHostFullscreen);
     };
   }, []);
+
+  useLayoutEffect(() => {
+    if (!guestFullscreen || !fullscreenRequestPending.current) return;
+    fullscreenRequestPending.current = false;
+    const guest = props.guestRef.current as GuestElement | null;
+    if (!guest) {
+      setGuestFullscreen(false);
+      return;
+    }
+    void window.noteboardAPI?.enterWebFullscreen(guest.getWebContentsId()).then(entered => {
+      if (!entered) setGuestFullscreen(false);
+    }).catch(error => {
+      setGuestFullscreen(false);
+      console.warn('Could not enter Web fullscreen.', error);
+    });
+  }, [guestFullscreen]);
 
   useLayoutEffect(() => { requestNavigation.current?.(); }, [props.src]);
 
@@ -172,9 +202,12 @@ export default function NativeWebView(props: Props) {
       className: props.interactive ? 'pointer-events-auto' : 'pointer-events-none',
       // Electron sizes guests in host DIPs, unlike iframes. Cancel host zoom in
       // layout, then restore it at compositing so app/board zoom never reflows a page.
-      style: { display: 'flex', position: 'absolute', left: 0, top: 0,
-        width: `${100 / displayZoom}%`, height: `${100 / displayZoom}%`,
-        transform: `scale(${displayZoom})`, transformOrigin: '0 0', background: 'white' },
+      style: guestFullscreen
+        ? { display: 'flex', position: 'absolute', left: 0, top: 0,
+            width: '100%', height: '100%', transform: 'none', transformOrigin: '0 0', background: '#000' }
+        : { display: 'flex', position: 'absolute', left: 0, top: 0,
+            width: `${100 / displayZoom}%`, height: `${100 / displayZoom}%`,
+            transform: `scale(${displayZoom})`, transformOrigin: '0 0', background: 'white' },
     })}
   </div>;
 }

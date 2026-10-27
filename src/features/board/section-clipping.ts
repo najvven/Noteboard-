@@ -36,17 +36,6 @@ function intersect(subject: Polygon, clip: Polygon) {
   return clip.reduce((result, a, i) => halfPlane(result, a, clip[(i + 1) % clip.length], true), subject);
 }
 
-export function polygonsOverlap(left: readonly Position[], right: readonly Position[]) {
-  if (left.length < 3 || right.length < 3) return false;
-  const overlap = intersect([...left], [...right]);
-  if (overlap.length < 3) return false;
-  const doubledArea = overlap.reduce((total, point, index) => {
-    const next = overlap[(index + 1) % overlap.length];
-    return total + point.x * next.y - next.x * point.y;
-  }, 0);
-  return Math.abs(doubledArea) > 1e-8;
-}
-
 function subtract(subject: Polygon, clip: Polygon): Polygon[] {
   let remaining = subject;
   const pieces: Polygon[] = [];

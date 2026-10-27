@@ -51,7 +51,7 @@ async function loadMask(content: string): Promise<PixelFillMask | null> {
   if (encoded) {
     const header = atob(encoded.slice(0, 32));
     if (header.length >= 24) {
-      const headerBytes = Uint8Array.from(header, char => char.codePointAt(0)!);
+      const headerBytes = Uint8Array.from(header, char => char.charCodeAt(0));
       const dimensions = new DataView(headerBytes.buffer);
       const width = dimensions.getUint32(16);
       const height = dimensions.getUint32(20);
@@ -90,17 +90,17 @@ function getMask(content: string) {
   return null;
 }
 
-/** Returns undefined while an alpha mask is unavailable, so hit testing cannot fall through. */
-export function isPixelFillOpaqueAtPoint(element: BoardElement, point: Position): boolean | undefined {
+/** Returns true only when the world point maps to a nontransparent pixel. */
+export function isPixelFillOpaqueAtPoint(element: BoardElement, point: Position): boolean {
   if (!element.isPixelFill) return true;
   const content = element.content || '';
   if (!content) return false;
   const mask = getMask(content);
-  if (!mask) return undefined;
+  if (!mask) return false;
 
   const width = element.size?.width ?? 0;
   const height = element.size?.height ?? 0;
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return false;
+  if (!(width > 0) || !(height > 0)) return false;
   const dx = point.x - (element.position.x + width / 2);
   const dy = point.y - (element.position.y + height / 2);
   const radians = -(element.rotation ?? 0) * Math.PI / 180;

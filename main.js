@@ -358,13 +358,13 @@ handleTrusted('web-viewport:configure', async (event, payload = {}) => {
 handleTrusted('web-view:fullscreen', async (event, guestId) => {
   const guest = Number.isInteger(guestId) ? webContents.fromId(guestId) : null;
   if (!guest || guest.isDestroyed() || guest.getType() !== 'webview' || guest.hostWebContents !== event.sender || !getPartitionForWebContents(guest)) return false;
-  // Put the existing host element in the DOM top layer. Moving/recreating the
-  // webview would discard playback and page state.
+  // Fullscreen the webview host itself so Chromium applies its fullscreen
+  // sizing rules to the embedded guest surface. Fullscreening only an
+  // ancestor can leave the separate guest compositor surface white.
   return event.sender.executeJavaScript(`(async () => {
-    const guest = [...document.querySelectorAll('webview')].find(view => { try { return view.getWebContentsId() === ${guestId}; } catch { return false; } });
-    const viewport = guest?.parentElement;
-    if (!viewport) return false;
-    if (document.fullscreenElement !== viewport) await viewport.requestFullscreen();
+    const webview = [...document.querySelectorAll('webview')].find(view => { try { return view.getWebContentsId() === ${guestId}; } catch { return false; } });
+    if (!webview) return false;
+    if (document.fullscreenElement !== webview) await webview.requestFullscreen();
     return true;
   })()`, true);
 });

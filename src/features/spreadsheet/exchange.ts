@@ -16,8 +16,6 @@ const MAX_CELLS = 200_000;
 const MAX_ROWS = 1_048_576;
 const MIN_COLUMNS = 26;
 const MAX_COLUMNS = 16_384;
-const MAX_EDGE_COLUMN_SPAN = 64;
-const MAX_DECLARED_COLUMN_INDEXES = 400_000;
 const MAX_XML_DEPTH = 128;
 const MAX_XML_ATTRIBUTES = 256;
 const MAX_XML_NAME_LENGTH = 256;
@@ -94,9 +92,6 @@ function fromStyle(style: Partial<ExcelJS.Style>): IStyleData {
 }
 
 function toStyle(style: IStyleData): Partial<ExcelJS.Style> {
-  const fontColor = style.cl ? style.cl.rgb : undefined;
-  const numberFormat = style.n ? style.n.pattern : undefined;
-  const fillColor = style.bg ? style.bg.rgb : undefined;
   const value: Partial<ExcelJS.Style> = {
     font: {
       name: style.ff || "Arial",
@@ -105,8 +100,8 @@ function toStyle(style: IStyleData): Partial<ExcelJS.Style> {
       italic: style.it === 1,
       underline: style.ul?.s === 1,
       strike: style.st?.s === 1,
-      ...(argb(fontColor)
-        ? { color: { argb: argb(fontColor) } }
+      ...(argb((style.cl || {}).rgb)
+        ? { color: { argb: argb((style.cl || {}).rgb) } }
         : {}),
     },
     alignment: {
@@ -126,12 +121,12 @@ function toStyle(style: IStyleData): Partial<ExcelJS.Style> {
       wrapText: style.tb === 3,
     },
   };
-  if (numberFormat) value.numFmt = numberFormat;
-  if (argb(fillColor))
+  if ((style.n || {}).pattern) value.numFmt = (style.n || {}).pattern;
+  if (argb((style.bg || {}).rgb))
     value.fill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: argb(fillColor) },
+      fgColor: { argb: argb((style.bg || {}).rgb) },
     };
   for (const [source, dest] of [
     ["t", "top"],
@@ -177,7 +172,7 @@ export function parseDelimited(text: string, separatorHint?: "," | ";" | "\t") {
     count = 0;
   const finish = () => {
     if (++count > MAX_CELLS)
-      throw new Error("The file contains more than 200,000 cells.");
+      throw Error("The file contains more than 200,000 cells.");
     row.push(cell);
     cell = "";
     fieldStarted = false;
@@ -206,7 +201,7 @@ export function parseDelimited(text: string, separatorHint?: "," | ";" | "\t") {
       fieldStarted = true;
     }
   }
-  if (quoted) throw new Error("The CSV file contains an unclosed quoted value.");
+  if (quoted) throw Error("The CSV file contains an unclosed quoted value.");
   if (fieldStarted || row.length) {
     finish();
     rows.push(row);
@@ -233,222 +228,144 @@ type XmlToken = {
 };
 
 /** A bounded, single-pass XML tokenizer for the untrusted XLSX parts we inspect. */
-type XmlScannerState = {
-  stack: Array<{ name: string; localName: string }>;
-  rootSeen: boolean;
-};
-
-type XmlElementContext = {
-  open: number;
-  name: string;
-  localName: string;
-  parentLocalName: string | undefined;
-};
-
-function getXmlLocalName(name: string, malformed: () => never) {
-  const separator = name.indexOf(":");
-  if (separator === 0 || separator === name.length - 1 ||
-      (separator >= 0 && name.includes(":", separator + 1))) malformed();
-  return separator < 0 ? name : name.slice(separator + 1);
-}
-
-function readXmlName(xml: string, start: number, malformed: () => never) {
-  let end = start;
-  if (end >= xml.length || !isXmlNameStart(xml.codePointAt(end)!)) malformed();
-  end += 1;
-  while (end < xml.length && isXmlNameChar(xml.codePointAt(end)!)) end += 1;
-  if (end - start > MAX_XML_NAME_LENGTH) malformed();
-  const name = xml.slice(start, end);
-  const localName = getXmlLocalName(name, malformed);
-  return { name, localName, end };
-}
-
-function emitXmlText(
-  xml: string,
-  start: number,
-  end: number,
-  insideElement: boolean,
-  visit: (token: XmlToken) => void,
-  malformed: () => never,
-) {
-  if (start >= end) return;
-  if (insideElement) {
-    visit({ type: "text", start, end });
-    return;
-  }
-  for (let index = start; index < end; index += 1) {
-    const code = xml.codePointAt(index)!;
-    if (!isXmlWhitespace(code) && code !== 0xfeff) malformed();
-  }
-}
-
-function skipXmlWhitespace(xml: string, start: number) {
-  let index = start;
-  while (index < xml.length && isXmlWhitespace(xml.codePointAt(index)!)) index += 1;
-  return index;
-}
-
-function readClosingXmlElement(
-  xml: string,
-  element: XmlElementContext,
-  index: number,
-  state: XmlScannerState,
-  visit: (token: XmlToken) => void,
-  malformed: () => never,
-) {
-  const endMarker = skipXmlWhitespace(xml, index);
-  if (xml[endMarker] !== ">" || state.stack.at(-1)?.name !== element.name) malformed();
-  visit({
-    type: "end",
-    name: element.name,
-    localName: element.localName,
-    parentLocalName: element.parentLocalName,
-    start: element.open,
-    end: endMarker + 1,
-  });
-  state.stack.pop();
-  return endMarker + 1;
-}
-
-function readXmlAttribute(xml: string, start: number, malformed: () => never) {
-  const attribute = readXmlName(xml, start, malformed);
-  let index = skipXmlWhitespace(xml, attribute.end);
-  if (xml[index] !== "=") malformed();
-  index = skipXmlWhitespace(xml, index + 1);
-  const quote = xml[index];
-  if (quote !== "\"" && quote !== "'") malformed();
-  const valueStart = index + 1;
-  index = valueStart;
-  while (index < xml.length && xml[index] !== quote) {
-    if (xml[index] === "<") malformed();
-    index += 1;
-  }
-  if (index >= xml.length) malformed();
-  return { name: attribute.name, value: xml.slice(valueStart, index), end: index + 1 };
-}
-
-function readXmlOpeningAttributes(xml: string, start: number, malformed: () => never) {
-  const attributes = new Map<string, string>();
-  let index = start;
-  let selfClosing = false;
-  while (index < xml.length) {
-    index = skipXmlWhitespace(xml, index);
-    if (xml[index] === ">") return { attributes, selfClosing, index: index + 1 };
-    if (xml[index] === "/") {
-      if (xml[index + 1] !== ">") malformed();
-      selfClosing = true;
-      return { attributes, selfClosing, index: index + 2 };
-    }
-    const attribute = readXmlAttribute(xml, index, malformed);
-    if (attributes.has(attribute.name) || attributes.size >= MAX_XML_ATTRIBUTES) malformed();
-    attributes.set(attribute.name, attribute.value);
-    index = attribute.end;
-  }
-  return malformed();
-}
-
-function readOpeningXmlElement(
-  xml: string,
-  element: XmlElementContext,
-  startIndex: number,
-  state: XmlScannerState,
-  visit: (token: XmlToken) => void,
-  malformed: () => never,
-) {
-  const { attributes, selfClosing, index } = readXmlOpeningAttributes(xml, startIndex, malformed);
-  if (!state.stack.length && state.rootSeen) malformed();
-  if (!state.stack.length) state.rootSeen = true;
-  visit({
-    type: "start",
-    name: element.name,
-    localName: element.localName,
-    parentLocalName: element.parentLocalName,
-    attributes,
-    selfClosing,
-    start: element.open,
-    end: index,
-  });
-  if (selfClosing) {
-    visit({
-      type: "end",
-      name: element.name,
-      localName: element.localName,
-      parentLocalName: element.parentLocalName,
-      start: element.open,
-      end: index,
-    });
-    return index;
-  }
-  if (state.stack.length >= MAX_XML_DEPTH) malformed();
-  state.stack.push({ name: element.name, localName: element.localName });
-  return index;
-}
-
-function readXmlElement(
-  xml: string,
-  open: number,
-  state: XmlScannerState,
-  visit: (token: XmlToken) => void,
-  malformed: () => never,
-) {
-  const closing = xml[open + 1] === "/";
-  const parsed = readXmlName(xml, open + (closing ? 2 : 1), malformed);
-  const parentLocalName = state.stack.at(closing ? -2 : -1)?.localName;
-  const element = { open, name: parsed.name, localName: parsed.localName, parentLocalName };
-  if (closing)
-    return readClosingXmlElement(xml, element, parsed.end, state, visit, malformed);
-  return readOpeningXmlElement(xml, element, parsed.end, state, visit, malformed);
-}
-
-function readXmlMarkup(
-  xml: string,
-  open: number,
-  state: XmlScannerState,
-  visit: (token: XmlToken) => void,
-  malformed: () => never,
-) {
-  if (xml.startsWith("<!--", open)) {
-    const close = xml.indexOf("-->", open + 4);
-    if (close < 0) malformed();
-    return close + 3;
-  }
-  if (xml.startsWith("<![CDATA[", open)) {
-    if (!state.stack.length) malformed();
-    const close = xml.indexOf("]]>", open + 9);
-    if (close < 0) malformed();
-    visit({ type: "text", start: open + 9, end: close });
-    return close + 3;
-  }
-  if (xml.startsWith("<?", open)) {
-    const close = xml.indexOf("?>", open + 2);
-    if (close < 0) malformed();
-    return close + 2;
-  }
-  if (xml.startsWith("<!", open)) malformed();
-  return readXmlElement(xml, open, state, visit, malformed);
-}
-
 function scanXml(xml: string, visit: (token: XmlToken) => void) {
-  const state: XmlScannerState = { stack: [], rootSeen: false };
-  const malformed = () => { throw new Error("The workbook contains malformed XML."); };
+  const stack: Array<{ name: string; localName: string }> = [];
   let position = 0;
+  let rootSeen = false;
+  const malformed = () => { throw Error("The workbook contains malformed XML."); };
+  const localName = (name: string) => {
+    const separator = name.indexOf(":");
+    if (separator === 0 || separator === name.length - 1 ||
+        (separator >= 0 && name.indexOf(":", separator + 1) >= 0)) malformed();
+    return separator < 0 ? name : name.slice(separator + 1);
+  };
+  const readName = (start: number) => {
+    let end = start;
+    if (end >= xml.length || !isXmlNameStart(xml.charCodeAt(end))) malformed();
+    end += 1;
+    while (end < xml.length && isXmlNameChar(xml.charCodeAt(end))) end += 1;
+    if (end - start > MAX_XML_NAME_LENGTH) malformed();
+    const name = xml.slice(start, end);
+    localName(name);
+    return { name, end };
+  };
+  const emitText = (start: number, end: number) => {
+    if (start >= end) return;
+    if (!stack.length) {
+      for (let index = start; index < end; index += 1) {
+        const code = xml.charCodeAt(index);
+        if (!isXmlWhitespace(code) && code !== 0xfeff) malformed();
+      }
+      return;
+    }
+    visit({ type: "text", start, end });
+  };
+
   while (position < xml.length) {
     const open = xml.indexOf("<", position);
     if (open < 0) {
-      emitXmlText(xml, position, xml.length, state.stack.length > 0, visit, malformed);
+      emitText(position, xml.length);
+      position = xml.length;
       break;
     }
-    emitXmlText(xml, position, open, state.stack.length > 0, visit, malformed);
-    position = readXmlMarkup(xml, open, state, visit, malformed);
+    emitText(position, open);
+    if (xml.startsWith("<!--", open)) {
+      const close = xml.indexOf("-->", open + 4);
+      if (close < 0) malformed();
+      position = close + 3;
+      continue;
+    }
+    if (xml.startsWith("<![CDATA[", open)) {
+      if (!stack.length) malformed();
+      const close = xml.indexOf("]]>", open + 9);
+      if (close < 0) malformed();
+      visit({ type: "text", start: open + 9, end: close });
+      position = close + 3;
+      continue;
+    }
+    if (xml.startsWith("<?", open)) {
+      const close = xml.indexOf("?>", open + 2);
+      if (close < 0) malformed();
+      position = close + 2;
+      continue;
+    }
+    if (xml.startsWith("<!", open)) malformed();
+
+    let index = open + 1;
+    const closing = xml[index] === "/";
+    if (closing) index += 1;
+    const parsedName = readName(index);
+    const name = parsedName.name;
+    index = parsedName.end;
+    const qLocalName = localName(name);
+    const parentLocalName = stack.at(closing ? -2 : -1)?.localName;
+    if (closing) {
+      while (index < xml.length && isXmlWhitespace(xml.charCodeAt(index))) index += 1;
+      if (xml[index] !== ">" || stack.at(-1)?.name !== name) malformed();
+      visit({ type: "end", name, localName: qLocalName, parentLocalName, start: open, end: index + 1 });
+      stack.pop();
+      position = index + 1;
+      continue;
+    }
+
+    const attributes = new Map<string, string>();
+    let selfClosing = false;
+    while (index < xml.length) {
+      while (index < xml.length && isXmlWhitespace(xml.charCodeAt(index))) index += 1;
+      if (xml[index] === ">") {
+        index += 1;
+        break;
+      }
+      if (xml[index] === "/") {
+        if (xml[index + 1] !== ">") malformed();
+        selfClosing = true;
+        index += 2;
+        break;
+      }
+      const attribute = readName(index);
+      index = attribute.end;
+      while (index < xml.length && isXmlWhitespace(xml.charCodeAt(index))) index += 1;
+      if (xml[index] !== "=") malformed();
+      index += 1;
+      while (index < xml.length && isXmlWhitespace(xml.charCodeAt(index))) index += 1;
+      const quote = xml[index];
+      if (quote !== "\"" && quote !== "'") malformed();
+      index += 1;
+      const valueStart = index;
+      while (index < xml.length && xml[index] !== quote) {
+        if (xml[index] === "<") malformed();
+        index += 1;
+      }
+      if (index >= xml.length) malformed();
+      if (attributes.has(attribute.name)) malformed();
+      if (attributes.size >= MAX_XML_ATTRIBUTES) malformed();
+      attributes.set(attribute.name, xml.slice(valueStart, index));
+      index += 1;
+    }
+    if (index > xml.length || xml[index - 1] !== ">") malformed();
+    if (!stack.length) {
+      if (rootSeen) malformed();
+      rootSeen = true;
+    }
+    const token = { type: "start" as const, name, localName: qLocalName, parentLocalName,
+      attributes, selfClosing, start: open, end: index };
+    visit(token);
+    if (selfClosing) {
+      visit({ type: "end", name, localName: qLocalName, parentLocalName, start: open, end: index });
+    } else {
+      if (stack.length >= MAX_XML_DEPTH) malformed();
+      stack.push({ name, localName: qLocalName });
+    }
+    position = index;
   }
-  if (!state.rootSeen || state.stack.length) malformed();
+  if (!rootSeen || stack.length) malformed();
 }
 
 function parseBoundedInteger(value: string | undefined, maximum: number) {
-  if (!value?.length) return undefined;
+  if (value === undefined || !value.length) return undefined;
   let number = 0;
   for (let index = 0; index < value.length; index += 1) {
-    const digit = value.codePointAt(index)! - 0x30;
+    const digit = value.charCodeAt(index) - 0x30;
     if (digit < 0 || digit > 9) return undefined;
     number = number * 10 + digit;
     if (!Number.isSafeInteger(number) || number > maximum) return maximum + 1;
@@ -456,56 +373,44 @@ function parseBoundedInteger(value: string | undefined, maximum: number) {
   return number;
 }
 
-function parseCellColumn(address: string, absolute: boolean) {
+function parseCellAddress(address: string, absolute = false) {
   let index = 0;
   if (absolute && address[index] === "$") index += 1;
   let column = 0;
   let letters = 0;
   while (index < address.length) {
-    const code = address.codePointAt(index)!;
+    const code = address.charCodeAt(index);
     const upper = code >= 0x61 && code <= 0x7a ? code - 0x20 : code;
     if (upper < 0x41 || upper > 0x5a) break;
-    if (++letters > 3) throw new Error("The workbook contains an invalid cell reference.");
+    if (++letters > 3) throw Error("The workbook contains an invalid cell reference.");
     column = column * 26 + upper - 0x40;
     index += 1;
   }
-  if (!letters) throw new Error("The workbook contains an invalid cell reference.");
+  if (!letters) throw Error("The workbook contains an invalid cell reference.");
   if (absolute && address[index] === "$") index += 1;
-  return { column, index };
-}
-
-function parseCellRow(address: string, index: number) {
   let row = 0;
   let digits = 0;
   while (index < address.length) {
-    const digit = address.codePointAt(index)! - 0x30;
-    if (digit < 0 || digit > 9) throw new Error("The workbook contains an invalid cell reference.");
+    const digit = address.charCodeAt(index) - 0x30;
+    if (digit < 0 || digit > 9) throw Error("The workbook contains an invalid cell reference.");
     digits += 1;
     row = row * 10 + digit;
-    if (row > MAX_ROWS) throw new Error("The workbook contains an invalid cell reference.");
+    if (row > MAX_ROWS) throw Error("The workbook contains an invalid cell reference.");
     index += 1;
   }
-  if (!digits || row < 1 || row > MAX_ROWS)
-    throw new Error("The workbook contains an invalid cell reference.");
-  return row;
-}
-
-function parseCellAddress(address: string, absolute = false) {
-  const { column, index } = parseCellColumn(address, absolute);
-  if (column < 1 || column > MAX_COLUMNS)
-    throw new Error("The workbook contains an invalid cell reference.");
-  const row = parseCellRow(address, index);
+  if (column < 1 || column > MAX_COLUMNS || !digits || row < 1 || row > MAX_ROWS)
+    throw Error("The workbook contains an invalid cell reference.");
   return { row, column };
 }
 
 function parseCellRange(address: string) {
   const separator = address.indexOf(":");
-  if (separator >= 0 && address.includes(":", separator + 1))
-    throw new Error("The workbook contains an invalid merged range.");
+  if (separator >= 0 && address.indexOf(":", separator + 1) >= 0)
+    throw Error("The workbook contains an invalid merged range.");
   const start = parseCellAddress(separator < 0 ? address : address.slice(0, separator), true);
   const end = separator < 0 ? start : parseCellAddress(address.slice(separator + 1), true);
   if (end.column < start.column || end.row < start.row)
-    throw new Error("The workbook contains an invalid merged range.");
+    throw Error("The workbook contains an invalid merged range.");
   return { start, end };
 }
 
@@ -515,295 +420,150 @@ function addWarning(warnings: string[], warning: string) {
 
 /** Validate worksheet XML and bound materialization before ExcelJS loads it. */
 async function preflightWorkbookImport(zip: JSZip, warnings: string[]) {
-  const budget = { materializedCells: 0, totalRowRecords: 0, declaredColumnIndexes: 0, normalizedImplicitCells: false };
+  let materializedCellBudget = 0;
+  let totalRowRecordCount = 0;
+  let normalizedImplicitCells = false;
   let worksheetPartCount = 0;
   for (const path in zip.files) {
     const entry = zip.files[path];
-    if (entry.dir) continue;
-    const excelJsWorksheetPart = /xl\/worksheets\/sheet(\d+)[.]xml/.exec(path);
-    if (excelJsWorksheetPart && path !== `xl/worksheets/sheet${excelJsWorksheetPart[1]}.xml`)
-      throw new Error("The workbook contains an invalid worksheet part path.");
-    if (!/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
+    if (entry.dir || !/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) continue;
     if (++worksheetPartCount > 256)
-      throw new Error("A workbook can contain up to 256 sheets.");
+      throw Error("A workbook can contain up to 256 sheets.");
     const xml = await entry.async("string");
-    const result = preflightWorksheetXml(xml, warnings, budget);
-    if (result.normalizedXml !== undefined) zip.file(path, result.normalizedXml);
-  }
-  return budget.normalizedImplicitCells;
-}
-
-type WorkbookPreflightBudget = {
-  materializedCells: number;
-  totalRowRecords: number;
-  declaredColumnIndexes: number;
-  normalizedImplicitCells: boolean;
-};
-
-type WorksheetPreflightState = {
-  rowRecordCount: number;
-  explicitRowIndexes: Set<number>;
-  cellAddresses: Set<string>;
-  columnDefinitionCoverage: Uint8Array;
-  implicitAddressInsertions: Array<{ offset: number; value: string }>;
-  currentRow?: {
-    rowNumber?: number;
-    previousAddress?: { row: number; column: number };
-    rowNumberInsertionOffset: number;
-  };
-};
-
-function beginWorksheetRow(token: XmlToken, parent: string | undefined, state: WorksheetPreflightState, budget: WorkbookPreflightBudget) {
-  if (parent !== "sheetdata") return;
-  if (state.currentRow) throw new Error("The workbook contains an invalid worksheet row.");
-  const rowText = token.attributes?.get("r")?.trim();
-  let rowNumber: number | undefined;
-  if (rowText !== undefined) {
-    const parsed = parseBoundedInteger(rowText, MAX_ROWS);
-    if (parsed === undefined || parsed < 1 || parsed > MAX_ROWS)
-      throw new Error("The workbook contains an invalid row reference.");
-    rowNumber = parsed;
-    if (state.explicitRowIndexes.has(rowNumber))
-      throw new Error("The workbook contains duplicate worksheet row references.");
-    state.explicitRowIndexes.add(rowNumber);
-  }
-  state.rowRecordCount += 1;
-  budget.totalRowRecords += 1;
-  if (state.rowRecordCount > MAX_ROWS)
-    throw new Error("The worksheet contains more than 1,048,576 row records.");
-  if (budget.totalRowRecords > MAX_CELLS)
-    throw new Error("The workbook contains more than 200,000 row records.");
-  state.currentRow = { rowNumber, rowNumberInsertionOffset: token.end - 1 };
-}
-
-function finishWorksheetRow(state: WorksheetPreflightState) {
-  if (state.currentRow?.rowNumber === undefined)
-    throw new Error("The workbook contains a worksheet row without a usable row number.");
-  state.currentRow = undefined;
-}
-
-function resolveWorksheetCellAddress(token: XmlToken, state: WorksheetPreflightState, budget: WorkbookPreflightBudget) {
-  const row = state.currentRow!;
-  const reference = token.attributes!.get("r")?.trim();
-  if (reference !== undefined) {
-    const address = parseCellAddress(reference);
-    if (row.rowNumber === undefined) {
-      if (state.explicitRowIndexes.has(address.row))
-        throw new Error("The workbook contains duplicate worksheet row references.");
-      row.rowNumber = address.row;
-      state.explicitRowIndexes.add(address.row);
-      state.implicitAddressInsertions.push({ offset: row.rowNumberInsertionOffset, value: ` r="${address.row}"` });
-      budget.normalizedImplicitCells = true;
-    }
-    if (address.row !== row.rowNumber)
-      throw new Error("The workbook contains a cell reference that does not match its worksheet row.");
-    return address;
-  }
-  if (row.previousAddress) {
-    const address = { row: row.previousAddress.row, column: row.previousAddress.column + 1 };
-    if (address.column > MAX_COLUMNS)
-      throw new Error("The workbook contains an invalid cell reference.");
-    return address;
-  }
-  if (row.rowNumber !== undefined) {
-    state.implicitAddressInsertions.push({
-      offset: token.selfClosing ? token.end - 2 : token.end - 1,
-      value: ` r="A${row.rowNumber}"`,
+    let rowRecordCount = 0;
+    const explicitRowIndexes = new Set<number>();
+    const cellAddresses = new Set<string>();
+    const columnDefinitionCoverage = new Uint8Array(MAX_COLUMNS);
+    const implicitAddressInsertions: Array<{ offset: number; value: string }> = [];
+    let currentRow: {
+      rowNumber?: number;
+      previousAddress?: { row: number; column: number };
+      rowNumberInsertionOffset: number;
+    } | undefined;
+    scanXml(xml, token => {
+      const tag = token.localName?.toLowerCase();
+      const parent = token.parentLocalName?.toLowerCase();
+      if (token.type === "start" && tag === "row") {
+        if (parent !== "sheetdata") return;
+        if (currentRow) throw Error("The workbook contains an invalid worksheet row.");
+        const rowText = token.attributes?.get("r")?.trim();
+        let rowNumber: number | undefined;
+        if (rowText !== undefined) {
+          const parsed = parseBoundedInteger(rowText, MAX_ROWS);
+          if (parsed === undefined || parsed < 1 || parsed > MAX_ROWS)
+            throw Error("The workbook contains an invalid row reference.");
+          rowNumber = parsed;
+          if (explicitRowIndexes.has(rowNumber))
+            throw Error("The workbook contains duplicate worksheet row references.");
+          explicitRowIndexes.add(rowNumber);
+        }
+        rowRecordCount += 1;
+        totalRowRecordCount += 1;
+        if (rowRecordCount > MAX_ROWS)
+          throw Error("The worksheet contains more than 1,048,576 row records.");
+        if (totalRowRecordCount > MAX_CELLS)
+          throw Error("The workbook contains more than 200,000 row records.");
+        currentRow = { rowNumber, rowNumberInsertionOffset: token.end - 1 };
+        return;
+      }
+      if (token.type === "end" && tag === "row" && parent === "sheetdata") {
+        if (currentRow?.rowNumber === undefined)
+          throw Error("The workbook contains a worksheet row without a usable row number.");
+        currentRow = undefined;
+        return;
+      }
+      if (token.type !== "start") return;
+      const attributes = token.attributes!;
+      if (tag === "c") {
+        if (parent !== "row") return;
+        if (!currentRow) throw Error("The workbook contains a cell outside a worksheet row.");
+        if (materializedCellBudget >= MAX_CELLS)
+          throw Error("The workbook contains more than 200,000 cells.");
+        const reference = attributes.get("r")?.trim();
+        let address: { row: number; column: number };
+        if (reference !== undefined) {
+          address = parseCellAddress(reference);
+          if (currentRow.rowNumber === undefined) {
+            if (explicitRowIndexes.has(address.row))
+              throw Error("The workbook contains duplicate worksheet row references.");
+            currentRow.rowNumber = address.row;
+            explicitRowIndexes.add(address.row);
+            implicitAddressInsertions.push({
+              offset: currentRow.rowNumberInsertionOffset,
+              value: ` r="${address.row}"`,
+            });
+            normalizedImplicitCells = true;
+          }
+          if (address.row !== currentRow.rowNumber)
+            throw Error("The workbook contains a cell reference that does not match its worksheet row.");
+        } else if (currentRow.previousAddress) {
+          address = { row: currentRow.previousAddress.row, column: currentRow.previousAddress.column + 1 };
+          if (address.column > MAX_COLUMNS)
+            throw Error("The workbook contains an invalid cell reference.");
+        } else if (currentRow.rowNumber !== undefined) {
+          address = { row: currentRow.rowNumber, column: 1 };
+          implicitAddressInsertions.push({
+            offset: token.selfClosing ? token.end - 2 : token.end - 1,
+            value: ` r="A${currentRow.rowNumber}"`,
+          });
+          normalizedImplicitCells = true;
+        } else {
+          throw Error("The workbook contains a cell without a reference or row number.");
+        }
+        const key = `${address.row}:${address.column}`;
+        if (cellAddresses.has(key))
+          throw Error("The workbook contains duplicate cell references.");
+        if (cellAddresses.size >= MAX_CELLS)
+          throw Error("The workbook contains more than 200,000 cells.");
+        cellAddresses.add(key);
+        currentRow.previousAddress = address;
+        materializedCellBudget += 1;
+        return;
+      }
+      if (tag === "col") {
+        if (parent !== "cols") return;
+        const min = parseBoundedInteger(attributes.get("min")?.trim(), MAX_COLUMNS);
+        const max = parseBoundedInteger(attributes.get("max")?.trim(), MAX_COLUMNS);
+        const widthText = attributes.get("width");
+        const width = widthText === undefined ? undefined : Number(widthText);
+        if (
+          min === undefined || max === undefined || min < 1 || min > MAX_COLUMNS ||
+          max < min || max > MAX_COLUMNS ||
+          (width !== undefined && (!Number.isFinite(width) || width < 0))
+        ) throw Error("The workbook contains invalid column definitions.");
+        for (let column = min; column <= max; column += 1) {
+          if (columnDefinitionCoverage[column - 1])
+            throw Error("The workbook contains overlapping column definitions.");
+          columnDefinitionCoverage[column - 1] = 1;
+        }
+        if (attributes.has("bestFit") || attributes.has("outlineLevel") || attributes.has("collapsed"))
+          addWarning(warnings, "Column best-fit and outline metadata is not imported.");
+        return;
+      }
+      if (tag === "mergecell") {
+        if (parent !== "mergecells") return;
+        const reference = attributes.get("ref");
+        if (reference === undefined) throw Error("The workbook contains an invalid merged range.");
+        const { start, end } = parseCellRange(reference);
+        const area = (end.column - start.column + 1) * (end.row - start.row + 1);
+        materializedCellBudget += area;
+        if (materializedCellBudget > MAX_CELLS)
+          throw Error("The workbook contains merged ranges exceeding the 200,000 cell limit.");
+      }
     });
-    budget.normalizedImplicitCells = true;
-    return { row: row.rowNumber, column: 1 };
-  }
-  throw new Error("The workbook contains a cell without a reference or row number.");
-}
-
-function preflightWorksheetCell(token: XmlToken, state: WorksheetPreflightState, budget: WorkbookPreflightBudget) {
-  if (!state.currentRow) throw new Error("The workbook contains a cell outside a worksheet row.");
-  if (budget.materializedCells >= MAX_CELLS)
-    throw new Error("The workbook contains more than 200,000 cells.");
-  const address = resolveWorksheetCellAddress(token, state, budget);
-  const key = `${address.row}:${address.column}`;
-  if (state.cellAddresses.has(key)) throw new Error("The workbook contains duplicate cell references.");
-  if (state.cellAddresses.size >= MAX_CELLS)
-    throw new Error("The workbook contains more than 200,000 cells.");
-  state.cellAddresses.add(key);
-  state.currentRow.previousAddress = address;
-  budget.materializedCells += 1;
-}
-
-function preflightWorksheetColumn(attributes: Map<string, string>, state: WorksheetPreflightState, warnings: string[]) {
-  const min = parseBoundedInteger(attributes.get("min")?.trim(), MAX_COLUMNS);
-  const max = parseBoundedInteger(attributes.get("max")?.trim(), MAX_COLUMNS);
-  const widthText = attributes.get("width");
-  const width = widthText === undefined ? undefined : Number(widthText);
-  if (
-    min === undefined || max === undefined || min < 1 || min > MAX_COLUMNS ||
-    max < min || max > MAX_COLUMNS ||
-    (width !== undefined && (!Number.isFinite(width) || width < 0))
-  ) throw new Error("The workbook contains invalid column definitions.");
-  for (let column = min; column <= max; column += 1) {
-    if (state.columnDefinitionCoverage[column - 1])
-      throw new Error("The workbook contains overlapping column definitions.");
-    state.columnDefinitionCoverage[column - 1] = 1;
-  }
-  if (attributes.has("bestFit") || attributes.has("outlineLevel") || attributes.has("collapsed"))
-    addWarning(warnings, "Column best-fit and outline metadata is not imported.");
-}
-
-function preflightMergedCell(attributes: Map<string, string>, budget: WorkbookPreflightBudget) {
-  const reference = attributes.get("ref");
-  if (reference === undefined) throw new Error("The workbook contains an invalid merged range.");
-  const { start, end } = parseCellRange(reference);
-  budget.materializedCells += (end.column - start.column + 1) * (end.row - start.row + 1);
-  if (budget.materializedCells > MAX_CELLS)
-    throw new Error("The workbook contains merged ranges exceeding the 200,000 cell limit.");
-}
-
-function preflightWorksheetToken(token: XmlToken, state: WorksheetPreflightState, budget: WorkbookPreflightBudget, warnings: string[]) {
-  const tag = token.localName?.toLowerCase();
-  const parent = token.parentLocalName?.toLowerCase();
-  if (token.type === "start" && tag === "row") {
-    beginWorksheetRow(token, parent, state, budget);
-    return;
-  }
-  if (token.type === "end" && tag === "row" && parent === "sheetdata") {
-    finishWorksheetRow(state);
-    return;
-  }
-  if (token.type !== "start") return;
-  const attributes = token.attributes!;
-  if (tag === "c" && parent === "row") {
-    preflightWorksheetCell(token, state, budget);
-    return;
-  }
-  if (tag === "col" && parent === "cols") {
-    preflightWorksheetColumn(attributes, state, warnings);
-    return;
-  }
-  if (tag === "mergecell" && parent === "mergecells")
-    preflightMergedCell(attributes, budget);
-}
-
-function applyImplicitAddressInsertions(xml: string, insertions: WorksheetPreflightState['implicitAddressInsertions']) {
-  const parts: string[] = [];
-  let cursor = 0;
-  for (const insertion of insertions) {
-    parts.push(xml.slice(cursor, insertion.offset), insertion.value);
-    cursor = insertion.offset;
-  }
-  parts.push(xml.slice(cursor));
-  return parts.join("");
-}
-
-function preflightWorksheetXml(xml: string, warnings: string[], budget: WorkbookPreflightBudget) {
-  const state: WorksheetPreflightState = {
-    rowRecordCount: 0,
-    explicitRowIndexes: new Set<number>(),
-    cellAddresses: new Set<string>(),
-    columnDefinitionCoverage: new Uint8Array(MAX_COLUMNS),
-    implicitAddressInsertions: [],
-  };
-  scanXml(xml, token => preflightWorksheetToken(token, state, budget, warnings));
-  budget.declaredColumnIndexes += state.columnDefinitionCoverage.lastIndexOf(1) + 1;
-  if (budget.declaredColumnIndexes > MAX_DECLARED_COLUMN_INDEXES)
-    throw new Error("The workbook contains too many declared column indexes.");
-  if (state.currentRow) throw new Error("The workbook contains an unclosed worksheet row.");
-  return state.implicitAddressInsertions.length
-    ? { normalizedXml: applyImplicitAddressInsertions(xml, state.implicitAddressInsertions) }
-    : { normalizedXml: undefined };
-}
-
-type FormulaCacheCellState = {
-  address?: string;
-  type?: string;
-  formula: boolean;
-  inValue: boolean;
-  valueHasText: boolean;
-  emptyValue: boolean;
-};
-
-type FormulaCacheScanState = { cell?: FormulaCacheCellState };
-
-function beginFormulaCacheCell(token: XmlToken, state: FormulaCacheScanState) {
-  if (token.localName?.toLowerCase() !== "c" || token.parentLocalName?.toLowerCase() !== "row")
-    return false;
-  state.cell = {
-    address: token.attributes?.get("r"),
-    type: token.attributes?.get("t"),
-    formula: false,
-    inValue: false,
-    valueHasText: false,
-    emptyValue: false,
-  };
-  return true;
-}
-
-function updateFormulaCacheCellStart(token: XmlToken, state: FormulaCacheScanState) {
-  const cell = state.cell;
-  if (!cell) return;
-  const tag = token.localName?.toLowerCase();
-  if (tag === "f") {
-    cell.formula = true;
-    return;
-  }
-  if (tag === "v") {
-    cell.inValue = true;
-    cell.valueHasText = false;
-  }
-}
-
-function updateFormulaCacheCellText(xml: string, token: XmlToken, state: FormulaCacheScanState) {
-  const cell = state.cell;
-  if (!cell?.inValue) return;
-  for (let index = token.start; index < token.end; index += 1) {
-    if (!isXmlWhitespace(xml.codePointAt(index)!)) {
-      cell.valueHasText = true;
-      return;
+    if (currentRow) throw Error("The workbook contains an unclosed worksheet row.");
+    if (implicitAddressInsertions.length) {
+      const parts: string[] = [];
+      let cursor = 0;
+      for (const insertion of implicitAddressInsertions) {
+        parts.push(xml.slice(cursor, insertion.offset), insertion.value);
+        cursor = insertion.offset;
+      }
+      parts.push(xml.slice(cursor));
+      zip.file(path, parts.join(""));
     }
   }
-}
-
-function finishFormulaCacheCell(token: XmlToken, state: FormulaCacheScanState, cells: Set<string>) {
-  const cell = state.cell;
-  if (!cell) return;
-  const tag = token.localName?.toLowerCase();
-  if (tag === "v") {
-    cell.emptyValue = !cell.valueHasText;
-    cell.inValue = false;
-    return;
-  }
-  if (tag !== "c") return;
-  if (cell.address && cell.type === "str" && cell.formula && cell.emptyValue)
-    cells.add(cell.address);
-  state.cell = undefined;
-}
-
-function findEmptyFormulaCacheCells(xml: string) {
-  const cells = new Set<string>();
-  const state: FormulaCacheScanState = {};
-  scanXml(xml, token => {
-    if (token.type === "start") {
-      if (!beginFormulaCacheCell(token, state)) updateFormulaCacheCellStart(token, state);
-      return;
-    }
-    if (token.type === "text") {
-      updateFormulaCacheCellText(xml, token, state);
-      return;
-    }
-    finishFormulaCacheCell(token, state, cells);
-  });
-  return cells;
-}
-
-function resolveWorksheetPath(target: string) {
-  const segments: string[] = [];
-  const targetPath = target.startsWith("/") ? target.slice(1) : `xl/${target}`;
-  for (const segment of targetPath.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === "..") segments.pop();
-    else segments.push(segment);
-  }
-  const path = segments.join("/");
-  return /^xl\/worksheets\/[^/]+\.xml$/i.test(path) ? path : "";
+  return normalizedImplicitCells;
 }
 
 async function readEmptyFormulaCacheCells(zip: JSZip) {
@@ -826,245 +586,55 @@ async function readEmptyFormulaCacheCells(zip: JSZip) {
     if (token.type !== "start" || token.localName?.toLowerCase() !== "sheet") return;
     const relationshipId = token.attributes?.get("r:id");
     const target = relationshipId ? targetsById.get(relationshipId) : undefined;
-    if (target) orderedPaths.push(resolveWorksheetPath(target));
+    if (!target) return;
+    const segments: string[] = [];
+    for (const segment of (target.startsWith("/") ? target.slice(1) : `xl/${target}`).split("/")) {
+      if (!segment || segment === ".") continue;
+      if (segment === "..") segments.pop();
+      else segments.push(segment);
+    }
+    const path = segments.join("/");
+    orderedPaths.push(/^xl\/worksheets\/[^/]+\.xml$/i.test(path) ? path : "");
   });
-  const worksheets = await Promise.all(orderedPaths.map(async path => {
-    const entry = path ? zip.file(path) : undefined;
-    return entry ? { path, xml: await entry.async("string") } : undefined;
-  }));
-  for (const worksheet of worksheets) {
-    if (worksheet) emptyCellsByPath.set(worksheet.path, findEmptyFormulaCacheCells(worksheet.xml));
+  for (const path of orderedPaths) {
+    if (!path) continue;
+    const entry = zip.file(path);
+    if (!entry) continue;
+    const xml = await entry.async("string");
+    const cells = new Set<string>();
+    let cell: { address?: string; type?: string; formula: boolean; inValue: boolean; valueHasText: boolean; emptyValue: boolean } | undefined;
+    scanXml(xml, token => {
+      const tag = token.localName?.toLowerCase();
+      if (token.type === "start" && tag === "c" && token.parentLocalName?.toLowerCase() === "row") {
+        cell = { address: token.attributes?.get("r"), type: token.attributes?.get("t"), formula: false, inValue: false, valueHasText: false, emptyValue: false };
+      } else if (token.type === "start" && tag === "f" && cell) {
+        cell.formula = true;
+      } else if (token.type === "start" && tag === "v" && cell) {
+        cell.inValue = true;
+        cell.valueHasText = false;
+      } else if (token.type === "text" && cell?.inValue) {
+        for (let index = token.start; index < token.end; index += 1) {
+          if (!isXmlWhitespace(xml.charCodeAt(index))) {
+            cell.valueHasText = true;
+            break;
+          }
+        }
+      } else if (token.type === "end" && tag === "v" && cell) {
+        cell.emptyValue = !cell.valueHasText;
+        cell.inValue = false;
+      } else if (token.type === "end" && tag === "c" && cell) {
+        if (cell.address && cell.type === "str" && cell.formula && cell.emptyValue)
+          cells.add(cell.address);
+        cell = undefined;
+      }
+    });
+    emptyCellsByPath.set(path, cells);
   }
   return { emptyCellsByPath, orderedPaths };
 }
 
-type ImportedWorksheetModel = {
-  cols?: Array<{
-    min?: number;
-    max?: number;
-    width?: number;
-    hidden?: boolean;
-    style?: Partial<ExcelJS.Style>;
-    outlineLevel?: number;
-    collapsed?: boolean;
-    bestFit?: boolean;
-  }>;
-  merges?: string[];
-};
-
-type ImportedWorksheetColumn = NonNullable<ImportedWorksheetModel["cols"]>[number];
-type ImportedWorksheetColumns = NonNullable<ImportedWorksheetModel["cols"]>;
-
-function hasColumnStyle(column: ImportedWorksheetColumn) {
-  return Boolean(column.style && Object.keys(column.style).length);
-}
-
-function hasMeaningfulColumnState(column: ImportedWorksheetColumn, defaultWidth: number) {
-  const width = column.width;
-  return column.hidden === true ||
-    (typeof width === "number" && Number.isFinite(width) && width > 0 && width !== defaultWidth) ||
-    hasColumnStyle(column) || Boolean(column.outlineLevel || column.collapsed || column.bestFit);
-}
-
-function getDeclaredColumnCount(columns: ImportedWorksheetColumns, defaultWidth: number) {
-  return columns.reduce((maximum, column) => {
-    const first = column.min ?? 0;
-    const last = column.max ?? 0;
-    // Do not expand broad default or hidden-tail spans through XFD, but retain
-    // small formatted ranges at the right edge instead of dropping their widths.
-    const bounded = first === last || (first < last &&
-      (last < MAX_COLUMNS || (last === MAX_COLUMNS && last - first + 1 <= MAX_EDGE_COLUMN_SPAN)));
-    if (!bounded || !hasMeaningfulColumnState(column, defaultWidth)) return maximum;
-    return Math.max(maximum, last);
-  }, 0);
-}
-
-function getMergedColumnCount(merges: string[]) {
-  return merges.reduce((maximum, address) => {
-    const endpoint = address.split(":").at(-1) ?? address;
-    return Math.max(maximum, parseCellAddress(endpoint).column);
-  }, 0);
-}
-
-function getRequiredColumnCount(worksheet: ExcelJS.Worksheet, model: ImportedWorksheetModel, defaultWidth: number) {
-  const declaredColumns = model.cols ?? [];
-  const mergedRanges = model.merges ?? [];
-  return Math.max(
-    worksheet.columnCount,
-    getDeclaredColumnCount(declaredColumns, defaultWidth),
-    getMergedColumnCount(mergedRanges),
-  );
-}
-
-function createImportedWorksheet(worksheet: ExcelJS.Worksheet, id: string, requiredColumnCount: number): IWorksheetData {
-  const sheet = {
-    id,
-    name: worksheet.name,
-    rowCount: Math.min(MAX_ROWS, Math.max(1000, worksheet.rowCount + 100)),
-    columnCount: Math.min(MAX_COLUMNS, Math.max(MIN_COLUMNS, worksheet.columnCount + 5, requiredColumnCount)),
-    cellData: {},
-    rowData: {},
-    columnData: {},
-    defaultRowHeight: worksheet.properties.defaultRowHeight / POINTS_PER_PIXEL,
-    defaultColumnWidth: worksheet.properties.defaultColWidth
-      ? excelColumnWidthToPixels(worksheet.properties.defaultColWidth)
-      : 100,
-    mergeData: [],
-  } as IWorksheetData;
-  return sheet;
-}
-
-function importWorksheetColumns(
-  columns: ImportedWorksheetColumns,
-  sheet: IWorksheetData,
-  defaultWidth: number,
-  warnings: string[],
-) {
-  for (const column of columns) {
-    const { first, last } = getImportedColumnSpan(column);
-    const override = getImportedColumnOverride(column, defaultWidth, warnings);
-    if (last > sheet.columnCount && hasMeaningfulColumnState(column, defaultWidth))
-      addWarning(warnings, "Formatting for empty columns outside the active imported range was omitted.");
-    const activeFirst = Math.max(1, first);
-    const activeLast = Math.min(last, sheet.columnCount);
-    if (activeFirst > activeLast) continue;
-    if (!Object.keys(override).length) continue;
-    // ExcelJS normalizes column definitions into sorted, non-overlapping spans.
-    // Clipping each span to active geometry bounds total expansion.
-    for (let columnIndex = activeFirst; columnIndex <= activeLast; columnIndex += 1)
-      sheet.columnData[columnIndex - 1] = override;
-  }
-}
-
-function getImportedColumnSpan(column: ImportedWorksheetColumn) {
-  const first = column.min ?? 0;
-  const last = column.max ?? 0;
-  if (!Number.isInteger(first) || !Number.isInteger(last) || first < 1 || last < first || last > MAX_COLUMNS)
-    throw new Error("The workbook contains invalid column definitions.");
-  return { first, last };
-}
-
-function getImportedColumnOverride(
-  column: ImportedWorksheetColumn,
-  defaultWidth: number,
-  warnings: string[],
-) {
-  const width = column.width;
-  const customWidth = typeof width === "number" && Number.isFinite(width) && width > 0 && width !== defaultWidth;
-  const sourceHasStyle = hasColumnStyle(column);
-  const convertedStyle = column.style ? fromStyle(column.style) : undefined;
-  const style = convertedStyle && Object.keys(convertedStyle).length ? convertedStyle : undefined;
-  if (sourceHasStyle && !style)
-    addWarning(warnings, "Some spreadsheet column styles are not supported and were omitted.");
-  return {
-    ...(customWidth ? { w: excelColumnWidthToPixels(width!) } : {}),
-    ...(column.hidden ? { hd: 1 as const } : {}),
-    ...(style ? { s: style } : {}),
-  };
-}
-
-function importFormulaCell(
-  cell: ExcelJS.Cell,
-  emptyFormulaCells: Set<string> | undefined,
-): ICellData {
-  const value: ICellData = { f: `=${cell.formula}` };
-  const cached = cell.result;
-  const cachedError = cached !== null && typeof cached === "object"
-    ? (cached as { error?: unknown }).error
-    : undefined;
-  if (cached instanceof Date) {
-    value.v = cached.getTime() / 86400000 + 25569;
-    value.t = 2;
-  } else if (typeof cached === "number" && Number.isFinite(cached)) {
-    value.v = cached;
-    value.t = 2;
-  } else if (typeof cached === "boolean") {
-    value.v = cached;
-    value.t = 3;
-  } else if (typeof cached === "string") {
-    value.v = cached;
-    value.t = 1;
-  } else if (typeof cachedError === "string") {
-    value.v = cachedError;
-    value.t = 4;
-  } else if (emptyFormulaCells?.has(cell.address)) {
-    value.v = "";
-    value.t = 1;
-  }
-  return value;
-}
-
-function importCellValue(cell: ExcelJS.Cell, emptyFormulaCells: Set<string> | undefined): ICellData {
-  if (cell.formula) return importFormulaCell(cell, emptyFormulaCells);
-  if (cell.value instanceof Date)
-    return { v: cell.value.getTime() / 86400000 + 25569, t: 2 };
-  if (typeof cell.value === "number" || typeof cell.value === "boolean")
-    return { v: cell.value, t: typeof cell.value === "number" ? 2 : 3 };
-  return cellFromInput(cell.text, true);
-}
-
-function importWorksheetRows(
-  worksheet: ExcelJS.Worksheet,
-  sheet: IWorksheetData,
-  emptyFormulaCells: Set<string> | undefined,
-  cellsImportedBefore: number,
-) {
-  let cellsImported = 0;
-  worksheet.eachRow((row, rowIndex) => {
-    sheet.rowData[rowIndex - 1] = {
-      ...(row.height ? { h: row.height / POINTS_PER_PIXEL } : {}),
-      hd: row.hidden ? 1 : 0,
-    };
-    row.eachCell((cell, columnIndex) => {
-      cellsImported += 1;
-      if (cellsImportedBefore + cellsImported > MAX_CELLS)
-        throw new Error("The workbook contains more than 200,000 cells.");
-      if (cell.isMerged && cell.master.address !== cell.address) return;
-      const value = importCellValue(cell, emptyFormulaCells);
-      value.s = fromStyle(cell.style);
-      const rowData = sheet.cellData[rowIndex - 1] ?? {};
-      rowData[columnIndex - 1] = value;
-      sheet.cellData[rowIndex - 1] = rowData;
-    });
-  });
-  return cellsImported;
-}
-
-function importWorksheetMerges(worksheet: ExcelJS.Worksheet, sheet: IWorksheetData, merges: string[]) {
-  for (const address of merges) {
-    const [start, end] = address.split(":").map(value => worksheet.getCell(value));
-    sheet.mergeData.push({
-      startRow: Number(start.row) - 1,
-      startColumn: Number(start.col) - 1,
-      endRow: Number((end ?? start).row) - 1,
-      endColumn: Number((end ?? start).col) - 1,
-    });
-  }
-}
-
-function importWorksheet(
-  worksheet: ExcelJS.Worksheet,
-  id: string,
-  warnings: string[],
-  emptyFormulaCells: Set<string> | undefined,
-  cellsImportedBefore: number,
-) {
-  const model = worksheet.model as unknown as ImportedWorksheetModel;
-  const declaredColumns = model.cols ?? [];
-  const mergedRanges = model.merges ?? [];
-  const defaultColumnWidth = worksheet.properties.defaultColWidth ?? 9;
-  const requiredColumnCount = getRequiredColumnCount(worksheet, model, defaultColumnWidth);
-  if (requiredColumnCount > MAX_COLUMNS)
-    throw new Error("The workbook contains columns beyond the 16,384 column limit.");
-  const sheet = createImportedWorksheet(worksheet, id, requiredColumnCount);
-  importWorksheetColumns(declaredColumns, sheet, defaultColumnWidth, warnings);
-  const cellsImported = importWorksheetRows(worksheet, sheet, emptyFormulaCells, cellsImportedBefore);
-  importWorksheetMerges(worksheet, sheet, mergedRanges);
-  return { sheet, cellsImported };
-}
-
 const csvCell = (cell: ICellData | undefined) => {
-  const richText = cell?.p ? cell.p.body?.dataStream?.replace(/\r\n$/, "") : undefined;
+  const richText = (cell?.p || {})?.body?.dataStream?.replace(/\r\n$/, "");
   let value: unknown = cell?.v ?? richText ?? "";
   let literalText = cell?.t === 1 || cell?.t === 4 || typeof cell?.v === "string" || typeof richText === "string";
   if (cell?.f && cell.v === undefined) {
@@ -1077,25 +647,12 @@ const csvCell = (cell: ICellData | undefined) => {
   return /[",\r\n]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw;
 };
 
-function exportCellValue(cell: ICellData) {
-  if (cell.f) {
-    return {
-      formula: cell.f.replace(/^=/, ""),
-      ...(cell.v != null ? { result: cell.v as any } : {}),
-    };
-  }
-  if (typeof cell.v === "string" || typeof cell.v === "number" || typeof cell.v === "boolean")
-    return cell.v;
-  const richText = cell.p ? cell.p.body?.dataStream : undefined;
-  return richText?.replace(/\r\n$/, "") ?? null;
-}
-
 export async function importSpreadsheet(
   bytes: ArrayBuffer,
   name: string,
 ): Promise<{ document: WorkbookDocument; warnings: string[] }> {
   if (bytes.byteLength > MAX_IMPORT_BYTES)
-    throw new Error("Spreadsheet files can be up to 20 MB.");
+    throw Error("Spreadsheet files can be up to 20 MB.");
   if (/\.(csv|tsv)$/i.test(name))
     return {
       document: createWorkbookDocument(
@@ -1104,11 +661,11 @@ export async function importSpreadsheet(
       ),
       warnings: [],
     };
-  if (!/\.xlsx$/i.test(name)) throw new Error("Choose an XLSX, CSV or TSV file.");
+  if (!/\.xlsx$/i.test(name)) throw Error("Choose an XLSX, CSV or TSV file.");
   assertSafeZipDirectory(new Uint8Array(bytes));
   const zip = await JSZip.loadAsync(bytes);
   if (getArchiveDeclaredSize(zip.files) > MAX_IMPORT_EXPANDED_BYTES)
-    throw new Error("The expanded workbook exceeds 128 MB.");
+    throw Error("The expanded workbook exceeds 128 MB.");
   await assertZipExpansionWithinLimits(Object.values(zip.files), {
     maxEntryBytes: MAX_IMPORT_EXPANDED_BYTES,
     maxArchiveBytes: MAX_IMPORT_EXPANDED_BYTES,
@@ -1131,7 +688,7 @@ export async function importSpreadsheet(
   const document = createWorkbookDocument(name.replace(/\.xlsx$/i, ""));
   document.workbook.sheetOrder = [];
   document.workbook.sheets = {};
-  let importedCellCount = 0;
+  let count = 0;
   let worksheetIndex = 0;
   source.eachSheet((worksheet) => {
     const worksheetPath = emptyFormulaCache.orderedPaths[worksheetIndex++];
@@ -1139,21 +696,157 @@ export async function importSpreadsheet(
       ? emptyFormulaCache.emptyCellsByPath.get(worksheetPath)
       : undefined;
     if (document.workbook.sheetOrder!.length >= 256)
-      throw new Error("A workbook can contain up to 256 sheets.");
+      throw Error("A workbook can contain up to 256 sheets.");
     const id = `sheet-${crypto.randomUUID()}`;
-    const imported = importWorksheet(
-      worksheet,
-      id,
-      warnings,
-      emptyFormulaCells,
-      importedCellCount,
+    const worksheetModel = worksheet.model as unknown as {
+      cols?: Array<{
+        min?: number; max?: number; width?: number; hidden?: boolean;
+        style?: Partial<ExcelJS.Style>; outlineLevel?: number; collapsed?: boolean; bestFit?: boolean;
+      }>;
+      merges?: string[];
+    };
+    const declaredColumns = worksheetModel.cols ?? [];
+    const mergedRanges = worksheetModel.merges ?? [];
+    const defaultExcelColumnWidth = worksheet.properties.defaultColWidth ?? 9;
+    const hasColumnStyle = (column: NonNullable<typeof declaredColumns[number]>) =>
+      Boolean(column.style && Object.keys(column.style).length);
+    const hasMeaningfulColumnState = (column: NonNullable<typeof declaredColumns[number]>) =>
+      column.hidden === true ||
+      (typeof column.width === "number" && Number.isFinite(column.width) &&
+        column.width > 0 && column.width !== defaultExcelColumnWidth) ||
+      hasColumnStyle(column) || Boolean(column.outlineLevel || column.collapsed || column.bestFit);
+    const declaredColumnCount = declaredColumns.reduce((maximum, column) => {
+      const first = column.min ?? 0, last = column.max ?? 0;
+      const isSingleColumn = first === last;
+      const isBoundedSpan = first < last && last < MAX_COLUMNS;
+      return (isSingleColumn || isBoundedSpan) && hasMeaningfulColumnState(column)
+        ? Math.max(maximum, last)
+        : maximum;
+    }, 0);
+    const mergedColumnCount = mergedRanges.reduce((maximum, address) => {
+      const endpoint = address.split(":").at(-1) ?? address;
+      return Math.max(maximum, parseCellAddress(endpoint).column);
+    }, 0);
+    const requiredColumnCount = Math.max(
+      worksheet.columnCount,
+      declaredColumnCount,
+      mergedColumnCount,
     );
-    importedCellCount += imported.cellsImported;
+    if (requiredColumnCount > MAX_COLUMNS)
+      throw Error("The workbook contains columns beyond the 16,384 column limit.");
+    const sheet = {
+      id,
+      name: worksheet.name,
+      rowCount: Math.min(MAX_ROWS, Math.max(1000, worksheet.rowCount + 100)),
+      columnCount: Math.min(
+        MAX_COLUMNS,
+        Math.max(MIN_COLUMNS, worksheet.columnCount + 5, requiredColumnCount),
+      ),
+      cellData: {},
+      rowData: {},
+      columnData: {},
+      defaultRowHeight: 24,
+      defaultColumnWidth: 100,
+      mergeData: [],
+    } as Partial<IWorksheetData>;
+    sheet.defaultRowHeight =
+      worksheet.properties.defaultRowHeight / POINTS_PER_PIXEL;
+    sheet.defaultColumnWidth = worksheet.properties.defaultColWidth
+      ? excelColumnWidthToPixels(worksheet.properties.defaultColWidth)
+      : 100;
+    for (const column of declaredColumns) {
+      const first = column.min ?? 0, last = column.max ?? 0;
+      if (
+        !Number.isInteger(first) || !Number.isInteger(last) || first < 1 ||
+        last < first || last > MAX_COLUMNS
+      ) throw Error("The workbook contains invalid column definitions.");
+      const width = column.width;
+      const customWidth = typeof width === "number" && Number.isFinite(width) &&
+        width > 0 && width !== defaultExcelColumnWidth;
+      const sourceHasStyle = hasColumnStyle(column);
+      const convertedStyle = column.style ? fromStyle(column.style) : undefined;
+      const style = convertedStyle && Object.keys(convertedStyle).length ? convertedStyle : undefined;
+      if (sourceHasStyle && !style)
+        addWarning(warnings, "Some spreadsheet column styles are not supported and were omitted.");
+      if (last > sheet.columnCount! && hasMeaningfulColumnState(column))
+        addWarning(warnings, "Formatting for empty columns outside the active imported range was omitted.");
+      const activeFirst = Math.max(1, first), activeLast = Math.min(last, sheet.columnCount!);
+      if (activeFirst > activeLast) continue;
+      const override = {
+        ...(customWidth ? { w: excelColumnWidthToPixels(width!) } : {}),
+        ...(column.hidden ? { hd: 1 as const } : {}),
+        ...(style ? { s: style } : {}),
+      };
+      if (!Object.keys(override).length) continue;
+      // ExcelJS normalizes column definitions into sorted, non-overlapping
+      // spans. Clipping each span to active geometry bounds total expansion.
+      for (let c = activeFirst; c <= activeLast; c += 1)
+        sheet.columnData![c - 1] = override;
+    }
+    worksheet.eachRow((row, r) => {
+      sheet.rowData![r - 1] = {
+        ...(row.height ? { h: row.height / POINTS_PER_PIXEL } : {}),
+        hd: row.hidden ? 1 : 0,
+      };
+      row.eachCell((cell, c) => {
+        if (++count > MAX_CELLS)
+          throw Error("The workbook contains more than 200,000 cells.");
+        if (cell.isMerged && cell.master.address !== cell.address) return;
+        let value: ICellData;
+        if (cell.formula) {
+          value = { f: `=${cell.formula}` };
+          const cached = cell.result;
+          const cachedError = cached !== null && typeof cached === "object"
+            ? (cached as { error?: unknown }).error
+            : undefined;
+          if (cached instanceof Date) {
+            value.v = cached.getTime() / 86400000 + 25569;
+            value.t = 2;
+          } else if (typeof cached === "number" && Number.isFinite(cached)) {
+            value.v = cached;
+            value.t = 2;
+          } else if (typeof cached === "boolean") {
+            value.v = cached;
+            value.t = 3;
+          } else if (typeof cached === "string") {
+            value.v = cached;
+            value.t = 1;
+          } else if (typeof cachedError === "string") {
+            value.v = cachedError;
+            value.t = 4;
+          } else if (emptyFormulaCells?.has(cell.address)) {
+            value.v = "";
+            value.t = 1;
+          }
+        }
+        else if (cell.value instanceof Date)
+          value = { v: cell.value.getTime() / 86400000 + 25569, t: 2 };
+        else if (
+          typeof cell.value === "number" ||
+          typeof cell.value === "boolean"
+        )
+          value = { v: cell.value, t: typeof cell.value === "number" ? 2 : 3 };
+        else value = cellFromInput(cell.text, true);
+        value.s = fromStyle(cell.style);
+        (sheet.cellData![r - 1] ??= {})[c - 1] = value;
+      });
+    });
+    for (const address of mergedRanges) {
+      const [start, end] = address
+        .split(":")
+        .map((value) => worksheet.getCell(value));
+      sheet.mergeData!.push({
+        startRow: Number(start.row) - 1,
+        startColumn: Number(start.col) - 1,
+        endRow: Number((end ?? start).row) - 1,
+        endColumn: Number((end ?? start).col) - 1,
+      });
+    }
     document.workbook.sheetOrder!.push(id);
-    document.workbook.sheets![id] = imported.sheet;
+    document.workbook.sheets![id] = sheet as IWorksheetData;
   });
   if (!document.workbook.sheetOrder.length)
-    throw new Error("The file contains no worksheets.");
+    throw Error("The file contains no worksheets.");
   document.activeSheetId = document.workbook.sheetOrder[0];
   return { document, warnings };
 }
@@ -1175,7 +868,7 @@ export async function exportSpreadsheet(
         lastColumn = Math.max(lastColumn, Number(c));
     }
     if ((lastRow + 1) * (lastColumn + 1) > MAX_CELLS)
-      throw new Error("The CSV range contains more than 200,000 cells.");
+      throw Error("The CSV range contains more than 200,000 cells.");
     const lines = Array.from({ length: lastRow + 1 }, (_, r) =>
       Array.from({ length: lastColumn + 1 }, (_, c) => csvCell(cells[r]?.[c])).join(","),
     );
@@ -1197,7 +890,16 @@ export async function exportSpreadsheet(
       )) {
         if (!cell) continue;
         const targetCell = target.getCell(Number(r) + 1, Number(c) + 1);
-        targetCell.value = exportCellValue(cell);
+        targetCell.value = cell.f
+          ? {
+              formula: cell.f.replace(/^=/, ""),
+              ...(cell.v != null ? { result: cell.v as any } : {}),
+            }
+          : typeof cell.v === "string" ||
+              typeof cell.v === "number" ||
+              typeof cell.v === "boolean"
+            ? cell.v
+            : ((cell.p || {}).body?.dataStream?.replace(/\r\n$/, "") ?? null);
         const style =
           typeof cell.s === "string"
             ? document.workbook.styles?.[cell.s]

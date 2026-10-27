@@ -1,6 +1,6 @@
 import type { BoardElement, Position, Size } from '../../types';
 import { createElementHierarchy, type ElementHierarchy } from './element-hierarchy';
-import { elementPolygon, pointInPolygon, polygonsOverlap } from './section-clipping';
+import { elementPolygon, pointInPolygon } from './section-clipping';
 
 export function createBoardSurface(id: string, position: Position, size: Size, color = '#ffffff', zIndex = -1): BoardElement {
   return { id, type: 'board', position: { ...position }, size: { ...size }, color, content: '', zIndex };
@@ -17,59 +17,6 @@ export function findBoardSurface(point: Position, boards: readonly BoardElement[
     .find(board => pointInPolygon(point, elementPolygon(board)));
 }
 
-type PixelFillBoardOwnerInput = Pick<
-  BoardElement,
-  'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'
->;
-
-function resolvePixelFillBoardOwner(
-  element: PixelFillBoardOwnerInput,
-  boards: readonly BoardElement[],
-  mainSize: Size,
-) {
-  if (!element.isPixelFill || !element.pixelFillBoardId) return undefined;
-  const fillCenter = element.size
-    ? {
-        x: element.position.x + element.size.width / 2,
-        y: element.position.y + element.size.height / 2,
-      }
-    : element.position;
-  const fillPolygon = element.size ? elementPolygon(element) : undefined;
-  const explicitOwner = boards.find(board => board.type === 'board' && board.id === element.pixelFillBoardId);
-  const overlaps = (board: BoardElement) => fillPolygon
-    ? polygonsOverlap(fillPolygon, elementPolygon(board))
-    : pointInPolygon(fillCenter, elementPolygon(board));
-  if (explicitOwner && overlaps(explicitOwner)) return explicitOwner;
-  if (element.pixelFillBoardId !== 'main-board') return undefined;
-  const main = boards.find(board => board.type === 'board' && board.id === 'main-board') ??
-    createBoardSurface('main-board', { x: 0, y: 0 }, mainSize, '#ffffff', -9999);
-  return overlaps(main) ? main : undefined;
-}
-
-function resolveAncestorBoardOwner(parentId: string | undefined, hierarchy: ElementHierarchy) {
-  const visited = new Set<string>();
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
-    const parent = hierarchy.byId.get(parentId);
-    if (!parent) return undefined;
-    if (parent.type === 'board') return parent;
-    parentId = parent.parentId;
-  }
-  return undefined;
-}
-
-function getPreviousPixelFillBoardOwner(
-  previous: BoardElement | undefined,
-  previousElements: readonly BoardElement[],
-  previousMainSize: Size,
-) {
-  const previousBoardId = previous?.pixelFillBoardId;
-  if (previousBoardId === 'main-board')
-    return createBoardSurface('main-board', { x: 0, y: 0 }, previousMainSize, '#ffffff', -9999);
-  if (!previousBoardId) return undefined;
-  return previousElements.find(board => board.type === 'board' && board.id === previousBoardId);
-}
-
 /** Resolve implicit ownership from the placement origin; explicit board ancestry wins. */
 export function resolveElementBoardOwner(
   element: Pick<BoardElement, 'parentId' | 'position' | 'size' | 'isPixelFill' | 'pixelFillBoardId'>,
@@ -77,10 +24,22 @@ export function resolveElementBoardOwner(
   mainSize: Size,
   hierarchy: ElementHierarchy = createElementHierarchy(boards),
 ) {
-  const fillOwner = resolvePixelFillBoardOwner(element, boards, mainSize);
-  if (fillOwner) return fillOwner;
-  const ancestorOwner = resolveAncestorBoardOwner(element.parentId, hierarchy);
-  if (ancestorOwner) return ancestorOwner;
+  if (element.isPixelFill && element.pixelFillBoardId) {
+    const explicitOwner = boards.find(board => board.type === 'board' && board.id === element.pixelFillBoardId);
+    if (explicitOwner) return explicitOwner;
+    if (element.pixelFillBoardId === 'main-board')
+      return boards.find(board => board.type === 'board' && board.id === 'main-board') ??
+        createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
+  }
+  const visited = new Set<string>();
+  let parentId = element.parentId;
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = hierarchy.byId.get(parentId);
+    if (!parent) break;
+    if (parent.type === 'board') return parent;
+    parentId = parent.parentId;
+  }
   // Fill rasters are cropped to the visible region. Capture pixel rounding can
   // put their top-left just outside a surface, so resolve their owner from the
   // raster's interior instead of treating that rounded crop origin as intent.
@@ -97,53 +56,6 @@ export function resolveElementBoardOwner(
     return boards.find(board => board.type === 'board' && board.id === 'main-board') ??
       createBoardSurface('main-board', { x: 0, y: 0 }, mainSize);
   return undefined;
-}
-
-/** Keep raster fills attached to a board that still contains them; otherwise resolve their new surface. */
-export function reconcilePixelFillBoardOwners(
-  elements: BoardElement[],
-  mainSize: Size,
-  previousElements: readonly BoardElement[] = [],
-  previousMainSize: Size = mainSize,
-): BoardElement[] {
-  if (!elements.some(element => element.isPixelFill)) return elements;
-  const storedMain = elements.find(element => element.type === 'board' && element.id === 'main-board');
-  const main = storedMain ?? createBoardSurface('main-board', { x: 0, y: 0 }, mainSize, '#ffffff', -9999);
-  const boards = [main, ...elements.filter(element => element.type === 'board' && element.id !== 'main-board')];
-  const hierarchy = createElementHierarchy(elements);
-  const previousById = new Map(previousElements.map(element => [element.id, element]));
-
-  return elements.map(element => {
-    if (!element.isPixelFill) return element;
-    const previous = previousById.get(element.id);
-    const positionChanged = Boolean(previous && (
-      previous.position.x !== element.position.x || previous.position.y !== element.position.y
-    ));
-    const currentOwner = element.pixelFillBoardId
-      ? boards.find(board => board.id === element.pixelFillBoardId)
-      : undefined;
-    const previousOwner = getPreviousPixelFillBoardOwner(previous, previousElements, previousMainSize);
-    const ownerGeometryChanged = Boolean(previousOwner && currentOwner && (
-      previousOwner.position.x !== currentOwner.position.x ||
-      previousOwner.position.y !== currentOwner.position.y ||
-      previousOwner.size?.width !== currentOwner.size?.width ||
-      previousOwner.size?.height !== currentOwner.size?.height ||
-      previousOwner.rotation !== currentOwner.rotation
-    ));
-    if (currentOwner && polygonsOverlap(elementPolygon(element), elementPolygon(currentOwner)) &&
-        (!positionChanged || ownerGeometryChanged || (!previous && element.pixelFillBoardId !== 'main-board'))) return element;
-
-    const { pixelFillBoardId: _staleOwner, ...withoutExplicitOwner } = element;
-    const center = element.size
-      ? { x: element.position.x + element.size.width / 2, y: element.position.y + element.size.height / 2 }
-      : element.position;
-    const nextOwner = findBoardSurface(center, boards) ??
-      (positionChanged
-        ? undefined
-        : resolveElementBoardOwner(withoutExplicitOwner, elements, mainSize, hierarchy));
-    if (nextOwner?.id === element.pixelFillBoardId) return element;
-    return { ...element, pixelFillBoardId: nextOwner?.id };
-  });
 }
 
 /** Preview and placed objects use the same owner and polygon clipping boundary. */

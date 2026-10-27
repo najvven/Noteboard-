@@ -53,9 +53,6 @@ export function clonePageAsAdditionalBoard(
   };
   const translated = cloned.elements.map((element) => ({
     ...element,
-    ...(element.isPixelFill && element.pixelFillBoardId === 'main-board'
-      ? { pixelFillBoardId: surfaceId }
-      : {}),
     position: {
       x: element.position.x + offset.x,
       y: element.position.y + offset.y,

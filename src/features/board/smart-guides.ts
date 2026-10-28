@@ -234,10 +234,6 @@ export function smartGuides(
   const visibleDistanceGuides = [...distanceMatches.values()].flatMap((matches) =>
     matches
       .sort((left, right) => left.score - right.score)
-      .filter((match, index, all) => all.findIndex(candidate =>
-        candidate.targetId === match.targetId &&
-        Math.abs(candidate.guide.x1 - match.guide.x1) < 0.05 &&
-        Math.abs(candidate.guide.y1 - match.guide.y1) < 0.05) === index)
       .slice(0, distanceLimit)
       .map((match) => match.guide),
   );

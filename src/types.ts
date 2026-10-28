@@ -171,6 +171,14 @@ export interface BoardEditorSettings {
   cutShortcut?: string;
   altResizeCrops?: boolean;
   toolMenuSettingsOverrides?: ToolMenuSettingsOverrides;
+  /** @deprecated Read only to migrate board-wide settings into tool overrides. */
+  alwaysOnTop?: boolean;
+  /** @deprecated Read only to migrate board-wide settings into tool overrides. */
+  keepToolActive?: boolean;
+  /** @deprecated Read only to migrate board-wide settings into tool overrides. */
+  previewMode?: 'box' | 'realistic';
+  /** @deprecated Read only to migrate board-wide settings into tool overrides. */
+  proportionalScale?: boolean;
   isSelectionLockEnabled?: boolean;
   selectionLockTime?: number;
   enableObjectSnapping?: boolean;

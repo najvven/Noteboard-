@@ -28,6 +28,51 @@ export type ToolMenuSettingsOverrides = Record<
   ToolMenuSettingsOverride
 >;
 
+const MIGRATED_TOOL_MENU_IDS = [
+  "select", "pan", "text", "shapes", "media", "draw", "fill", "eraser",
+  "embed", "grid", "link", "object-presets", "table", "more",
+] as const;
+
+/**
+ * Convert the former board-wide tool settings into per-tool overrides once.
+ * Existing per-tool values win, and the independent picker menus retain
+ * their always-on-top defaults unless the board already has an explicit value.
+ */
+export function migrateLegacyToolMenuSettings(
+  overrides: Readonly<ToolMenuSettingsOverrides> | null | undefined,
+  legacy: {
+    alwaysOnTop?: unknown;
+    keepToolActive?: unknown;
+    previewMode?: unknown;
+    proportionalScale?: unknown;
+  },
+): ToolMenuSettingsOverrides {
+  const next: ToolMenuSettingsOverrides = Object.fromEntries(
+    Object.entries(overrides ?? {}).map(([id, settings]) => [id, { ...settings }]),
+  );
+  const legacyValues: Partial<ToolMenuSettingsOverride> = {};
+  if (typeof legacy.keepToolActive === "boolean") legacyValues.keepToolActive = legacy.keepToolActive;
+  if (legacy.previewMode === "box" || legacy.previewMode === "realistic")
+    legacyValues.previewMode = legacy.previewMode;
+  if (typeof legacy.proportionalScale === "boolean") legacyValues.ratio = legacy.proportionalScale;
+  if (typeof legacy.alwaysOnTop === "boolean") legacyValues.alwaysOnTop = legacy.alwaysOnTop;
+
+  for (const menuId of MIGRATED_TOOL_MENU_IDS) {
+    const current = next[menuId] ?? {};
+    const migrated = { ...current };
+    for (const [key, value] of Object.entries(legacyValues) as Array<[
+      keyof ToolMenuSettingsOverride,
+      ToolMenuSettingsOverride[keyof ToolMenuSettingsOverride],
+    ]>) {
+      if (migrated[key] !== undefined) continue;
+      if (key === "alwaysOnTop" && (menuId === "link" || menuId === "object-presets")) continue;
+      (migrated as Record<string, unknown>)[key] = value;
+    }
+    if (Object.keys(migrated).length) next[menuId] = migrated;
+  }
+  return next;
+}
+
 /**
  * Object-picking workflows need to remain available while the user clicks the
  * board, so they intentionally own per-tool defaults. Explicit overrides win.

@@ -35,6 +35,38 @@ function positiveSize(value: unknown, fallback: number): number {
     : fallback;
 }
 
+function createDimensionExtent(
+  defaultSize: number,
+  data: Record<number, Record<string, unknown>> | undefined,
+  sizeKey: "w" | "h",
+): (count: number) => number {
+  const overrides = Object.entries(data ?? {})
+    .map(([key, dimension]) => {
+      const index = Number(key);
+      if (!Number.isInteger(index) || index < 0 || !dimension) return null;
+      if (dimension.hd === 1) return { index, delta: -defaultSize };
+      const customSize = sizeKey === "h" && dimension.ia !== 0
+        ? positiveSize(dimension.ah, positiveSize(dimension.h, defaultSize))
+        : positiveSize(dimension[sizeKey], defaultSize);
+      return customSize === defaultSize ? null : { index, delta: customSize - defaultSize };
+    })
+    .filter((entry): entry is { index: number; delta: number } => entry !== null)
+    .sort((left, right) => left.index - right.index);
+  const prefix = [0];
+  for (const override of overrides) prefix.push(prefix[prefix.length - 1] + override.delta);
+
+  return (count) => {
+    let low = 0;
+    let high = overrides.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (overrides[middle].index < count) low = middle + 1;
+      else high = middle;
+    }
+    return count * defaultSize + prefix[low];
+  };
+}
+
 /** Full sheet bounds at 100% zoom, including row/column headings and border. */
 export function gridObjectSize(document: WorkbookDocument | null) {
   const sheet = activeWorkbookSheet(document);
@@ -241,11 +273,30 @@ export function snapAdvancedGridViewportSize(
       };
   const rowCount = sheet ? finiteCount(sheet.rowCount, MAX_ROWS) : 1000;
   const columnCount = sheet ? finiteCount(sheet.columnCount, MAX_COLUMNS) : 26;
-  const count = (extent: number, inset: number, step: number, maximum: number) => {
-    const raw = (Number.isFinite(extent) ? extent : inset + step) - inset;
-    const units = raw / step;
-    const rounded = rounding === "floor" ? Math.floor(units) : Math.round(units);
-    return Math.max(1, Math.min(maximum, Number.isFinite(rounded) ? rounded : 1));
+  const defaultColumnWidth = sheet
+    ? positiveSize(sheet.defaultColumnWidth, 100)
+    : size.width;
+  const defaultRowHeight = sheet
+    ? positiveSize(sheet.defaultRowHeight, 24)
+    : size.height;
+  const columnExtent = sheet
+    ? createDimensionExtent(defaultColumnWidth, sheet.columnData, "w")
+    : (count: number) => count * size.width;
+  const rowExtent = sheet
+    ? createDimensionExtent(defaultRowHeight, sheet.rowData, "h")
+    : (count: number) => count * size.height;
+  const count = (extent: number, inset: number, axisExtent: (count: number) => number, maximum: number) => {
+    const target = Math.max(0, (Number.isFinite(extent) ? extent : inset + axisExtent(1)) - inset);
+    let low = 1;
+    let high = maximum;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (axisExtent(middle) <= target) low = middle;
+      else high = middle - 1;
+    }
+    if (rounding === "floor") return low;
+    const next = Math.min(maximum, low + 1);
+    return target - axisExtent(low) >= axisExtent(next) - target ? next : low;
   };
 
   let verticalScrollbar = false;
@@ -256,25 +307,25 @@ export function snapAdvancedGridViewportSize(
     columns = count(
       width,
       fixedWidth + (verticalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
-      size.width,
+      columnExtent,
       columnCount,
     );
     rows = count(
       height,
       fixedHeight + (horizontalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
-      size.height,
+      rowExtent,
       rowCount,
     );
-    const nextHorizontal = full.width > fixedWidth + columns * size.width + 0.5;
-    const nextVertical = full.height > fixedHeight + rows * size.height + 0.5;
+    const nextHorizontal = full.width > fixedWidth + columnExtent(columns) + 0.5;
+    const nextVertical = full.height > fixedHeight + rowExtent(rows) + 0.5;
     if (nextHorizontal === horizontalScrollbar && nextVertical === verticalScrollbar) break;
     horizontalScrollbar ||= nextHorizontal;
     verticalScrollbar ||= nextVertical;
   }
 
   return {
-    width: fixedWidth + columns * size.width + (verticalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
-    height: fixedHeight + rows * size.height + (horizontalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+    width: fixedWidth + columnExtent(columns) + (verticalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+    height: fixedHeight + rowExtent(rows) + (horizontalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
     rows,
     columns,
     horizontalScrollbar,

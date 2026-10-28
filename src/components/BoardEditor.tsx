@@ -102,6 +102,7 @@ import { createWorkbookDocument, readLiveWorkbookSnapshots, normalizeCellSize, w
 import { createSavedBoard, createSavedTemplate, type SaveAsKind } from "../features/board/save-as";
 import MenuSettingsBlock, { type PreviewMode } from "./MenuSettingsBlock";
 import {
+  migrateLegacyToolMenuSettings,
   resolveToolMenuSettingsForId,
   updateToolMenuSettingOverride,
   type ToolMenuSettingKey,
@@ -1506,7 +1507,7 @@ export default function BoardEditor({
     initialEditorSettings.mediaPlaybackDisabled ?? false,
   );
   const [toolSettingsOverrides, setToolSettingsOverrides] = useState<ToolMenuSettingsOverrides>(
-    initialEditorSettings.toolMenuSettingsOverrides ?? {},
+    () => migrateLegacyToolMenuSettings(initialEditorSettings.toolMenuSettingsOverrides, initialEditorSettings),
   );
   const [isSelectionLockEnabled, setIsSelectionLockEnabled] = useState(
     initialEditorSettings.isSelectionLockEnabled ?? true,
@@ -2124,7 +2125,7 @@ export default function BoardEditor({
       };
 
       if (fillModeAtStart === "object") {
-        const target = sourceElements.slice().reverse().find((element) => {
+        const target = sourceElements.slice().sort(elementHierarchy.compare).reverse().find((element) => {
           if (element.type === "board" || element.type === "layer" || element.type === "group" ||
               element.isEraser || element.opacity === 0 || elementHierarchy.isLocked(element.id) ||
               !elementHierarchy.isVisible(element.id, respectLayerVisibility)) return false;
@@ -11109,7 +11110,7 @@ export default function BoardEditor({
 
                             <div className="flex h-12 min-h-12 shrink-0 items-center gap-2 border-r-2 border-gray-300 pr-3">
                               <div data-shortcut-action="web:fullscreenMode" data-shortcut-label="Fullscreen Mode" data-shortcut-category="Web">
-                                <SegmentedControl narrow label="Fullscreen Mode" value={webSettings.fullscreenMode}
+                                <SegmentedControl narrow variant="toolbar" label="Fullscreen Mode" value={webSettings.fullscreenMode}
                                   onChange={(mode) => onUpdateTarget({ webFullscreenMode: mode })}
                                   options={[{ value: "area", label: "Web Area" }, { value: "real", label: "Real Fullscreen" }]} />
                               </div>
@@ -13795,7 +13796,7 @@ function ElementVisuals({
         Math.min(1, element.mediaVolume ?? 1),
       );
     }
-  }, [content, element.mediaPlaybackRate, element.mediaVolume]);
+  }, [content, element.mediaPlaybackRate, element.mediaVolume, isMediaDisabled]);
 
   const containerStyle = {
     ...(size ? { width: size.width, height: size.height } : {}),

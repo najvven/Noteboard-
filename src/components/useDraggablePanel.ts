@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 
 type Position = { left: number; top: number };
 type DragState = {
@@ -15,6 +15,25 @@ export function useDraggablePanel<T extends HTMLElement>() {
   const panelRef = useRef<T>(null);
   const dragRef = useRef<DragState | null>(null);
   const [position, setPosition] = useState<Position | null>(null);
+
+  useEffect(() => {
+    if (!position) return;
+    const clampPosition = () => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const rect = panel.getBoundingClientRect();
+      const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+      const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+      setPosition((current) => {
+        if (!current) return current;
+        const left = Math.max(8, Math.min(maxLeft, current.left));
+        const top = Math.max(8, Math.min(maxTop, current.top));
+        return left === current.left && top === current.top ? current : { left, top };
+      });
+    };
+    window.addEventListener("resize", clampPosition);
+    return () => window.removeEventListener("resize", clampPosition);
+  }, [position !== null]);
 
   const onPointerDown = (event: PointerEvent<HTMLElement>) => {
     if (event.button !== 0) return;
@@ -41,11 +60,11 @@ export function useDraggablePanel<T extends HTMLElement>() {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const left = Math.max(8, Math.min(
-      window.innerWidth - drag.width - 8,
+      Math.max(8, window.innerWidth - drag.width - 8),
       drag.startLeft + event.clientX - drag.startX,
     ));
     const top = Math.max(8, Math.min(
-      window.innerHeight - drag.height - 8,
+      Math.max(8, window.innerHeight - drag.height - 8),
       drag.startTop + event.clientY - drag.startY,
     ));
     setPosition({ left, top });

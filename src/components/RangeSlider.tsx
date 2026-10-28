@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 
 const decimalsForStep = (step: number) => {
@@ -50,6 +50,7 @@ export default function RangeSlider({
   const normalizedValue = normalizeValue(value, min, max, step);
   const [draft, setDraft] = useState(String(normalizedValue));
   const [valueOverride, setValueOverride] = useState<number | null>(null);
+  const cancelBlurCommitRef = useRef(false);
   const effectiveValue = normalizeValue(valueOverride ?? normalizedValue, min, max, step);
 
   useEffect(() => {
@@ -123,15 +124,22 @@ export default function RangeSlider({
           onPointerDown={(event) => { event.stopPropagation(); captureEntryValue(); }}
           onFocus={captureEntryValue}
           onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
+          onBlur={() => {
+            if (cancelBlurCommitRef.current) {
+              cancelBlurCommitRef.current = false;
+              return;
+            }
+            commit();
+          }}
           onKeyDown={(event) => {
             event.stopPropagation();
             if (event.key === 'Enter') {
               event.preventDefault();
-              commit();
+              // Blur commits once through onBlur.
               event.currentTarget.blur();
             } else if (event.key === 'Escape') {
               event.preventDefault();
+              cancelBlurCommitRef.current = true;
               setValueOverride(null);
               setDraft(String(effectiveValue));
               event.currentTarget.blur();

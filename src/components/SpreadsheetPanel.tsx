@@ -41,11 +41,11 @@ export default function SpreadsheetPanel({
       data-spreadsheet-panel="true"
       aria-label="Spreadsheet settings"
       style={{ ...panelStyle, filter: globalBrightness === 100 ? undefined : `brightness(${globalBrightness}%)` }}
-      className="fixed right-3 top-24 z-[220] w-[320px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-14rem)] overflow-hidden rounded-none border-[3px] border-gray-400 bg-white p-3 text-xs shadow-xl"
+      className="fixed right-3 top-24 z-[220] flex min-h-0 w-[320px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-14rem)] flex-col overflow-hidden rounded-none border-[3px] border-gray-400 bg-white p-3 text-xs shadow-xl box-border"
       onPointerDown={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      <div className="menu-scroll-viewport max-h-[calc(100vh-14rem)] overflow-y-auto">
+      <div className="menu-scroll-viewport min-h-0 flex-1 overflow-y-auto">
         <div {...dragHandleProps} data-panel-drag-handle="spreadsheet" title="Drag to move" className="mb-2 flex cursor-move items-center gap-2 border-b-2 border-gray-300 pb-2 font-bold text-gray-800">
           <Table2 className="h-4 w-4" />
           <span className="truncate">{name}</span>

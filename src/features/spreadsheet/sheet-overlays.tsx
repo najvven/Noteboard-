@@ -117,7 +117,7 @@ export function HostedOverlays() {
           role="complementary"
           aria-label="Spreadsheet details"
           className="univer-relative univer-flex univer-min-h-0 univer-flex-col univer-overflow-hidden univer-bg-white univer-text-gray-900"
-          style={{ maxHeight: "calc(100vh - 8rem)" }}
+          style={{ maxHeight: "calc(100vh - 8rem)", boxSizing: "border-box" }}
         >
           <div className="univer-flex univer-items-center univer-justify-between univer-gap-2 univer-py-2 univer-font-semibold">
             <EngineLabel options={options.header} />
@@ -134,8 +134,8 @@ export function HostedOverlays() {
               if (element) sidebar.setContainer(element);
             }}
             data-sheet-detail-scroll="true"
-            className="univer-min-h-0 univer-overflow-y-auto"
-            style={{ maxHeight: "calc(100vh - 12rem)", overflowY: "auto" }}
+            className="univer-min-h-0 univer-flex-1 univer-overflow-y-auto"
+            style={{ minHeight: 0, overflowY: "auto", boxSizing: "border-box" }}
             onScroll={(event) => sidebar.scrollEvent$.next(event.nativeEvent)}
           >
             <EngineLabel options={options.children} />

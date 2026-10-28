@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 
 export default function NumericField({
@@ -25,6 +25,7 @@ export default function NumericField({
   className?: string;
 }) {
   const [draft, setDraft] = useState(String(value));
+  const cancelBlurCommitRef = useRef(false);
   useEffect(() => setDraft(String(value)), [value]);
 
   const commit = () => {
@@ -57,15 +58,22 @@ export default function NumericField({
         disabled={disabled}
         onChange={(event) => setDraft(event.target.value)}
         onPointerDown={(event) => event.stopPropagation()}
-        onBlur={commit}
+        onBlur={() => {
+          if (cancelBlurCommitRef.current) {
+            cancelBlurCommitRef.current = false;
+            return;
+          }
+          commit();
+        }}
         onKeyDown={(event) => {
           event.stopPropagation();
           if (event.key === 'Enter') {
             event.preventDefault();
-            commit();
+            // Blur commits once through onBlur.
             event.currentTarget.blur();
           } else if (event.key === 'Escape') {
             event.preventDefault();
+            cancelBlurCommitRef.current = true;
             setDraft(String(value));
             event.currentTarget.blur();
           }

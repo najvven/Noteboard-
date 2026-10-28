@@ -23,6 +23,7 @@ const applyFullscreenModeInPage = mode => {
   const originalDocumentWebkitFullscreenElement = Object.getOwnPropertyDescriptor(document, 'webkitFullscreenElement');
   let currentMode = 'area';
   let activeElement = null;
+  let activeElementIsNestedFullscreen = false;
   let savedInlineStyles = null;
   const areaStyles = {
     position: 'fixed', inset: '0', top: '0', right: '0', bottom: '0', left: '0',
@@ -42,26 +43,41 @@ const applyFullscreenModeInPage = mode => {
     }
     activeElement.removeAttribute('data-noteboard-area-fullscreen');
     activeElement = null;
+    activeElementIsNestedFullscreen = false;
     savedInlineStyles = null;
     dispatchFullscreenChange();
     return true;
+  };
+  const enterAreaFullscreen = (element, nestedFullscreen = false) => {
+    if (activeElement === element) {
+      activeElementIsNestedFullscreen ||= nestedFullscreen;
+      return;
+    }
+    if (activeElement) exitAreaFullscreen();
+    activeElement = element;
+    activeElementIsNestedFullscreen = nestedFullscreen;
+    savedInlineStyles = Object.fromEntries(Object.keys(areaStyles).map(property => [property, {
+      value: element.style.getPropertyValue(property),
+      priority: element.style.getPropertyPriority(property),
+    }]));
+    element.setAttribute('data-noteboard-area-fullscreen', 'true');
+    for (const [property, value] of Object.entries(areaStyles)) element.style.setProperty(property, value, 'important');
+    dispatchFullscreenChange();
   };
   const requestAreaFullscreen = function () {
     if (currentMode !== 'area' && requestDescriptor?.value) {
       return requestDescriptor.value.apply(this, arguments);
     }
-    if (activeElement && activeElement !== this) exitAreaFullscreen();
-    activeElement = this;
-    savedInlineStyles = Object.fromEntries(Object.keys(areaStyles).map(property => [property, {
-      value: this.style.getPropertyValue(property),
-      priority: this.style.getPropertyPriority(property),
-    }]));
-    this.setAttribute('data-noteboard-area-fullscreen', 'true');
-    for (const [property, value] of Object.entries(areaStyles)) this.style.setProperty(property, value, 'important');
-    dispatchFullscreenChange();
+    if (activeElement === this) return Promise.resolve();
+    enterAreaFullscreen(this);
     return Promise.resolve();
   };
   const exitAreaFullscreenMethod = function () {
+    if (activeElementIsNestedFullscreen &&
+        fullscreenElementDescriptor?.get?.call(document) === activeElement &&
+        exitDescriptor?.value) {
+      return exitDescriptor.value.apply(this, arguments);
+    }
     if (currentMode === 'area' && exitAreaFullscreen()) return Promise.resolve();
     if (exitDescriptor?.value) return exitDescriptor.value.apply(this, arguments);
     return Promise.resolve();
@@ -70,6 +86,16 @@ const applyFullscreenModeInPage = mode => {
     if (currentMode === 'area' && activeElement && event.key === 'Escape') {
       event.preventDefault();
       event.stopImmediatePropagation();
+      if (activeElementIsNestedFullscreen) exitAreaFullscreenMethod.call(document);
+      else exitAreaFullscreen();
+    }
+  };
+  const syncNestedFullscreen = () => {
+    if (currentMode !== 'area') return;
+    const nativeFullscreenElement = fullscreenElementDescriptor?.get?.call(document) || null;
+    if (nativeFullscreenElement instanceof HTMLIFrameElement) {
+      enterAreaFullscreen(nativeFullscreenElement, true);
+    } else if (activeElementIsNestedFullscreen) {
       exitAreaFullscreen();
     }
   };
@@ -91,6 +117,7 @@ const applyFullscreenModeInPage = mode => {
     get: () => activeElement || webkitFullscreenElementDescriptor.get.call(document) || null,
   });
   window.addEventListener('keydown', originalKeydown, true);
+  document.addEventListener('fullscreenchange', syncNestedFullscreen, true);
 
   const restoreNativeFullscreen = () => {
     exitAreaFullscreen();
@@ -105,6 +132,7 @@ const applyFullscreenModeInPage = mode => {
     if (originalDocumentWebkitFullscreenElement) Object.defineProperty(document, 'webkitFullscreenElement', originalDocumentWebkitFullscreenElement);
     else delete document.webkitFullscreenElement;
     window.removeEventListener('keydown', originalKeydown, true);
+    document.removeEventListener('fullscreenchange', syncNestedFullscreen, true);
     delete window[key];
   };
   Object.defineProperty(window, key, {

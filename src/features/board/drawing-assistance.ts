@@ -27,6 +27,24 @@ function getClosedVertices(outline: readonly DrawingPoint[], minimumGap: number)
   }
   if (vertices.length > 2 && distance(vertices[0], vertices.at(-1)!) <= minimumGap * 2)
     vertices.pop();
+
+  // Simplification can leave extra points on a straight edge. Remove those
+  // before counting vertices so an ordinary rectangle does not look like a
+  // higher-sided polygon just because the stroke was sampled densely.
+  let removedPoint = true;
+  while (removedPoint && vertices.length > 3) {
+    removedPoint = false;
+    for (let index = 0; index < vertices.length; index++) {
+      const previous = vertices[(index + vertices.length - 1) % vertices.length];
+      const current = vertices[index];
+      const next = vertices[(index + 1) % vertices.length];
+      if (pointSegmentDistance(current, previous, next) <= minimumGap) {
+        vertices.splice(index, 1);
+        removedPoint = true;
+        break;
+      }
+    }
+  }
   return vertices;
 }
 
@@ -125,12 +143,13 @@ export function guessClosedDrawingShape(
 
   const closureTolerance = scale * (0.14 + strengthProgress * 0.11);
   if (distance(points[0], points[points.length - 1]) > closureTolerance) return null;
-  if (isClosedCircleCandidate(points, clampedStrength)) return { type: "ellipse" };
 
   const vertices = getClosedVertices(simplifiedOutline, scale * 0.012);
   if (!isConvexPolygon(vertices)) return null;
   const fitTolerance = 0.045 + strengthProgress * 0.105;
   if (polygonFitError(points, vertices, scale) > fitTolerance) return null;
+  const polygonShapeFitTolerance = 0.035 + strengthProgress * 0.025;
+  const shapeFitError = polygonFitError(points, vertices, scale);
 
   const angles = interiorAngles(vertices);
   const angleTolerance = 11 + strengthProgress * 18;
@@ -142,6 +161,16 @@ export function guessClosedDrawingShape(
   if (vertices.length === 3) {
     const areaRatio = polygonArea(vertices) / Math.max(1, width * height);
     if (areaRatio < 0.15 || angles.some(angle => angle < 18 || angle > 162)) return null;
+    const uprightTriangle = [
+      { x: (minX + maxX) / 2, y: minY },
+      { x: maxX, y: maxY },
+      { x: minX, y: maxY },
+    ];
+    const triangleFit = Math.max(
+      polygonFitError(vertices, uprightTriangle, scale),
+      polygonFitError(uprightTriangle, vertices, scale),
+    );
+    if (triangleFit > polygonShapeFitTolerance) return null;
     return { type: "triangle" };
   }
 
@@ -152,7 +181,7 @@ export function guessClosedDrawingShape(
     );
     const rightAngled = angles.every(angle => Math.abs(angle - 90) <= angleTolerance);
     const areaRatio = polygonArea(vertices) / Math.max(1, width * height);
-    if (axisAligned && rightAngled && areaRatio >= 0.65) {
+    if (axisAligned && rightAngled && areaRatio >= 0.65 && shapeFitError <= polygonShapeFitTolerance) {
       const squareTolerance = 0.04 + strengthProgress * 0.08;
       return {
         type: "rectangle",
@@ -162,16 +191,20 @@ export function guessClosedDrawingShape(
 
     const equalSideTolerance = 0.12 + strengthProgress * 0.18;
     const diamondArea = areaRatio >= 0.3 && areaRatio <= 0.72;
-    if (diamondArea && longestSide / shortestSide <= 1 + equalSideTolerance)
+    if (diamondArea && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance)
       return { type: "diamond" };
   }
 
   if (vertices.length === 6) {
     const equalSideTolerance = 0.12 + strengthProgress * 0.18;
     const regularAngles = angles.every(angle => Math.abs(angle - 120) <= angleTolerance);
-    if (regularAngles && longestSide / shortestSide <= 1 + equalSideTolerance)
+    if (regularAngles && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance)
       return { type: "hexagon" };
   }
+
+  // Prefer a well-fitted regular hexagon before the looser circle heuristic.
+  // Otherwise sampled points along a hexagon's edges can make it look circular.
+  if (isClosedCircleCandidate(points, clampedStrength)) return { type: "ellipse" };
 
   return null;
 }

@@ -128,13 +128,14 @@ export function smartGuides(
     },
     box = bounds({ ...moving, position: next }),
     guides: SmartGuide[] = [];
-  const chooseAlignmentGuides = (matches: AlignmentMatch[]) => matches
+  const chooseAlignmentGuides = (matches: AlignmentMatch[], applied: AlignmentMatch | undefined) => matches
+    .filter(match => !snap || !applied || Math.abs(match.offset - applied.offset) < 0.05)
     .sort((left, right) => Math.abs(left.offset) - Math.abs(right.offset) || left.proximity - right.proximity)
     .filter((match, index, all) => all.findIndex(candidate =>
       candidate.target.id === match.target.id && Math.abs(candidate.at - match.at) < 0.05) === index)
     .slice(0, alignmentLimit);
   if (options.alignment !== false) {
-    for (const match of chooseAlignmentGuides(alignmentMatchesX))
+    for (const match of chooseAlignmentGuides(alignmentMatchesX, bestX))
       guides.push({
         kind: "alignment",
         color: match.target.color,
@@ -143,7 +144,7 @@ export function smartGuides(
         y1: Math.min(box.top, match.target.top) - 12 / zoom,
         y2: Math.max(box.bottom, match.target.bottom) + 12 / zoom,
       });
-    for (const match of chooseAlignmentGuides(alignmentMatchesY))
+    for (const match of chooseAlignmentGuides(alignmentMatchesY, bestY))
       guides.push({
         kind: "alignment",
         color: match.target.color,

@@ -32,7 +32,15 @@ export function useDraggablePanel<T extends HTMLElement>() {
       });
     };
     window.addEventListener("resize", clampPosition);
-    return () => window.removeEventListener("resize", clampPosition);
+    const panel = panelRef.current;
+    const observer = panel && typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(clampPosition)
+      : null;
+    if (panel) observer?.observe(panel);
+    return () => {
+      window.removeEventListener("resize", clampPosition);
+      observer?.disconnect();
+    };
   }, [position !== null]);
 
   const onPointerDown = (event: PointerEvent<HTMLElement>) => {

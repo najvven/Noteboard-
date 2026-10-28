@@ -121,7 +121,10 @@ export default function RangeSlider({
           step={step}
           value={draft}
           disabled={disabled}
-          onPointerDown={(event) => { event.stopPropagation(); captureEntryValue(); }}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+            if (document.activeElement !== event.currentTarget) captureEntryValue();
+          }}
           onFocus={captureEntryValue}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={() => {

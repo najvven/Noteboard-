@@ -277,6 +277,7 @@ const assertSettingsElementShape = (element, label, partial = false) => {
     "textScaling",
     "textLineCapacityLimit",
     "mediaControlsHidden",
+    "mediaDisabled",
     "mediaLoop",
     "webRememberSession",
     "webAdBlock",
@@ -430,6 +431,7 @@ const assertEditorSettings = (settings) => {
     if (!Array.isArray(settings.customSettingShortcuts) || settings.customSettingShortcuts.length > 500) {
       throw new Error(`${label}.customSettingShortcuts is invalid.`);
     }
+    const bindingIds = new Set();
     settings.customSettingShortcuts.forEach((binding, index) => {
       const bindingLabel = `${label}.customSettingShortcuts[${index}]`;
       assertSettingsRecord(binding, bindingLabel);
@@ -438,6 +440,10 @@ const assertEditorSettings = (settings) => {
           throw new Error(`${bindingLabel}.${field} is invalid.`);
         }
       }
+      if (bindingIds.has(binding.id)) {
+        throw new Error(`${bindingLabel}.id is duplicated.`);
+      }
+      bindingIds.add(binding.id);
     });
   }
 

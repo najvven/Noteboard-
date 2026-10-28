@@ -31,21 +31,22 @@ const applyFullscreenModeInPage = mode => {
     margin: '0', 'z-index': '2147483647',
   };
 
-  const dispatchFullscreenChange = () => {
-    document.dispatchEvent(new Event('fullscreenchange', { bubbles: true }));
-    document.dispatchEvent(new Event('webkitfullscreenchange', { bubbles: true }));
+  const dispatchFullscreenChange = (target = document) => {
+    target.dispatchEvent(new Event('fullscreenchange', { bubbles: true, composed: true }));
+    target.dispatchEvent(new Event('webkitfullscreenchange', { bubbles: true, composed: true }));
   };
   const exitAreaFullscreen = () => {
     if (!activeElement) return false;
+    const target = activeElement;
     for (const [property, original] of Object.entries(savedInlineStyles || {})) {
-      if (original.value) activeElement.style.setProperty(property, original.value, original.priority);
-      else activeElement.style.removeProperty(property);
+      if (original.value) target.style.setProperty(property, original.value, original.priority);
+      else target.style.removeProperty(property);
     }
-    activeElement.removeAttribute('data-noteboard-area-fullscreen');
+    target.removeAttribute('data-noteboard-area-fullscreen');
     activeElement = null;
     activeElementIsNestedFullscreen = false;
     savedInlineStyles = null;
-    dispatchFullscreenChange();
+    dispatchFullscreenChange(target);
     return true;
   };
   const enterAreaFullscreen = (element, nestedFullscreen = false) => {
@@ -62,7 +63,7 @@ const applyFullscreenModeInPage = mode => {
     }]));
     element.setAttribute('data-noteboard-area-fullscreen', 'true');
     for (const [property, value] of Object.entries(areaStyles)) element.style.setProperty(property, value, 'important');
-    dispatchFullscreenChange();
+    dispatchFullscreenChange(element);
   };
   const requestAreaFullscreen = function () {
     if (currentMode !== 'area' && requestDescriptor?.value) {

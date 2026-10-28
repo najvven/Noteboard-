@@ -192,15 +192,39 @@ export function guessClosedDrawingShape(
 
     const equalSideTolerance = 0.12 + strengthProgress * 0.18;
     const diamondArea = areaRatio >= 0.3 && areaRatio <= 0.72;
-    if (diamondArea && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance)
-      return { type: "diamond" };
+    if (diamondArea && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance) {
+      const uprightDiamondTemplate = [
+        { x: minX + width / 2, y: minY },
+        { x: maxX, y: minY + height / 2 },
+        { x: minX + width / 2, y: maxY },
+        { x: minX, y: minY + height / 2 },
+      ];
+      const diamondOrientationError = Math.max(
+        polygonFitError(vertices, uprightDiamondTemplate, scale),
+        polygonFitError(uprightDiamondTemplate, vertices, scale),
+      );
+      if (diamondOrientationError <= polygonShapeFitTolerance) return { type: "diamond" };
+    }
   }
 
   if (vertices.length === 6) {
     const equalSideTolerance = 0.12 + strengthProgress * 0.18;
     const regularAngles = angles.every(angle => Math.abs(angle - 120) <= angleTolerance);
-    if (regularAngles && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance)
-      return { type: "hexagon" };
+    if (regularAngles && longestSide / shortestSide <= 1 + equalSideTolerance && shapeFitError <= polygonShapeFitTolerance) {
+      const flatTopHexagonTemplate = [
+        { x: minX + width * 0.25, y: minY },
+        { x: minX + width * 0.75, y: minY },
+        { x: maxX, y: minY + height / 2 },
+        { x: minX + width * 0.75, y: maxY },
+        { x: minX + width * 0.25, y: maxY },
+        { x: minX, y: minY + height / 2 },
+      ];
+      const hexagonOrientationError = Math.max(
+        polygonFitError(vertices, flatTopHexagonTemplate, scale),
+        polygonFitError(flatTopHexagonTemplate, vertices, scale),
+      );
+      if (hexagonOrientationError <= polygonShapeFitTolerance) return { type: "hexagon" };
+    }
   }
 
   // Prefer a well-fitted regular hexagon before the looser circle heuristic.

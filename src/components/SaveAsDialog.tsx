@@ -21,12 +21,25 @@ export default function SaveAsDialog({ name, onClose, onSave }: {
   const [saved, setSaved] = useState<SaveState>({});
   const [error, setError] = useState('');
   const dialog = useRef<HTMLDivElement>(null);
+  const focusRestoreRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
     dialog.current?.querySelector<HTMLInputElement>('input')?.focus();
     return () => previous?.focus();
   }, []);
+
+  useEffect(() => {
+    if (pending) {
+      dialog.current?.focus();
+      return;
+    }
+    const previous = focusRestoreRef.current;
+    if (!previous) return;
+    focusRestoreRef.current = null;
+    if (previous.isConnected && !previous.matches(':disabled')) previous.focus();
+    else dialog.current?.querySelector<HTMLElement>('input:not(:disabled),button:not(:disabled)')?.focus();
+  }, [pending]);
 
   const currentName = (kind: SaveAsKind) => {
     if (kind === 'template') return templateName;
@@ -41,9 +54,11 @@ export default function SaveAsDialog({ name, onClose, onSave }: {
     setError('');
   };
 
-  const save = async (kind: SaveAsKind) => {
+  const save = async (kind: SaveAsKind, focusTarget?: HTMLElement) => {
     const value = currentName(kind).trim();
     if (pending || (kind !== 'file' && !value)) return;
+    focusRestoreRef.current = focusTarget ?? document.activeElement as HTMLElement | null;
+    dialog.current?.focus();
     setPending(kind);
     setError('');
     try {
@@ -100,7 +115,7 @@ export default function SaveAsDialog({ name, onClose, onSave }: {
                   type="button"
                   aria-label={isSaved ? `Saved as ${label}` : `Save as ${label}`}
                   disabled={!!pending || (kind !== 'file' && !currentName(kind).trim()) || isSaved}
-                  onClick={() => void save(kind)}
+                  onClick={event => void save(kind, event.currentTarget)}
                   className={`flex h-8 w-full items-center justify-center rounded-md border px-2 text-xs font-bold transition-colors disabled:cursor-default ${isSaved ? 'border-gray-200 bg-gray-100 text-gray-400' : 'border-gray-300 bg-gray-50 text-gray-700 hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50'} ${isPending ? 'opacity-60' : ''} ${isSaved ? 'save-confirm-flash' : ''}`}
                 >
                   <span>{isPending ? 'Saving…' : isSaved ? 'Saved' : 'Save'}</span>

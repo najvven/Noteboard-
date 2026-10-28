@@ -30,7 +30,7 @@ export type ToolMenuSettingsOverrides = Record<
 
 const MIGRATED_TOOL_MENU_IDS = [
   "select", "pan", "text", "shapes", "media", "draw", "fill", "eraser",
-  "embed", "grid", "link", "object-presets", "table", "more",
+  "embed", "grid", "link", "object-presets", "table", "more", "generalSettings", "layers",
 ] as const;
 
 /**
@@ -65,6 +65,7 @@ export function migrateLegacyToolMenuSettings(
       ToolMenuSettingsOverride[keyof ToolMenuSettingsOverride],
     ]>) {
       if (migrated[key] !== undefined) continue;
+      if ((menuId === "generalSettings" || menuId === "layers") && key !== "alwaysOnTop") continue;
       if (key === "alwaysOnTop" && (menuId === "link" || menuId === "object-presets")) continue;
       (migrated as Record<string, unknown>)[key] = value;
     }

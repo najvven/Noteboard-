@@ -58,7 +58,7 @@ const SmartGuidesOverlay = forwardRef<
                   fontSize="10"
                   fontFamily="Arial,sans-serif"
                   fontWeight="600"
-                  fill={guide.color ?? "#b52b94"}
+                  fill="#111827"
                   stroke="none"
                 >
                   {guide.equalSpacing ? `${guide.label} =` : guide.label}

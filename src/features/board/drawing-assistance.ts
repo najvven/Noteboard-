@@ -204,6 +204,7 @@ export function guessClosedDrawingShape(
         polygonFitError(uprightDiamondTemplate, vertices, scale),
       );
       if (diamondOrientationError <= polygonShapeFitTolerance) return { type: "diamond" };
+      return null;
     }
   }
 
@@ -224,6 +225,7 @@ export function guessClosedDrawingShape(
         polygonFitError(flatTopHexagonTemplate, vertices, scale),
       );
       if (hexagonOrientationError <= polygonShapeFitTolerance) return { type: "hexagon" };
+      return null;
     }
   }
 

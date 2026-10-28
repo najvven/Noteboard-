@@ -49,6 +49,7 @@ const configuredWebSessions = new Map();
 const configureWebSessionInOrder = createWebSessionConfigurationQueue();
 const webZoomStates = new WeakMap();
 const webPointerPositions = new WeakMap();
+const webFullscreenModes = new WeakMap();
 // Only cookie acceptance during a main-frame response uses its pending URL.
 // Requests made by the still-active document must never inherit that URL.
 const webPendingNavigationUrls = new WeakMap();
@@ -77,7 +78,7 @@ const adExtensions=createAdExtensionManager({
   },
 });
 const countBlocked = (partition, kind) => {
-  const counts = blockingCounts.get(partition) ?? { ads: 0, cookies: 0, popups: 0 };
+  const counts = blockingCounts.get(partition) || { ads: 0, cookies: 0, popups: 0 };
   counts[kind]++;
   blockingCounts.set(partition, counts);
 };
@@ -142,7 +143,13 @@ ipcMain.on('noteboard:web-privacy-policy', (event, documentUrl) => {
   const topLevelUrl = documentTopLevelUrl ?? contentContext?.topLevelUrl ?? settings.topLevelUrl;
   const host = event.sender.getType() === 'webview' ? event.sender.hostWebContents : null;
   const boardZoom = host && !host.isDestroyed() ? webZoomStates.get(host) || { shortcut: 'Ctrl', active: false } : null;
-  event.returnValue = { adBlock: settings.adBlock, cookieBlocker: settings.cookieBlocker, blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }), boardZoom };
+  event.returnValue = {
+    adBlock: settings.adBlock,
+    cookieBlocker: settings.cookieBlocker,
+    blockCookies: shouldBlockCookies(frameUrl, { ...settings, topLevelUrl }),
+    boardZoom,
+    fullscreenMode: webFullscreenModes.get(event.sender) || 'area',
+  };
 });
 
 handleTrusted('web-zoom:state', (event, state = {}) => {
@@ -352,6 +359,14 @@ handleTrusted('web-viewport:configure', async (event, payload = {}) => {
       guest.hostWebContents !== event.sender || !getPartitionForWebContents(guest)) {
     throw new Error('Web viewport request does not belong to this board window.');
   }
+  const fullscreenMode = payload.fullscreenMode === 'real' ? 'real' : 'area';
+  if (webFullscreenModes.get(guest) !== fullscreenMode) {
+    webFullscreenModes.set(guest, fullscreenMode);
+    for (const frame of guest.mainFrame.framesInSubtree) {
+      try { frame.send('noteboard:web-fullscreen-mode', fullscreenMode); }
+      catch { /* A navigating frame receives its mode with the next preload. */ }
+    }
+  }
   return configureWebViewport(guest, payload, process.versions.chrome, process.platform);
 });
 
@@ -371,21 +386,21 @@ handleTrusted('web-view:fullscreen', async (event, guestId) => {
 
 handleTrusted('board:sample-color',async(event,point={})=>{
   const win=BrowserWindow.fromWebContents(event.sender);
-  if(!win||win.isDestroyed()||!Number.isFinite(point.x)||!Number.isFinite(point.y))throw new Error('Invalid sample position.');
+  if(!win||win.isDestroyed()||!Number.isFinite(point.x)||!Number.isFinite(point.y))throw Error('Invalid sample position.');
   const zoom=event.sender.getZoomFactor(),bounds=win.getContentBounds();
   const x=Math.floor(point.x*zoom),y=Math.floor(point.y*zoom);
-  if(x<0||y<0||x>=bounds.width||y>=bounds.height)throw new Error('Choose a point inside the board window.');
+  if(x<0||y<0||x>=bounds.width||y>=bounds.height)throw Error('Choose a point inside the board window.');
   const image=await event.sender.capturePage({x,y,width:1,height:1});
-  if(image.isEmpty())throw new Error('Could not read the selected color.');
+  if(image.isEmpty())throw Error('Could not read the selected color.');
   const pixel=image.toBitmap();
   return '#'+[pixel[2],pixel[1],pixel[0]].map(value=>value.toString(16).padStart(2,'0')).join('');
 });
 
 handleTrusted('board:capture-region', async (event, rect = {}) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win || win.isDestroyed()) throw new Error('The board window is no longer available.');
+  if (!win || win.isDestroyed()) throw Error('The board window is no longer available.');
   if (![rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || rect.width <= 0 || rect.height <= 0)
-    throw new Error('Invalid board capture region.');
+    throw Error('Invalid board capture region.');
 
   const pageZoom = event.sender.getZoomFactor();
   const bounds = win.getContentBounds();
@@ -396,17 +411,17 @@ handleTrusted('board:capture-region', async (event, rect = {}) => {
   const width = Math.min(bounds.width, right) - x;
   const height = Math.min(bounds.height, bottom) - y;
   if (x < 0 || y < 0 || width <= 0 || height <= 0 || x + width > bounds.width || y + height > bounds.height)
-    throw new Error('Choose a visible area inside the board window.');
+    throw Error('Choose a visible area inside the board window.');
   const displayScale = screen.getDisplayMatching(win.getBounds()).scaleFactor || 1;
   const estimatedPhysicalPixels = width * height * displayScale * displayScale;
   if (!Number.isFinite(estimatedPhysicalPixels) || estimatedPhysicalPixels > 10_000_000)
-    throw new Error('The captured area is too large. Reduce the visible area and try again.');
+    throw Error('The captured area is too large. Reduce the visible area and try again.');
 
   const image = await event.sender.capturePage({ x, y, width, height });
-  if (image.isEmpty()) throw new Error('Could not read the visible board pixels.');
+  if (image.isEmpty()) throw Error('Could not read the visible board pixels.');
   const png = image.toPNG({ scaleFactor: 1 });
   if (png.byteLength > 40 * 1024 * 1024)
-    throw new Error('The captured image is too large. Reduce the visible area and try again.');
+    throw Error('The captured image is too large. Reduce the visible area and try again.');
 
   return {
     dataUrl: `data:image/png;base64,${png.toString('base64')}`,
@@ -616,7 +631,7 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
-}).catch((error) => {
+}).catch(error => {
   console.error('Could not initialize the desktop application.', error);
   app.quit();
 });

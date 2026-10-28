@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Page } from '../types';
 import { generateId } from '../lib/utils';
+import RangeSlider from './RangeSlider';
 import { Search, Pin, MoreHorizontal, Files, Plus, Trash2, Check, ArrowRight, CornerUpRight, AlertTriangle, Download, LoaderCircle, X, Settings2 } from 'lucide-react';
 import { openBoardStorageFolder } from '../lib/storage';
 import { filterAndSortPages } from '../features/home/page-search';
@@ -329,23 +330,11 @@ export default function HomeScreen({ active = true, pages, onOpenPage, onCreateN
           >
             <div>
               <h3 id="visual-settings-title" className="mb-4 text-sm font-bold text-gray-800">Visual</h3>
-              <label htmlFor="global-brightness" className="flex max-w-xl flex-col gap-3">
-                <span className="flex items-center justify-between text-sm font-bold text-gray-600">
-                  <span>Brightness</span>
-                  <span className="tabular-nums text-gray-500">{globalBrightness}%</span>
-                </span>
-                <input
-                  id="global-brightness"
-                  type="range"
-                  min="10"
-                  max="200"
-                  step="5"
-                  value={globalBrightness}
-                  onChange={(event) => setGlobalBrightness(parseInt(event.target.value, 10))}
-                  className="w-full accent-black"
-                  title={`System Brightness: ${globalBrightness}%`}
-                />
-              </label>
+              <div className="flex max-w-xl flex-col gap-3 text-sm font-bold text-gray-600">
+                <span>Brightness</span>
+                <RangeSlider id="global-brightness" ariaLabel="Global brightness" min={10} max={200} step={5}
+                  value={globalBrightness} suffix="%" onChange={setGlobalBrightness} className="w-full" />
+              </div>
             </div>
           </section>
         </div>

@@ -1,15 +1,21 @@
 import React, { useState } from "react";
 import SegmentedControl from "./SegmentedControl";
+import ToggleSwitch from "./ToggleSwitch";
 import { cn } from "../lib/utils";
 import { ChevronDown, Settings2 } from "lucide-react";
 
 export type PreviewMode = "box" | "realistic";
 
 interface MenuSettingsBlockProps {
+  menuId?: string;
   alwaysOnTop: boolean;
   onAlwaysOnTopChange: (value: boolean) => void;
+  alwaysOnTopDisabled?: boolean;
+  alwaysOnTopOnly?: boolean;
   keepToolActive: boolean;
   onKeepToolActiveChange: (value: boolean) => void;
+  ratio?: boolean;
+  onRatioChange?: (value: boolean) => void;
   previewMode: PreviewMode;
   onPreviewModeChange: (value: PreviewMode) => void;
   compact?: boolean;
@@ -24,35 +30,6 @@ interface MenuSettingsBlockProps {
   onPageInteractionWithHandChange?: (value: boolean) => void;
 }
 
-const Toggle = ({
-  checked,
-  narrow = false,
-}: {
-  checked: boolean;
-  narrow?: boolean;
-}) => (
-  <div
-    data-menu-toggle="true"
-    data-state={checked ? "on" : "off"}
-    className={cn(
-      "menu-settings-toggle box-border rounded-full flex items-center transition-colors duration-200 ease-in-out shrink-0 border border-gray-500/60",
-      narrow ? "h-3.5 w-6 p-px" : "h-4 w-7 p-0.5",
-      checked ? "bg-blue-500" : "bg-gray-200",
-    )}
-  >
-    <div
-      className={cn(
-        "menu-settings-toggle-thumb h-3 w-3 bg-white rounded-full shadow-sm transform transition-transform duration-200 ease-in-out",
-        checked
-          ? narrow
-            ? "translate-x-2.5"
-            : "translate-x-3"
-          : "translate-x-0",
-      )}
-    />
-  </div>
-);
-
 /**
  * Shared settings footer for tool menus.
  *
@@ -61,10 +38,15 @@ const Toggle = ({
  * for the global-default/per-tool-override controls.
  */
 const MenuSettingsBlock = ({
+  menuId = "tool",
   alwaysOnTop,
   onAlwaysOnTopChange,
+  alwaysOnTopDisabled = false,
+  alwaysOnTopOnly = false,
   keepToolActive,
   onKeepToolActiveChange,
+  ratio = false,
+  onRatioChange = () => undefined,
   previewMode,
   onPreviewModeChange,
   compact = false,
@@ -79,17 +61,30 @@ const MenuSettingsBlock = ({
   onPageInteractionWithHandChange,
 }: MenuSettingsBlockProps) => {
   const [expanded, setExpanded] = useState(false);
+  const shortcutCategory = menuId === "select" ? "Select"
+    : menuId === "text" ? "Text"
+    : menuId === "shapes" ? "Shapes"
+    : menuId === "draw" ? "Draw"
+    : menuId === "media" ? "Media"
+    : menuId === "embed" ? "Web"
+    : menuId === "grid" ? "Board Settings"
+    : menuId === "table" ? "Spreadsheet"
+    : menuId === "object-presets" ? "Object Presets"
+    : menuId === "link" ? "Object Links"
+    : menuId === "eraser" ? "Eraser"
+    : "Tool Settings";
 
   return (
     <div
+      data-menu-settings-for={menuId}
       data-compact={compact ? "true" : undefined}
       data-narrow={narrow ? "true" : undefined}
       data-menu-settings-height="24"
       className={cn(
         "menu-settings-block relative box-border min-w-0 w-full",
         compact
-          ? "mt-0 border-t-0"
-          : "mt-0 border-t-2 border-gray-300 pt-2",
+          ? "mt-1 border-t border-gray-300 pt-1"
+          : "mt-2 border-t-2 border-gray-300 pt-2",
       )}
     >
       <button
@@ -109,7 +104,7 @@ const MenuSettingsBlock = ({
           className="menu-settings-caption flex min-w-0 items-center gap-2 leading-4"
         >
           <Settings2 className="h-3.5 w-3.5 text-gray-500" />
-          Tool settings
+          Tool Settings
         </span>
         <ChevronDown
           className={cn(
@@ -121,63 +116,99 @@ const MenuSettingsBlock = ({
 
       {expanded && (
         <div
-          className={cn(
-            "menu-settings-content mt-1 w-full min-w-0 max-w-[95vw] overflow-x-hidden overflow-y-hidden rounded-lg pb-1 pt-1",
-            narrow ? "px-1" : "px-2",
-          )}
+          className="menu-settings-content mt-1 w-full min-w-0 max-w-[95vw] overflow-x-hidden overflow-y-hidden rounded-lg pb-1 pt-1"
         >
           <div className="menu-settings-content-inner flex w-full min-w-0 flex-col gap-2">
           {[
-            { label: 'Allow editing elements', value: allowEditing, change: onAllowEditingChange },
-            { label: 'Allow moving elements', value: allowMoving, change: onAllowMovingChange },
-            { label: 'Use page with Select', value: pageInteractionWithSelect, change: onPageInteractionWithSelectChange },
-            { label: 'Use page with Hand', value: pageInteractionWithHand, change: onPageInteractionWithHandChange },
-          ].map(({ label, value, change }) => change ? (
+            { label: 'Allow Editing Elements', key: 'allowEditing', value: allowEditing, change: onAllowEditingChange },
+            { label: 'Allow Moving Elements', key: 'allowMoving', value: allowMoving, change: onAllowMovingChange },
+            { label: 'Use Page With Select', key: 'pageInteractionWithSelect', value: pageInteractionWithSelect, change: onPageInteractionWithSelectChange },
+            { label: 'Use Page With Hand', key: 'pageInteractionWithHand', value: pageInteractionWithHand, change: onPageInteractionWithHandChange },
+          ].map(({ label, key, value, change }) => change ? (
             <button key={label} type="button" aria-pressed={value}
+              data-shortcut-action={`tool:${menuId}:${key}`}
+              data-shortcut-label={label}
+              data-shortcut-category={shortcutCategory}
               onClick={() => change(!value)}
-              className="flex min-h-8 w-full items-center justify-between gap-3 text-left text-xs font-bold text-gray-700">
-              <span>{label}</span><Toggle checked={value} narrow={narrow} />
+              className="settings-row flex min-h-8 w-full items-center justify-between gap-3 text-left text-xs font-bold text-gray-700">
+              <span className="settings-label settings-label-strong">{label}</span><ToggleSwitch checked={value} compact={narrow} />
             </button>
           ) : null)}
           <div
             className={cn(
-              "flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700 select-none",
+              "settings-row flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold select-none",
+              alwaysOnTopDisabled ? "text-gray-400" : "text-gray-700",
               narrow ? "gap-x-1 text-[10px]" : "gap-x-2 text-xs",
             )}
           >
-            <span className="shrink-0 whitespace-nowrap">Always on top</span>
+            <span className={cn("settings-label settings-label-strong min-w-0 flex-1", alwaysOnTopDisabled && "settings-label-disabled")}>Tool Settings Always On Top</span>
             <button
               type="button"
-              aria-label="Always on top"
+              aria-label="Tool Settings Always On Top"
+              aria-pressed={alwaysOnTop}
+              aria-disabled={alwaysOnTopDisabled}
+              disabled={alwaysOnTopDisabled}
+              data-menu-always-on-top={menuId}
+              data-shortcut-action={`tool:${menuId}:alwaysOnTop`}
+              data-shortcut-label="Tool Settings Always On Top"
+              title={alwaysOnTopDisabled ? "More controls whether this menu stays open while the tool is there." : "Keep this tool's settings menu open."}
+              data-shortcut-category={shortcutCategory}
               onClick={(event) => {
                 event.stopPropagation();
                 onAlwaysOnTopChange(!alwaysOnTop);
               }}
-              className="menu-settings-control cursor-pointer"
+              className="menu-settings-control cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <Toggle checked={alwaysOnTop} narrow={narrow} />
+              <ToggleSwitch checked={alwaysOnTop} compact={narrow} />
             </button>
           </div>
 
+          {!alwaysOnTopOnly && <>
           <div
             className={cn(
-              "flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700",
+              "settings-row flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700",
               narrow ? "gap-x-1 text-[10px]" : "gap-x-2 text-xs",
             )}
           >
-            <span className="shrink-0 whitespace-nowrap">Tool mode</span>
-            <SegmentedControl label="Tool mode" narrow={narrow} value={keepToolActive ? 'fixed' : 'unfixed'} onChange={value => onKeepToolActiveChange(value === 'fixed')} options={[{ value: 'unfixed', label: 'Unfixed' }, { value: 'fixed', label: 'Fixed' }]} />
+            <span className="settings-label settings-label-strong min-w-0 flex-1">Keep Tool Active</span>
+            <button type="button" aria-label="Keep Tool Active" aria-pressed={keepToolActive}
+              data-shortcut-action={`tool:${menuId}:keepToolActive`}
+              data-shortcut-label="Keep Tool Active"
+              data-shortcut-category={shortcutCategory}
+              onClick={() => onKeepToolActiveChange(!keepToolActive)} className="menu-settings-control">
+              <ToggleSwitch checked={keepToolActive} compact={narrow} />
+            </button>
+          </div>
+
+          <div className={cn(
+            "settings-row flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700",
+            narrow ? "gap-x-1 text-[10px]" : "gap-x-2 text-xs",
+          )}>
+            <span className="settings-label settings-label-strong min-w-0 flex-1">Ratio</span>
+            <div className="flex shrink-0 items-center gap-1.5">
+              <button type="button" aria-label="Ratio" aria-pressed={ratio}
+                data-shortcut-action={`tool:${menuId}:ratio`}
+                data-shortcut-label="Ratio"
+                data-shortcut-category={shortcutCategory}
+                onClick={() => onRatioChange(!ratio)} className="menu-settings-control">
+                <ToggleSwitch checked={ratio} compact={narrow} />
+              </button>
+            </div>
           </div>
 
           <div
+            data-shortcut-action={`tool:${menuId}:previewMode`}
+            data-shortcut-label="Preview"
+            data-shortcut-category={shortcutCategory}
             className={cn(
-              "flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700",
+              "settings-row flex min-w-0 w-full flex-wrap items-center justify-between gap-y-1 font-bold text-gray-700",
               narrow ? "gap-x-1 text-[10px]" : "gap-x-2 text-xs",
             )}
           >
-            <span className="shrink-0 whitespace-nowrap">Preview</span>
-            <SegmentedControl label="Preview" narrow={narrow} value={previewMode} onChange={onPreviewModeChange} options={[{ value: 'box', label: 'Translucent' }, { value: 'realistic', label: 'True' }]} />
+            <span className="settings-label settings-label-strong shrink-0 whitespace-nowrap">Preview</span>
+            <SegmentedControl label="Preview" narrow={narrow} value={previewMode} onChange={onPreviewModeChange} options={[{ value: 'box', label: 'Area' }, { value: 'realistic', label: 'Object' }]} />
           </div>
+          </>}
           </div>
         </div>
       )}

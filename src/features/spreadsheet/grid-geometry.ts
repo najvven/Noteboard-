@@ -7,6 +7,7 @@ import {
 export const SPREADSHEET_ROW_HEADER_WIDTH = 46;
 export const SPREADSHEET_COLUMN_HEADER_HEIGHT = 20;
 export const SPREADSHEET_BORDER = 2;
+export const SPREADSHEET_SCROLLBAR_GUTTER = 8;
 
 export type SpreadsheetMode = "advanced" | "simple";
 
@@ -206,6 +207,78 @@ export function snapGridObjectSize(
       rows * size.height,
     rows,
     columns,
+  };
+}
+
+/**
+ * Snap the advanced, scrollable sheet viewport to whole cells while reserving
+ * its native scrollbar gutters outside the cell area. Simple sheets use
+ * `snapGridObjectSize` instead because they do not scroll.
+ */
+export function snapAdvancedGridViewportSize(
+  document: WorkbookDocument | null,
+  width: number,
+  height: number,
+  cellSize: { width: number; height: number },
+  options: { rounding?: "nearest" | "floor" } = {},
+) {
+  const sheet = activeWorkbookSheet(document);
+  const size = normalizeCellSize(cellSize.width, cellSize.height);
+  const rounding = options.rounding ?? "nearest";
+  const rowHeaderWidth = sheet?.rowHeader?.hidden === 1
+    ? 0
+    : positiveSize(sheet?.rowHeader?.width, SPREADSHEET_ROW_HEADER_WIDTH);
+  const columnHeaderHeight = sheet?.columnHeader?.hidden === 1
+    ? 0
+    : positiveSize(sheet?.columnHeader?.height, SPREADSHEET_COLUMN_HEADER_HEIGHT);
+  const fixedWidth = SPREADSHEET_BORDER + rowHeaderWidth;
+  const fixedHeight = SPREADSHEET_BORDER + columnHeaderHeight;
+  const full = document
+    ? gridObjectSize(document)
+    : {
+        width: fixedWidth + 26 * size.width,
+        height: fixedHeight + 1000 * size.height,
+      };
+  const rowCount = sheet ? finiteCount(sheet.rowCount, MAX_ROWS) : 1000;
+  const columnCount = sheet ? finiteCount(sheet.columnCount, MAX_COLUMNS) : 26;
+  const count = (extent: number, inset: number, step: number, maximum: number) => {
+    const raw = (Number.isFinite(extent) ? extent : inset + step) - inset;
+    const units = raw / step;
+    const rounded = rounding === "floor" ? Math.floor(units) : Math.round(units);
+    return Math.max(1, Math.min(maximum, Number.isFinite(rounded) ? rounded : 1));
+  };
+
+  let verticalScrollbar = false;
+  let horizontalScrollbar = false;
+  let columns = 1;
+  let rows = 1;
+  for (let pass = 0; pass < 3; pass += 1) {
+    columns = count(
+      width,
+      fixedWidth + (verticalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+      size.width,
+      columnCount,
+    );
+    rows = count(
+      height,
+      fixedHeight + (horizontalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+      size.height,
+      rowCount,
+    );
+    const nextHorizontal = full.width > fixedWidth + columns * size.width + 0.5;
+    const nextVertical = full.height > fixedHeight + rows * size.height + 0.5;
+    if (nextHorizontal === horizontalScrollbar && nextVertical === verticalScrollbar) break;
+    horizontalScrollbar ||= nextHorizontal;
+    verticalScrollbar ||= nextVertical;
+  }
+
+  return {
+    width: fixedWidth + columns * size.width + (verticalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+    height: fixedHeight + rows * size.height + (horizontalScrollbar ? SPREADSHEET_SCROLLBAR_GUTTER : 0),
+    rows,
+    columns,
+    horizontalScrollbar,
+    verticalScrollbar,
   };
 }
 

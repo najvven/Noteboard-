@@ -1,10 +1,9 @@
 export const TOOLBAR_ITEM_IDS = [
   "generalSettings",
-  "toolDefaults",
+  "zoom",
   "presetSettings",
   "behaviorSettings",
   "shortcutSettings",
-  "zoom",
   "select",
   "pan",
   "text",
@@ -33,7 +32,6 @@ export type ToolbarItemId = (typeof TOOLBAR_ITEM_IDS)[number];
  */
 export const GENERAL_SETTINGS_SECTION_IDS = [
   "grid",
-  "toolDefaults",
   "presetSettings",
   "behaviorSettings",
   "shortcutSettings",
@@ -67,6 +65,7 @@ export const BUILT_IN_MORE_TOOL_IDS = [
 ] as const satisfies readonly ToolbarItemId[];
 
 export const TOOLBAR_OVERFLOW_ITEM_IDS = [
+  "zoom",
   ...BUILT_IN_MORE_TOOL_IDS,
   "select",
   "pan",
@@ -258,8 +257,8 @@ const TOOLBAR_ITEM_SET = new Set<ToolbarItemId>(TOOLBAR_ITEM_IDS);
 export const DEFAULT_TOOLBAR_LAYOUT: ToolbarLayout = {
   order: [
     "generalSettings",
-    ...GENERAL_SETTINGS_SECTION_IDS.filter((id) => id !== "grid"),
     "zoom",
+    ...GENERAL_SETTINGS_SECTION_IDS.filter((id) => id !== "grid"),
     "select",
     "pan",
     "text",
@@ -314,10 +313,19 @@ export const normalizeToolbarLayout = (
 
   const persistedOrder = uniqueValidIds(layout.order);
   const persistedMore = uniqueValidIds(layout.more);
-  const completeOrder = [
-    ...persistedOrder,
-    ...DEFAULT_TOOLBAR_LAYOUT.order.filter((id) => !persistedOrder.includes(id)),
-  ];
+  const completeOrder = [...persistedOrder];
+  DEFAULT_TOOLBAR_LAYOUT.order
+    .filter((id) => !persistedOrder.includes(id))
+    .forEach((id) => {
+      // Restore the dedicated Zoom tool beside General Settings for older
+      // persisted layouts without disturbing a user's other toolbar order.
+      if (id === "zoom") {
+        const settingsIndex = completeOrder.indexOf("generalSettings");
+        completeOrder.splice(settingsIndex < 0 ? completeOrder.length : settingsIndex + 1, 0, id);
+      } else {
+        completeOrder.push(id);
+      }
+    });
   const order = completeOrder;
   const persistedMoreAllowed = persistedMore.filter((id) =>
     canMoveToolbarItemToMore(id),

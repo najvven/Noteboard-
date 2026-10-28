@@ -118,11 +118,19 @@ export function SheetRibbon({ targetId }: SheetRibbonProps) {
       layoutStyle.textContent = `
         :host { display: block; min-width: 0; }
         [data-sheet-ribbon-mount] { min-width: 0; overflow: visible; }
+        [data-u-comp="rect-popup"] {
+          box-sizing: border-box; max-width: calc(100vw - 16px);
+          max-height: min(65vh, 520px); overflow-x: hidden !important;
+          overflow-y: auto !important; overscroll-behavior: contain;
+          scrollbar-width: thin;
+        }
         [data-sheet-ribbon-mount] [data-u-comp="ribbon-header-menu"] {
           width: 100%; min-width: 0; height: auto !important;
         }
         [data-sheet-ribbon-mount] [data-u-comp="ribbon-grid-menu"] {
-          height: auto !important; max-height: none; overflow: visible !important;
+          height: auto !important; max-height: min(55vh, 460px) !important;
+          overflow-x: hidden !important; overflow-y: auto !important;
+          scrollbar-width: thin;
           flex-direction: row; flex-wrap: wrap; align-items: stretch; padding: 4px 0;
         }
         [data-sheet-ribbon-mount] [data-u-comp="ribbon-grid-menu"] > button {

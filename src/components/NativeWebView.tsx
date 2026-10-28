@@ -6,6 +6,10 @@ interface GuestElement extends HTMLElement {
   getWebContentsId(): number;
   getURL(): string;
   loadURL(url: string): Promise<void>;
+  canGoBack?(): boolean;
+  canGoForward?(): boolean;
+  goBack?(): void;
+  goForward?(): void;
 }
 
 type Props = {
@@ -14,11 +18,13 @@ type Props = {
   src: string;
   partition: string;
   deviceMode: NonNullable<BoardElement['webDeviceMode']>;
+  fullscreenMode: NonNullable<BoardElement['webFullscreenMode']>;
   interactive: boolean;
   guestRef: React.MutableRefObject<any>;
   onReady: () => void;
   onLoading: () => void;
   onNavigate: (url: string) => void;
+  onHistoryChange: (history: { back: boolean; forward: boolean }) => void;
   onError: (message: string) => void;
 };
 
@@ -30,6 +36,7 @@ export default function NativeWebView(props: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const latest = useRef(props);
   latest.current = props;
+  const attachedRef = useRef(false);
   const requestNavigation = useRef<(() => void) | null>(null);
   const committedUrl = useRef('');
   const fullscreenRequestPending = useRef(false);
@@ -40,6 +47,17 @@ export default function NativeWebView(props: Props) {
     if (!viewport || !guest) return;
     let disposed = false, attached = false, initialized = false, failedNavigation = false;
     let lastRequested = '', pendingFrame = 0;
+    const updateHistory = () => {
+      if (disposed) return;
+      try {
+        latest.current.onHistoryChange({
+          back: guest.canGoBack?.() ?? false,
+          forward: guest.canGoForward?.() ?? false,
+        });
+      } catch {
+        latest.current.onHistoryChange({ back: false, forward: false });
+      }
+    };
     const reportError = (error: unknown) => {
       if (!disposed) latest.current.onError(error instanceof Error ? error.message : 'The page could not be loaded.');
     };
@@ -64,12 +82,14 @@ export default function NativeWebView(props: Props) {
       const applied = await api.configureWebViewport({
         guestId: guest.getWebContentsId(), deviceMode: latest.current.deviceMode,
         width: viewport.clientWidth, height: viewport.clientHeight,
+        fullscreenMode: latest.current.fullscreenMode,
       });
       if (!applied) throw new Error('Could not configure the Web viewport.');
       return !disposed;
     };
     const ready = async () => {
       attached = true;
+      attachedRef.current = true;
       try {
         if (!await configure()) return;
         if (!initialized) {
@@ -98,6 +118,7 @@ export default function NativeWebView(props: Props) {
       guest.setAttribute('data-web-requested-url', url);
       guest.removeAttribute('data-web-navigation-pending');
       latest.current.onNavigate(url);
+      updateHistory();
     };
     const started = () => { if (initialized) latest.current.onLoading(); };
     const navigationStarted = (event: any) => {
@@ -128,7 +149,7 @@ export default function NativeWebView(props: Props) {
     };
     const crashed = () => reportError('The Web page stopped responding. Please retry.');
     const enterFullscreen = () => {
-      fullscreenRequestPending.current = true;
+      fullscreenRequestPending.current = latest.current.fullscreenMode === 'real';
       setGuestFullscreen(true);
     };
     const leaveFullscreen = () => {
@@ -142,6 +163,7 @@ export default function NativeWebView(props: Props) {
     guest.addEventListener('dom-ready', ready);
     guest.addEventListener('did-navigate', navigated);
     guest.addEventListener('did-navigate-in-page', navigated);
+    guest.addEventListener('did-finish-load', updateHistory);
     guest.addEventListener('did-start-loading', started);
     guest.addEventListener('did-start-navigation', navigationStarted);
     guest.addEventListener('did-redirect-navigation', navigationRedirected);
@@ -156,6 +178,7 @@ export default function NativeWebView(props: Props) {
     window.visualViewport?.addEventListener('resize', resized);
     return () => {
       disposed = true;
+      attachedRef.current = false;
       requestNavigation.current = null;
       cancelAnimationFrame(pendingFrame);
       observer.disconnect();
@@ -164,6 +187,7 @@ export default function NativeWebView(props: Props) {
       guest.removeEventListener('dom-ready', ready);
       guest.removeEventListener('did-navigate', navigated);
       guest.removeEventListener('did-navigate-in-page', navigated);
+      guest.removeEventListener('did-finish-load', updateHistory);
       guest.removeEventListener('did-start-loading', started);
       guest.removeEventListener('did-start-navigation', navigationStarted);
       guest.removeEventListener('did-redirect-navigation', navigationRedirected);
@@ -174,6 +198,20 @@ export default function NativeWebView(props: Props) {
       document.removeEventListener('fullscreenchange', syncHostFullscreen);
     };
   }, []);
+
+  useLayoutEffect(() => {
+    const guest = props.guestRef.current as GuestElement | null;
+    const viewport = viewportRef.current;
+    const api = window.noteboardAPI;
+    if (!attachedRef.current || !guest || !viewport || !api?.configureWebViewport) return;
+    void api.configureWebViewport({
+      guestId: guest.getWebContentsId(),
+      deviceMode: props.deviceMode,
+      width: viewport.clientWidth,
+      height: viewport.clientHeight,
+      fullscreenMode: props.fullscreenMode,
+    }).catch(error => props.onError(error instanceof Error ? error.message : 'Could not update Web fullscreen mode.'));
+  }, [props.deviceMode, props.fullscreenMode]);
 
   useLayoutEffect(() => {
     if (!guestFullscreen || !fullscreenRequestPending.current) return;
@@ -189,11 +227,11 @@ export default function NativeWebView(props: Props) {
       setGuestFullscreen(false);
       console.warn('Could not enter Web fullscreen.', error);
     });
-  }, [guestFullscreen]);
+  }, [guestFullscreen, props.fullscreenMode]);
 
   useLayoutEffect(() => { requestNavigation.current?.(); }, [props.src]);
 
-  return <div ref={viewportRef} data-web-viewport={props.deviceMode} className="relative h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-white">
+  return <div ref={viewportRef} data-web-viewport={props.deviceMode} data-web-fullscreen-mode={props.fullscreenMode} className="relative h-full w-full min-h-0 min-w-0 flex-1 overflow-hidden bg-white">
     {React.createElement('webview', {
       ref: props.guestRef, src: 'about:blank', partition: props.partition, allowpopups: 'true',
       'data-web-element-id': props.elementId, 'data-web-requested-url': props.src,

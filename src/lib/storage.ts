@@ -54,7 +54,7 @@ interface NoteboardDesktopApi {
   saveSettings: (settings: { brightness: number }) => Promise<boolean>;
   openBoardsFolder: () => Promise<string>;
   configureWebSession: (payload: WebSessionPayload) => Promise<boolean>;
-  configureWebViewport: (payload: { guestId: number; deviceMode: string; width: number; height: number }) => Promise<boolean>;
+  configureWebViewport: (payload: { guestId: number; deviceMode: string; width: number; height: number; fullscreenMode?: 'area' | 'real' }) => Promise<boolean>;
   getWebHostZoom: () => number;
   enterWebFullscreen: (guestId: number) => Promise<boolean>;
   sampleBoardColor: (point:{x:number;y:number})=>Promise<string>;

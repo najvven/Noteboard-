@@ -12,12 +12,14 @@ import {
 } from '../features/shortcuts/model';
 import {selectedBounds, selectElementsInOutline, selectionOutline, createSelectionArea} from '../features/board/selection';
 import {mergeAreaElements,ungroupAreaElements,updateMergedGroup,isMergedGroupMember,localGroupElement} from '../features/board/grouping';
-import {smartGuides,type SmartGuide} from '../features/board/smart-guides';
+import {smartGuides,type SmartGuide,type SmartGuideOptions} from '../features/board/smart-guides';
+import { guessClosedDrawingShape } from '../features/board/drawing-assistance';
 import SmartGuidesOverlay,{type SmartGuidesHandle} from './SmartGuidesOverlay';
 import {
   Page,
   BoardElement,
   BoardEditorSettings,
+  CustomSettingShortcutBinding,
   ElementType,
   Preset,
   SectionSheet,
@@ -70,6 +72,10 @@ import WebBlockingBadge from "./WebBlockingBadge";
 import NativeWebView from "./NativeWebView";
 import { WEB_DEVICE_PROFILES, normalizeWebDeviceMode } from "../../shared/web-device.js";
 import SegmentedControl from "./SegmentedControl";
+import RangeSlider from "./RangeSlider";
+import NumericField from "./NumericField";
+import ToggleSwitch from "./ToggleSwitch";
+import { useDraggablePanel } from "./useDraggablePanel";
 import { readBoardClipboard, writeBoardClipboard, isClipboardTextTarget, readCurrentClipboard, copyBoardToSystem, placeClipboardElements, ClipboardLimitError, type ClipboardContents, type ClipboardRegion } from "../features/board/clipboard";
 import { boardMemberIds, resizeMainBoard, type MainBoardGeometry } from "../features/board/board-resize";
 import { anchoredZoomScroll, clampZoom } from "../features/board/zoom";
@@ -87,7 +93,7 @@ import {
   type PendingBoardSave,
   type StableBoardRevision,
 } from '../features/board/save-snapshot';
-import {gridObjectSize, snapGridObjectSize, fitGridObjectSize, fitSimpleGridSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
+import {gridObjectSize, snapGridObjectSize, snapAdvancedGridViewportSize, fitGridObjectSize, fitSimpleGridSize, spreadsheetMode as getSpreadsheetMode, type SpreadsheetMode} from '../features/spreadsheet/grid-geometry';
 import {createSimpleWorkbook, resizeSimpleWorkbook} from '../features/spreadsheet/simple-workbook';
 
 const isSpreadsheetPanelEvent=(event:Event)=>event.composedPath().some(target=>target instanceof Element && Boolean(target.closest('[data-spreadsheet-panel]')));
@@ -148,6 +154,7 @@ import {
   LassoSelect,
   Ruler,
   ArrowLeft,
+  ArrowRight,
   Undo2,
   Redo2,
   Plus,
@@ -170,9 +177,9 @@ import {
   Palette,
   Copy,
   ClipboardPaste,
-  Save,
   Trash2,
   Settings2,
+  Settings as Gear,
   Download,
   MousePointer2,
   ChevronDown,
@@ -215,7 +222,6 @@ import {
   Cookie,
   RotateCcw,
   Ellipsis,
-  Wrench,
 } from "lucide-react";
 import { motion, AnimatePresence, useDragControls } from "motion/react";
 
@@ -352,6 +358,7 @@ const SHAPE_TYPES = [
 
 interface Props {
   page: Page;
+  globalBrightness?: number;
   onBack: () => void;
   onSave: (page: Page, options?: { keepalive?: boolean; baseRevision?: number | null; recoveryPredecessor?: Page }) => void | boolean | Promise<void | boolean>;
   /** Persist a duplicate board without replacing the currently open board. */
@@ -390,8 +397,30 @@ type WebCookieBlockerMode = "off" | "third-party" | "all";
 
 const WEB_COOKIE_BLOCKER_LABELS: Record<WebCookieBlockerMode, string> = {
   off: "Off",
-  "third-party": "Third-party",
+  "third-party": "External",
   all: "All",
+};
+
+const SHORTCUT_ACTION_DESCRIPTIONS: Record<string, string> = {
+  "editor:crop": "Hold the assigned key while dragging with the left mouse button to crop during resize.",
+  "editor:zoomToCursor": "Choose whether zoom centers on the pointer or the board center.",
+  "editor:objectSnapping": "Align selected objects to nearby object edges and centers.",
+  "editor:showGuides": "Show or hide alignment and measurement guides while editing.",
+  "editor:smartGuideDensity": "Choose how many nearby guides can appear at once.",
+  "editor:keepBoardContentPosition": "Keep element positions fixed while adding or removing board space.",
+  "editor:lockInTime": "Toggle the Select tool's timed selection lock.",
+  "editor:spinSnap": "Toggle rotation snapping for selected objects.",
+  "editor:autoSelectAfterPlacing": "Select the object after it has been placed.",
+  "editor:switchToolAfterPlacing": "Switch to the chosen object's tool after placing it from Quick Add.",
+  "editor:selectSwitchesToObjectTool": "Switch to the matching tool after selecting an object.",
+  "editor:mediaDisabled": "Stop this media object from loading or playing while it stays on the board.",
+  "editor:mediaControlsHidden": "Show or hide the selected media object's controls.",
+  "web:fullscreenMode": "Choose fullscreen inside the Web field or real app fullscreen.",
+  "web:controlsHidden": "Show or hide the selected Web field's controls.",
+  "web:popupBlocker": "Allow or block popup windows opened by this Web field.",
+  "web:adBlock": "Allow or block known ads and tracking requests.",
+  "web:cookieBlocker": "Choose which cookies this Web field can store or send.",
+  "editor:fillMode": "Choose between visible-area fill and recoloring one object.",
 };
 
 const getWebSettings = (element: Partial<BoardElement>) => ({
@@ -400,6 +429,8 @@ const getWebSettings = (element: Partial<BoardElement>) => ({
   adBlock: element.webAdBlock !== false,
   cookieBlocker: (element.webCookieBlocker || "off") as WebCookieBlockerMode,
   popupBlocker: element.webPopupBlocker === true,
+  fullscreenMode: element.webFullscreenMode === "real" ? "real" as const : "area" as const,
+  controlsHidden: element.webControlsHidden === true,
 });
 
 const getWebSessionId = (element: Partial<BoardElement>) =>
@@ -425,6 +456,8 @@ const getWebElementDefaults = (
     webAdBlock: settings.adBlock,
     webCookieBlocker: settings.cookieBlocker,
     webPopupBlocker: settings.popupBlocker,
+    webFullscreenMode: settings.fullscreenMode,
+    webControlsHidden: settings.controlsHidden,
   };
 };
 
@@ -457,12 +490,11 @@ const TOOLBAR_ITEMS: {
   icon: React.ElementType;
   slots?: number;
 }[] = [
-  { id: "generalSettings", label: "General", icon: Settings2 },
-  { id: "toolDefaults", label: "Global Tool Settings", icon: Wrench },
+  { id: "generalSettings", label: "Settings", icon: Settings2 },
+  { id: "zoom", label: "Zoom", icon: ZoomIn },
   { id: "presetSettings", label: "Presets", icon: ClipboardPaste },
   { id: "behaviorSettings", label: "Behavior", icon: Shield },
   { id: "shortcutSettings", label: "Shortcuts", icon: Keyboard },
-  { id: "zoom", label: "Zoom", icon: ZoomIn },
   { id: "select", label: "Select", icon: MousePointer2, slots: 2 },
   { id: "pan", label: "Hand", icon: Hand, slots: 2 },
   { id: "text", label: "Text", icon: Type, slots: 2 },
@@ -498,11 +530,6 @@ const SETTINGS_SECTIONS: {
     icon: BoardSettingsIcon,
   },
   {
-    id: "toolDefaults",
-    label: "Global Tool Settings",
-    icon: Wrench,
-  },
-  {
     id: "presetSettings",
     label: "Presets",
     icon: ClipboardPaste,
@@ -514,7 +541,7 @@ const SETTINGS_SECTIONS: {
   },
   {
     id: "shortcutSettings",
-    label: "Shortcuts & Zoom",
+    label: "Shortcuts",
     icon: Keyboard,
   },
 ];
@@ -525,6 +552,7 @@ const SETTINGS_SECTION_BY_ID = new Map(
 
 type GeneralSettingsAccordionId =
   | "toolbarCustomization"
+  | "zoomSettings"
   | "alignmentGuides"
   | GeneralSettingsSectionId;
 
@@ -1052,6 +1080,7 @@ export const handleImageUpload = (
 
 export default function BoardEditor({
   page,
+  globalBrightness = 100,
   onBack,
   onSave,
   onSaveAs,
@@ -1392,14 +1421,51 @@ export default function BoardEditor({
     }).catch(reason=>setSpreadsheetSizeError(reason instanceof Error?reason.message:'Could not change cell size.'));
   };
 
-  const [keepToolActive, setKeepToolActive] = useState(
-    initialEditorSettings.keepToolActive ?? true,
-  );
   const [keepToolActiveFallback, setKeepToolActiveFallback] = useState<
     "select" | "pan"
   >(initialEditorSettings.keepToolActiveFallback ?? "select");
   const [toolModeShortcut, setToolModeShortcut] = useState(
     initialEditorSettings.toolModeShortcut ?? "F",
+  );
+  const [previewShortcut, setPreviewShortcut] = useState(
+    initialEditorSettings.previewShortcut ?? "",
+  );
+  const [activeToolRatioShortcut, setActiveToolRatioShortcut] = useState(
+    initialEditorSettings.activeToolRatioShortcut ?? "",
+  );
+  const [shortcutAssignmentMode, setShortcutAssignmentMode] = useState(false);
+  const [shortcutAssignmentError, setShortcutAssignmentError] = useState("");
+  const [customSettingShortcuts, setCustomSettingShortcuts] = useState(() =>
+    (initialEditorSettings.customSettingShortcuts ?? []).flatMap((binding) => {
+      let target = binding.target;
+      let label = binding.label;
+      let category = binding.category;
+      if (target === "global:keepToolActiveFallback") {
+        target = "settings:keepToolActiveFallback";
+        label = "Fallback Tool";
+        category = "Settings";
+      } else if (target === "global:keepToolActive") {
+        target = "activeTool:keepToolActive";
+        label = "Keep Tool Active";
+        category = "Active Tool";
+      } else if (target === "global:previewMode") {
+        target = "activeTool:previewMode";
+        label = "Preview";
+        category = "Active Tool";
+      } else if (target.startsWith("global:")) {
+        return [];
+      } else if (target === "editor:autoSelectAfterDraw") {
+        target = "editor:autoSelectAfterPlacing";
+        label = "Auto Select After Placing";
+      }
+      if (category === "Global Tool Settings") category = "Active Tool";
+      if (category === "Guides" || category === "Guides & measurements") category = "Guides & Measurements";
+      if (target === "editor:crop") { label = "Crop (+ LMB)"; category = "Settings"; }
+      if (target === "editor:zoomToCursor" || target === "editor:objectSnapping") category = "Settings";
+      if (target === "editor:lockInTime") label = "Lock Time (ms)";
+      if (target === "editor:spinSnap") label = "Spin Snap (deg)";
+      return [{ ...binding, target, label, category }];
+    }),
   );
   const [gridToggleShortcut, setGridToggleShortcut] = useState(
     initialEditorSettings.gridToggleShortcut ?? "B",
@@ -1419,6 +1485,8 @@ export default function BoardEditor({
   );
   const [recordingShortcut, setRecordingShortcut] = useState<
     | "toolMode"
+    | "preview"
+    | "activeRatio"
     | "gridToggle"
     | "overlap"
     | "crop"
@@ -1428,19 +1496,14 @@ export default function BoardEditor({
   >(null);
   const [recordingPresetShortcutId, setRecordingPresetShortcutId] =
     useState<string | null>(null);
+  const [recordingCustomShortcutId, setRecordingCustomShortcutId] = useState<string | null>(null);
   const [, setShowToolFallbackDropdown] = useState(false);
-  const [proportionalScale, setProportionalScale] = useState(
-    initialEditorSettings.proportionalScale ?? false,
-  );
   const [altResizeCrops, setAltResizeCrops] = useState(
     initialEditorSettings.altResizeCrops ?? true,
   );
   const [isAltKeyDown, setIsAltKeyDown] = useState(false);
-  const [previewMode, setPreviewMode] = useState<"box" | "realistic">(
-    initialEditorSettings.previewMode ?? "box",
-  );
-  const [alwaysOnTop, setAlwaysOnTop] = useState(
-    initialEditorSettings.alwaysOnTop ?? false,
+  const [mediaPlaybackDisabled, setMediaPlaybackDisabled] = useState(
+    initialEditorSettings.mediaPlaybackDisabled ?? false,
   );
   const [toolSettingsOverrides, setToolSettingsOverrides] = useState<ToolMenuSettingsOverrides>(
     initialEditorSettings.toolMenuSettingsOverrides ?? {},
@@ -1451,9 +1514,6 @@ export default function BoardEditor({
   const [selectionLockTime, setSelectionLockTime] = useState(
     initialEditorSettings.selectionLockTime ?? 250,
   );
-  const [selectionLockTimeInput, setSelectionLockTimeInput] = useState(
-    String(initialEditorSettings.selectionLockTime ?? 250),
-  );
   const [isHoldingToCreate, setIsHoldingToCreate] = useState(false);
   const holdingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showGrid, setShowGrid] = useState(page.showGrid ?? false);
@@ -1462,12 +1522,21 @@ export default function BoardEditor({
     initialEditorSettings.enableObjectSnapping ?? true,
   );
   const [smartGuidesEnabled,setSmartGuidesEnabled]=useState(initialEditorSettings.smartGuidesEnabled??true);
+  const [smartGuideDensity, setSmartGuideDensity] = useState<"low" | "mid" | "high">(initialEditorSettings.smartGuideDensity ?? "mid");
+  const [smartGuideAlignment, setSmartGuideAlignment] = useState(initialEditorSettings.smartGuideAlignment ?? true);
+  const [smartGuideDistances, setSmartGuideDistances] = useState(initialEditorSettings.smartGuideDistances ?? true);
+  const [smartGuideRatios, setSmartGuideRatios] = useState(initialEditorSettings.smartGuideRatios ?? false);
+  const [smartGuideAngles, setSmartGuideAngles] = useState(initialEditorSettings.smartGuideAngles ?? false);
   const guidesOverlayRef=useRef<SmartGuidesHandle>(null);
   const setVisibleGuides=(guides:SmartGuide[])=>guidesOverlayRef.current?.setGuides(guides);
+  const getSmartGuideOptions=():SmartGuideOptions=>({
+    density:smartGuideDensity,alignment:smartGuideAlignment,distances:smartGuideDistances,ratios:smartGuideRatios,angles:smartGuideAngles,
+  });
   const [activeTool, _setActiveTool] = useState<string>(
     ["lasso", "polygon-select", "crop", "eyedropper"].includes(initialEditorSettings.activeTool ?? "") ? "select" : initialEditorSettings.activeTool ?? "select",
   );
   const [selectMode, setSelectMode] = useState<SelectMode>(() => initialSelectMode(initialEditorSettings.selectMode, initialEditorSettings.activeTool));
+  const [selectMinimumCell, setSelectMinimumCell] = useState(initialEditorSettings.selectMinimumCell ?? true);
   const SelectIcon = selectMode === "lasso" ? Lasso : selectMode === "polygon" ? LassoSelect : MousePointer2;
   const setActiveTool = (tool: string) => {
     if (activeTool !== tool) {
@@ -1499,7 +1568,7 @@ export default function BoardEditor({
     initialEditorSettings.autoSelectOnPlace ?? true,
   );
   const [switchToolAfterPlacing, setSwitchToolAfterPlacing] = useState(
-    initialEditorSettings.switchToolAfterPlacing ?? false,
+    initialEditorSettings.switchToolAfterPlacing ?? true,
   );
   const [autoToolOnSelect, setAutoToolOnSelect] = useState(
     initialEditorSettings.autoToolOnSelect ?? false,
@@ -1525,6 +1594,9 @@ export default function BoardEditor({
   );
   const [fillToolColor, setFillToolColor] = useState<string>(
     initialEditorSettings.fillToolColor ?? '#000000',
+  );
+  const [fillMode, setFillMode] = useState<'area' | 'object'>(
+    initialEditorSettings.fillMode ?? 'area',
   );
   const [fillNotice, setFillNotice] = useState("");
   const fillNoticeTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
@@ -1560,15 +1632,24 @@ export default function BoardEditor({
   );
   const expandedMoreToolsRef = useRef<Set<string>>(new Set());
   const [showObjectPresetsPanel, setShowObjectPresetsPanel] = useState(false);
+  const [objectPresetsPanelAlwaysOnTop, setObjectPresetsPanelAlwaysOnTop] = useState(
+    initialEditorSettings.objectPresetsPanelAlwaysOnTop ?? false,
+  );
+  const { panelRef: objectPresetsPanelRef, panelStyle: objectPresetsPanelStyle, dragHandleProps: objectPresetsDragHandleProps } = useDraggablePanel<HTMLDivElement>();
   const [pickingObjectPresetId, setPickingObjectPresetId] = useState<
     string | null
   >(null);
-  const [objectDefaultsSaved, setObjectDefaultsSaved] = useState(false);
+  const [presetSelectionCandidateId, setPresetSelectionCandidateId] = useState<string | null>(null);
+  const selectionBeforePresetPickingRef = useRef<string[]>([]);
+  const cancelObjectPresetPicking = () => {
+    if (!pickingObjectPresetId) return;
+    setPickingObjectPresetId(null);
+    setPresetSelectionCandidateId(null);
+    setSelectedIds(selectionBeforePresetPickingRef.current);
+  };
+  const [savedObjectDefaultsSignature, setSavedObjectDefaultsSignature] = useState<string | null>(null);
   const [objectDuplicated, setObjectDuplicated] = useState(false);
   const objectDuplicatedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const objectDefaultsSavedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
   const [objectPresets, setObjectPresets] = useState<ObjectPreset[]>(
     initialEditorSettings.objectPresets ?? [],
   );
@@ -1769,6 +1850,8 @@ export default function BoardEditor({
   activeToolRef.current = activeTool;
   const fillToolColorRef = useRef(fillToolColor);
   fillToolColorRef.current = fillToolColor;
+  const fillModeRef = useRef(fillMode);
+  fillModeRef.current = fillMode;
 
   const [dragOverLayerId, setDragOverLayerId] = useState<string | null>(null);
   const [draggingLayerId, setDraggingLayerId] = useState<string | null>(null);
@@ -1951,16 +2034,7 @@ export default function BoardEditor({
     return()=>clearTimeout(timer);
   },[title,boardColor,gridColor,gridSize,gridThickness,showGrid,snapToGrid,showWorkspaceGrid,workspaceGridColor,workspaceGridThickness,workspaceGridSize]);
   const [showBoardSaveModal, setShowBoardSaveModal] = useState(false);
-  const [showSaveModal, setShowSaveModal] = useState(false);
   const pendingSaveAsRef = useRef<{ kind: SaveAsKind; name: string; sourceFingerprint: string; value: Page | Preset } | null>(null);
-  const pendingPresetRef = useRef<Preset | null>(null);
-  const [presetSaving, setPresetSaving] = useState(false);
-  const [presetSaveError, setPresetSaveError] = useState('');
-  const [presetName, setPresetName] = useState(
-    `${page.title || "Custom"} Preset`,
-  );
-  const [presetSettingsChecked, setPresetSettingsChecked] = useState(true);
-  const [presetContentChecked, setPresetContentChecked] = useState(true);
 
 
 
@@ -2026,6 +2100,7 @@ export default function BoardEditor({
       const sourceElements = elementsRef.current;
       const layerAtStart = currentLayerView;
       const fillColorAtStart = fillToolColor;
+      const fillModeAtStart = fillMode;
       const targetSurface = getBoardElementAtPoint(point) ?? findBoardSurface(point, [mainSurface]);
       if (!targetSurface) return;
       if (targetSurface.id !== mainSurface.id && elementHierarchy.isLocked(targetSurface.id)) {
@@ -2047,6 +2122,32 @@ export default function BoardEditor({
           updateElement(surface.id, { color });
         }
       };
+
+      if (fillModeAtStart === "object") {
+        const target = sourceElements.slice().reverse().find((element) => {
+          if (element.type === "board" || element.type === "layer" || element.type === "group" ||
+              element.isEraser || element.opacity === 0 || elementHierarchy.isLocked(element.id) ||
+              !elementHierarchy.isVisible(element.id, respectLayerVisibility)) return false;
+          return isElementHitAtPoint(element, point);
+        });
+        if (target) {
+          const supportedColors = elementColors(target.type);
+          const update = supportedColors.text && !["sticky", "section"].includes(target.type)
+            ? { textColor: fillColorAtStart }
+            : supportedColors.fill
+              ? { color: fillColorAtStart }
+              : supportedColors.stroke
+                ? { borderColor: fillColorAtStart }
+                : null;
+          if (!update) showFillNotice("This object cannot be recolored with Fill.");
+          else if (Object.entries(update).some(([key, value]) => target[key as keyof BoardElement] !== value)) {
+            updateElement(target.id, update);
+          }
+          return;
+        }
+        fillSurfaceBackground(targetSurface, fillColorAtStart);
+        return;
+      }
 
       // A truly empty surface has one visible connected region, so changing its
       // color is equivalent to a raster fill. Once any content is visible, use
@@ -2168,6 +2269,7 @@ export default function BoardEditor({
         boardSurfaceRef.current !== captureRoot || containerRef.current !== viewport ||
         zoomRef.current !== boardScale || activeToolRef.current !== "fill" ||
         currentLayerViewRef.current !== layerAtStart || fillToolColorRef.current !== fillColorAtStart ||
+        fillModeRef.current !== fillModeAtStart ||
         elementsRef.current !== sourceElements ||
         presentationRef.current.boardColor !== boardColorAtStart ||
         viewport!.scrollLeft !== scrollAtStart.left || viewport!.scrollTop !== scrollAtStart.top ||
@@ -2350,14 +2452,16 @@ export default function BoardEditor({
     workspaceGridSize,
     activeTool,
     selectMode,
+    selectMinimumCell,
     spreadsheetCellSize,
     spreadsheetMode,
     customColors,
     pendingProps,
-    keepToolActive,
-    alwaysOnTop,
     keepToolActiveFallback,
     toolModeShortcut,
+    previewShortcut,
+    activeToolRatioShortcut,
+    customSettingShortcuts,
     gridToggleShortcut,
     overlapShortcut,
     cropShortcut,
@@ -2365,14 +2469,19 @@ export default function BoardEditor({
     zoomToCursor,
     keepBoardContentPosition,
     cutShortcut,
-    proportionalScale,
     altResizeCrops,
-    previewMode,
+    mediaPlaybackDisabled,
+    objectPresetsPanelAlwaysOnTop,
     toolSettingsOverrides,
     isSelectionLockEnabled,
     selectionLockTime,
     enableObjectSnapping,
     smartGuidesEnabled,
+    smartGuideDensity,
+    smartGuideAlignment,
+    smartGuideDistances,
+    smartGuideRatios,
+    smartGuideAngles,
     autoSelectOnPlace,
     switchToolAfterPlacing,
     autoToolOnSelect,
@@ -2381,6 +2490,7 @@ export default function BoardEditor({
     allowEditing,
     allowMovingElementsInPan,
     fillToolColor,
+    fillMode,
     eraserMode,
     eraserSize,
     eraserShape,
@@ -2562,6 +2672,8 @@ export default function BoardEditor({
   const renderShortcutRecorder = (
     target:
       | "toolMode"
+      | "preview"
+      | "activeRatio"
       | "gridToggle"
       | "overlap"
       | "crop"
@@ -2569,9 +2681,12 @@ export default function BoardEditor({
       | "cut",
     value: string,
     onChange: (value: string) => void,
+    disabled = false,
+    description = "Click, then press a key or key combination to assign this shortcut.",
   ) => (
     <button
       type="button"
+      disabled={disabled}
       onClick={(e) => {
         e.stopPropagation();
         e.currentTarget.focus();
@@ -2597,23 +2712,87 @@ export default function BoardEditor({
         setRecordingShortcut(null);
       }}
       className={cn(
-        "shortcut-recorder min-w-[5.5rem] rounded-md border-2 px-2 py-1 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-colors",
+        "shortcut-recorder min-w-[5.5rem] rounded-md border-2 px-2 py-1 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
         recordingShortcut === target
           ? "border-blue-500 bg-blue-50 text-blue-700"
           : "border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100",
       )}
-      title="Click and press a shortcut"
+      title={description}
     >
       <Keyboard className="w-3.5 h-3.5" />
       <span>{recordingShortcut === target ? "Press..." : value || "None"}</span>
     </button>
   );
 
+  const renderCustomShortcutRecorder = (binding: CustomSettingShortcutBinding) => {
+    const disabled = (binding.target === "editor:crop" && !altResizeCrops) ||
+      (binding.target.startsWith("editor:smartGuide") && !smartGuidesEnabled) ||
+      (["web:rememberSession", "web:adBlock", "web:cookieBlocker"].includes(binding.target) && !desktopWebRuntime) ||
+      (binding.target === "editor:eraserShape" && eraserMode !== "partial") ||
+      (["editor:lineSmoothing", "editor:shapeGuessing"].includes(binding.target) && !pendingProps.isSmooth) ||
+      (binding.target.startsWith("tool:") && binding.target.endsWith(":alwaysOnTop") && isToolMenuInMore(binding.target.split(":")[1] ?? ""));
+    const disabledReason = binding.target === "editor:crop" ? "Crop is disabled"
+      : binding.target.startsWith("editor:smartGuide") ? "Show guides is disabled"
+      : ["web:rememberSession", "web:adBlock", "web:cookieBlocker"].includes(binding.target) ? "Available in the desktop app"
+      : binding.target === "editor:eraserShape" ? "Choose Partial Erasing first"
+      : binding.target.startsWith("tool:") && binding.target.endsWith(":alwaysOnTop") ? "Tool Settings Always on Top is controlled by More while this tool is there"
+      : "Drawing Assistance is disabled";
+    return (
+      <button type="button" disabled={disabled}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (!disabled) { setShortcutAssignmentError(""); setRecordingCustomShortcutId(binding.id); }
+        }}
+        onKeyDown={(event) => {
+          if (recordingCustomShortcutId !== binding.id) return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Escape") { setRecordingCustomShortcutId(null); return; }
+          if (event.key === "Backspace" || event.key === "Delete") {
+            setCustomSettingShortcuts(current => current.map(item => item.id === binding.id ? { ...item, shortcut: "" } : item));
+            setRecordingCustomShortcutId(null);
+            setShortcutAssignmentError("");
+            return;
+          }
+          const shortcut = getShortcutFromEvent(event);
+          if (!shortcut || !isSafeStructuralShortcut(shortcut)) return;
+          const normalized = normalizeShortcutValue(shortcut);
+          const known = [
+            [toolModeShortcut, "Keep Tool Active"], [previewShortcut, "Preview"],
+            [activeToolRatioShortcut, "Active Tool Ratio"],
+            [gridToggleShortcut, "Grid On/Off"], [overlapShortcut, "Overlap"],
+            [cropShortcut, "Crop"], [scrollZoomShortcut, "Zoom"], [cutShortcut, "Cut"],
+            ...objectPresets.map(item => [item.shortcut ?? "", item.name] as const),
+            ...customSettingShortcuts.filter(item => item.id !== binding.id).map(item => [item.shortcut, item.label] as const),
+          ] as const;
+          const conflict = known.find(([value]) => value && normalizeShortcutValue(value) === normalized);
+          if (conflict) {
+            setShortcutAssignmentError(`${shortcut} is already assigned to ${conflict[1]}.`);
+            return;
+          }
+          setCustomSettingShortcuts(current => current.map(item => item.id === binding.id ? { ...item, shortcut } : item));
+          setRecordingCustomShortcutId(null);
+          setShortcutAssignmentError("");
+        }}
+        className={cn(
+          "shortcut-recorder min-w-[5.5rem] rounded-md border-2 px-2 py-1 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+          recordingCustomShortcutId === binding.id ? "border-blue-500 bg-blue-50 text-blue-700" : "border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100",
+        )}
+        title={disabled ? disabledReason : `${binding.label}: ${binding.description || "Click and press a shortcut to assign this action."}`}
+      >
+        <Keyboard className="h-3.5 w-3.5" />
+        <span>{recordingCustomShortcutId === binding.id ? "Press..." : binding.shortcut || "None"}</span>
+      </button>
+    );
+  };
+
   const renderPresetShortcutRecorder = (preset: ObjectPreset) => (
     <button
       type="button"
+      disabled={!preset.element}
       onClick={(e) => {
         e.stopPropagation();
+        if (!preset.element) return;
         e.currentTarget.focus();
         setRecordingPresetShortcutId(preset.id);
       }}
@@ -2645,12 +2824,12 @@ export default function BoardEditor({
         setRecordingPresetShortcutId(null);
       }}
       className={cn(
-        "shortcut-recorder min-w-[5.5rem] rounded-md border-2 px-2 py-1 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-colors",
+        "shortcut-recorder min-w-[5.5rem] rounded-md border-2 px-2 py-1 text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
         recordingPresetShortcutId === preset.id
           ? "border-blue-500 bg-blue-50 text-blue-700"
           : "border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100",
       )}
-      title="Click and press a shortcut"
+      title={preset.element ? "Click and press a shortcut" : "Pick an object before assigning a shortcut"}
     >
       <Keyboard className="w-3.5 h-3.5" />
       <span>
@@ -2660,6 +2839,189 @@ export default function BoardEditor({
       </span>
     </button>
   );
+
+  const toggleCustomShortcutTarget = (target: string) => {
+    const [scope, first, second] = target.split(":");
+    if (scope === "tool") {
+      const current = getEffectiveToolMenuSettings(first);
+      switch (second) {
+        case "keepToolActive":
+          updateToolMenuSetting(first, "keepToolActive", !current.keepToolActive);
+          return;
+        case "ratio":
+          updateToolMenuSetting(first, "ratio", !current.ratio);
+          return;
+        case "alwaysOnTop":
+          if (isToolMenuInMore(first)) return;
+          updateToolMenuSetting(first, "alwaysOnTop", !current.alwaysOnTop);
+          return;
+        case "previewMode":
+          updateToolMenuSetting(first, "previewMode", current.previewMode === "box" ? "realistic" : "box");
+          return;
+        case "allowEditing":
+          updateToolMenuSetting(first, "allowEditing", !(current.allowEditing ?? false));
+          return;
+        case "allowMoving":
+          updateToolMenuSetting(first, "allowMoving", !(current.allowMoving ?? false));
+          return;
+        case "pageInteractionWithSelect":
+          updateToolMenuSetting(first, "pageInteractionWithSelect", !(current.pageInteractionWithSelect ?? false));
+          return;
+        case "pageInteractionWithHand":
+          updateToolMenuSetting(first, "pageInteractionWithHand", !(current.pageInteractionWithHand ?? true));
+          return;
+      }
+    }
+    if (scope === "settings" && first === "keepToolActiveFallback") {
+      setKeepToolActiveFallback(value => value === "select" ? "pan" : "select");
+      return;
+    }
+    if (scope === "activeTool") {
+      const menuId = getToolMenuId(activeTool);
+      const current = getEffectiveToolMenuSettings(menuId);
+      switch (first) {
+        case "keepToolActive":
+          updateToolMenuSetting(menuId, "keepToolActive", !current.keepToolActive);
+          return;
+        case "previewMode":
+          updateToolMenuSetting(menuId, "previewMode", current.previewMode === "box" ? "realistic" : "box");
+          return;
+        case "ratio":
+          updateToolMenuSetting(menuId, "ratio", !current.ratio);
+          return;
+      }
+    }
+    if (scope === "web") {
+      const selectedWeb = elementsRef.current.find(element => element.id === selectedId && element.type === "embed");
+      const webSettings = getWebSettings(selectedWeb ?? pendingProps);
+      switch (first) {
+        case "deviceMode": {
+          const modes: WebDeviceMode[] = ["desktop", "tablet", "phone"];
+          const next = modes[(modes.indexOf(webSettings.deviceMode) + 1) % modes.length];
+          updatePendingWebSettings({ webDeviceMode: next, size: { ...WEB_DEVICE_PROFILES[next].defaultSize } });
+          return;
+        }
+        case "popupBlocker": updatePendingWebSettings({ webPopupBlocker: !webSettings.popupBlocker }); return;
+        case "rememberSession": updatePendingWebSettings({ webRememberSession: !webSettings.rememberSession }); return;
+        case "adBlock": updatePendingWebSettings({ webAdBlock: !webSettings.adBlock }); return;
+        case "cookieBlocker": {
+          const modes: WebCookieBlockerMode[] = ["off", "third-party", "all"];
+          updatePendingWebSettings({ webCookieBlocker: modes[(modes.indexOf(webSettings.cookieBlocker) + 1) % modes.length] });
+          return;
+        }
+        case "fullscreenMode":
+          updatePendingWebSettings({ webFullscreenMode: webSettings.fullscreenMode === "area" ? "real" : "area" });
+          return;
+        case "controlsHidden":
+          updatePendingWebSettings({ webControlsHidden: !webSettings.controlsHidden });
+          return;
+      }
+    }
+    if (scope === "editor") {
+      switch (first) {
+        case "objectSnapping": setEnableObjectSnapping(value => !value); return;
+        case "selectMode": setSelectMode(value => value === "rectangle" ? "lasso" : value === "lasso" ? "polygon" : "rectangle"); setActiveTool("select"); return;
+        case "selectMinimumCell": setSelectMinimumCell(value => !value); return;
+        case "showGuides": setSmartGuidesEnabled(value => !value); setVisibleGuides([]); return;
+        case "smartGuideAlignment": setSmartGuideAlignment(value => !value); setVisibleGuides([]); return;
+        case "smartGuideDistances": setSmartGuideDistances(value => !value); setVisibleGuides([]); return;
+        case "smartGuideRatios": setSmartGuideRatios(value => !value); setVisibleGuides([]); return;
+        case "smartGuideAngles": setSmartGuideAngles(value => !value); setVisibleGuides([]); return;
+        case "smartGuideDensity": setSmartGuideDensity(value => value === "low" ? "mid" : value === "mid" ? "high" : "low"); setVisibleGuides([]); return;
+        case "autoSelectAfterPlacing":
+        case "autoSelectAfterDraw": setAutoSelectOnPlace(value => !value); return;
+        case "switchToolAfterPlacing": setSwitchToolAfterPlacing(value => !value); return;
+        case "selectSwitchesToObjectTool": setAutoToolOnSelect(value => !value); return;
+        case "spinSnap": setSpinSnapEnabled(value => !value); return;
+        case "lockInTime": setIsSelectionLockEnabled(value => !value); return;
+        case "crop": setAltResizeCrops(value => !value); return;
+        case "mediaPlaybackDisabled": setMediaPlaybackDisabled(value => !value); return;
+        case "highlightAll": setHighlightAll(value => !value); return;
+        case "zoomToCursor": setZoomToCursor(value => !value); return;
+        case "overlap": setOverlapMode(value => value === "none" ? "partial" : value === "partial" ? "full" : "none"); return;
+        case "textLineCapacity": {
+          const selectedText = elementsRef.current.find(element => element.id === selectedId && isScalableText(element.type));
+          if (selectedText) updateElement(selectedText.id, { textLineCapacityLimit: selectedText.textLineCapacityLimit === false });
+          else if (isScalableText(activeTool)) setPendingProps(current => ({ ...current, textLineCapacityLimit: current.textLineCapacityLimit === false }));
+          return;
+        }
+        case "fillMode": setFillMode(value => value === "area" ? "object" : "area"); return;
+        case "boardResize": setIsBoardResizeEnabled(value => !value); return;
+        case "boardMove": setIsBoardMoveEnabled(value => !value); return;
+        case "keepBoardContentPosition": setKeepBoardContentPosition(value => !value); return;
+        case "boardGrid": setShowGrid(value => !value); return;
+        case "workspaceGrid": setShowWorkspaceGrid(value => !value); return;
+        case "snapToGrid": setSnapToGrid(value => !value); return;
+        case "allowEditing": setPanEditingEnabled(!allowEditing); return;
+        case "allowMovingInPan": setAllowMovingElementsInPan(value => !value); return;
+        case "objectPresetsPanelAlwaysOnTop": setObjectPresetsPanelAlwaysOnTop(value => !value); return;
+        case "drawingAssistance": updatePendingToolProps({ isSmooth: !pendingProps.isSmooth }); return;
+        case "lineSmoothing": updatePendingToolProps({ drawingAssistSmooth: pendingProps.drawingAssistSmooth === false }); return;
+        case "shapeGuessing": updatePendingToolProps({ drawingAssistGuess: !pendingProps.drawingAssistGuess }); return;
+        case "eraserMode": setEraserMode(value => value === "element" ? "partial" : "element"); return;
+        case "eraserShape": setEraserShape(value => value === "round" ? "square" : "round"); return;
+        case "triangleCorners": {
+          const selectedTriangle = elementsRef.current.find(element => element.id === selectedId && element.type === "triangle");
+          const current = selectedTriangle?.strokeLinejoin ?? objectDefaultsRef.current.triangle?.strokeLinejoin ?? pendingProps.strokeLinejoin ?? "miter";
+          const updates = { strokeLinejoin: current === "miter" ? "round" as const : "miter" as const };
+          if (selectedTriangle) updateElement(selectedTriangle.id, updates); else updatePendingToolProps(updates);
+          return;
+        }
+        case "spreadsheetMode": setSpreadsheetMode(value => value === "simple" ? "advanced" : "simple"); return;
+        case "textScaling": {
+          const selectedText = elementsRef.current.find(element => element.id === selectedId && isScalableText(element.type));
+          if (selectedText) updateElement(selectedText.id, { textScaling: selectedText.textScaling !== true });
+          else if (isScalableText(activeTool)) setPendingProps(current => ({ ...current, textScaling: current.textScaling !== true }));
+          return;
+        }
+        case "textFrame": {
+          const selectedText = elementsRef.current.find(element => element.id === selectedId && isScalableText(element.type));
+          const current = selectedText ?? pendingProps;
+          const updates = { borderWidth: (current.borderWidth ?? 0) > 0 ? 0 : 2 };
+          if (selectedText) updateElement(selectedText.id, updates); else updatePendingToolProps(updates);
+          return;
+        }
+        case "textLines": {
+          const selectedText = elementsRef.current.find(element => element.id === selectedId && isScalableText(element.type));
+          const current = selectedText ?? pendingProps;
+          const updates = { textSnapToGrid: !current.textSnapToGrid };
+          if (selectedText) updateElement(selectedText.id, updates); else updatePendingToolProps(updates);
+          return;
+        }
+        case "mediaDisabled": {
+          const media = elementsRef.current.find(element => element.id === selectedId && (element.type === "image" || element.type === "media"));
+          if (media) updateElement(media.id, { mediaDisabled: !media.mediaDisabled });
+          else if (activeTool === "image" || activeTool === "media") setPendingProps(current => ({ ...current, mediaDisabled: !current.mediaDisabled }));
+          return;
+        }
+        case "mediaControlsHidden": {
+          const media = elementsRef.current.find(element => element.id === selectedId && (element.type === "image" || element.type === "media"));
+          if (media) updateElement(media.id, { mediaControlsHidden: !media.mediaControlsHidden });
+          else if (activeTool === "image" || activeTool === "media") setPendingProps(current => ({ ...current, mediaControlsHidden: !current.mediaControlsHidden }));
+          return;
+        }
+        case "elementRatio": {
+          const selected = elementsRef.current.find(element => element.id === selectedId);
+          if (selected) updateElement(selected.id, { keepRatio: !selected.keepRatio });
+          else setPendingProps(current => ({ ...current, keepRatio: !current.keepRatio }));
+          return;
+        }
+        case "flipX": {
+          const selected = elementsRef.current.find(element => element.id === selectedId);
+          if (selected) updateElement(selected.id, { flipX: !selected.flipX });
+          else setPendingProps(current => ({ ...current, flipX: !current.flipX }));
+          return;
+        }
+        case "flipY": {
+          const selected = elementsRef.current.find(element => element.id === selectedId);
+          if (selected) updateElement(selected.id, { flipY: !selected.flipY });
+          else setPendingProps(current => ({ ...current, flipY: !current.flipY }));
+          return;
+        }
+      }
+    }
+    void second;
+  };
 
   // Keyboard Shortcuts
   useEffect(() => {
@@ -2675,6 +3037,11 @@ export default function BoardEditor({
         setLayerMergeSelection(new Set());
         return;
       }
+      if (e.key === "Escape" && pickingObjectPresetId) {
+        e.preventDefault();
+        cancelObjectPresetPicking();
+        return;
+      }
       const isTypingTarget =
         activeElement?.tagName === "INPUT" ||
         activeElement?.tagName === "TEXTAREA" ||
@@ -2688,7 +3055,31 @@ export default function BoardEditor({
 
       if (!e.repeat && shortcutMatches(toolModeShortcut, e)) {
         e.preventDefault();
-        setKeepToolActive((value) => !value);
+        const menuId = getToolMenuId(activeTool);
+        const current = getEffectiveToolMenuSettings(menuId);
+        updateToolMenuSetting(menuId, "keepToolActive", !current.keepToolActive);
+        return;
+      }
+      if (!e.repeat && previewShortcut && shortcutMatches(previewShortcut, e)) {
+        e.preventDefault();
+        const menuId = getToolMenuId(activeTool);
+        const current = getEffectiveToolMenuSettings(menuId);
+        updateToolMenuSetting(menuId, "previewMode", current.previewMode === "box" ? "realistic" : "box");
+        return;
+      }
+      if (!e.repeat && activeToolRatioShortcut && shortcutMatches(activeToolRatioShortcut, e)) {
+        e.preventDefault();
+        const menuId = getToolMenuId(activeTool);
+        const current = getEffectiveToolMenuSettings(menuId);
+        updateToolMenuSetting(menuId, "ratio", !current.ratio);
+        return;
+      }
+      const customBinding = customSettingShortcuts.find(
+        (binding) => binding.shortcut && shortcutMatches(binding.shortcut, e),
+      );
+      if (!e.repeat && customBinding) {
+        e.preventDefault();
+        toggleCustomShortcutTarget(customBinding.target);
         return;
       }
       if (!e.repeat && shortcutMatches(gridToggleShortcut, e)) {
@@ -2769,10 +3160,15 @@ export default function BoardEditor({
     selectedIds,
     activeTool,
     selectMode,
+    selectMinimumCell,
+    toolSettingsOverrides,
     history,
     historyIndex,
     quickAddRegion,
     toolModeShortcut,
+    previewShortcut,
+    activeToolRatioShortcut,
+    customSettingShortcuts,
     gridToggleShortcut,
     overlapShortcut,
     cropShortcut,
@@ -2780,17 +3176,20 @@ export default function BoardEditor({
     cutShortcut,
     objectPresets,
     isPickingLayerMerge,
+    pickingObjectPresetId,
+    cancelObjectPresetPicking,
   ]);
 
-  const globalToolMenuSettings: ToolMenuSettings = {
-    alwaysOnTop,
-    keepToolActive,
-    previewMode,
+  const defaultToolMenuSettings: ToolMenuSettings = {
+    alwaysOnTop: false,
+    keepToolActive: true,
+    ratio: false,
+    previewMode: "box",
   };
 
   const getEffectiveToolMenuSettings = (menuId: string) =>
     resolveToolMenuSettingsForId(
-      globalToolMenuSettings,
+      defaultToolMenuSettings,
       toolSettingsOverrides,
       menuId,
     );
@@ -2807,6 +3206,24 @@ export default function BoardEditor({
     if (tool === "board") return "grid";
     if (["embed", "link", "object-presets"].includes(tool)) return tool;
     return tool;
+  };
+
+  const getToolbarItemForMenu = (menuId: string): ToolbarItemId | null => {
+    if (menuId === "grid") return "board";
+    if (menuId === "table") return "table";
+    if (menuId === "media") return "media";
+    if (menuId === "shapes") return "shapes";
+    if (menuId === "text") return "text";
+    if (menuId === "embed") return "embed";
+    if (menuId === "link") return "link";
+    if (menuId === "object-presets") return "object-presets";
+    if (["select", "pan", "draw", "fill", "eraser"].includes(menuId))
+      return menuId as ToolbarItemId;
+    return null;
+  };
+  const isToolMenuInMore = (menuId: string) => {
+    const item = getToolbarItemForMenu(menuId);
+    return item !== null && toolbarLayout.more.includes(item);
   };
 
   const finishToolUse = (toolId: string) => {
@@ -2861,15 +3278,14 @@ export default function BoardEditor({
             "fill",
             "eraser",
             "generalSettings",
-            "toolDefaults",
             "presetSettings",
             "behaviorSettings",
             "shortcutSettings",
             "layers",
             "link",
-            "object-presets",
           ].filter((menuId) => getEffectiveToolMenuSettings(menuId).alwaysOnTop),
         );
+    if (!options.force && shortcutAssignmentMode) pinnedMenus.add("generalSettings");
     if (!pinnedMenus.has("pan")) setShowPanDropdown(false);
     if (!pinnedMenus.has("shapes")) setShowShapeDropdown(false);
     if (!pinnedMenus.has("text")) setShowTextDropdown(false);
@@ -2890,9 +3306,12 @@ export default function BoardEditor({
     ) {
       setDetachedMoreMenuId(null);
     }
-    if (!pinnedMenus.has("object-presets")) {
+    if (options.force || !objectPresetsPanelAlwaysOnTop) {
       setShowObjectPresetsPanel(false);
-      if (!options.preservePresetPicking) setPickingObjectPresetId(null);
+      if (!options.preservePresetPicking) {
+        setPickingObjectPresetId(null);
+        setPresetSelectionCandidateId(null);
+      }
     }
     setShowTargetDropdown(false);
     setShowToolFallbackDropdown(false);
@@ -2915,9 +3334,12 @@ export default function BoardEditor({
       const settings = getEffectiveToolMenuSettings(menuId);
       return (
         <MenuSettingsBlock
+          menuId={menuId}
           compact={compact}
           narrow={narrow}
           alwaysOnTop={settings.alwaysOnTop}
+          alwaysOnTopDisabled={isToolMenuInMore(menuId)}
+          alwaysOnTopOnly={menuId === "more"}
           onAlwaysOnTopChange={(value) =>
             updateToolMenuSetting(menuId, "alwaysOnTop", value)
           }
@@ -2925,6 +3347,8 @@ export default function BoardEditor({
           onKeepToolActiveChange={(value) =>
             updateToolMenuSetting(menuId, "keepToolActive", value)
           }
+          ratio={settings.ratio}
+          onRatioChange={(value) => updateToolMenuSetting(menuId, "ratio", value)}
           allowEditing={settings.allowEditing ?? false}
           onAllowEditingChange={["text", "shapes", "media", "embed", "draw", "grid", "section", "fill"].includes(menuId) ? value => updateToolMenuSetting(menuId, "allowEditing", value) : undefined}
           allowMoving={settings.allowMoving ?? false}
@@ -2954,29 +3378,28 @@ export default function BoardEditor({
         inset,
       )}
     >
-      <span className="text-[10px] font-bold uppercase tracking-wider text-gray-700">
+      <span className="text-xs font-bold normal-case tracking-normal text-gray-700">
         {label}
       </span>
     </div>
   );
 
   const renderSwitch = (checked: boolean) => (
-    <span
-      aria-hidden="true"
-      data-menu-toggle="true"
-      data-state={checked ? "on" : "off"}
-      className={cn(
-        "noteboard-toggle flex h-4 w-7 shrink-0 items-center rounded-full border border-black/10 p-0.5 transition-colors duration-200",
-        checked ? "bg-blue-500" : "bg-gray-200",
-      )}
-    >
-      <span
-        className={cn(
-          "h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200",
-          checked ? "translate-x-3" : "translate-x-0",
-        )}
-      />
-    </span>
+    <ToggleSwitch checked={checked} />
+  );
+
+  const renderMediaSettings = (compact = true) => (
+    <div className="flex flex-col gap-2">
+      <button type="button" aria-pressed={mediaPlaybackDisabled}
+        data-shortcut-action="editor:mediaPlaybackDisabled"
+        data-shortcut-label="Disable All Media"
+        data-shortcut-category="Media"
+        onClick={() => setMediaPlaybackDisabled(value => !value)}
+        className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-gray-50">
+        <span className="settings-label settings-label-strong">Disable All Media</span>{renderSwitch(mediaPlaybackDisabled)}
+      </button>
+      {renderMenuSettingsBlock("media", compact)}
+    </div>
   );
 
   const renderAlwaysOnTopControl = (menuId: string) => {
@@ -2990,9 +3413,9 @@ export default function BoardEditor({
           event.stopPropagation();
           updateToolMenuSetting(menuId, "alwaysOnTop", !pinned);
         }}
-        className="flex w-full items-center justify-between rounded-lg px-1.5 py-1.5 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+        className="settings-row flex w-full items-center justify-between rounded-lg px-1.5 py-1.5 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
       >
-        <span>Always on top</span>
+        <span className="settings-label settings-label-strong">Tool Settings Always On Top</span>
         {renderSwitch(pinned)}
       </button>
     );
@@ -3020,11 +3443,13 @@ export default function BoardEditor({
         {[
           {
             label: "Resize",
+            action: "editor:boardResize",
             active: isBoardResizeEnabled,
             toggle: () => setIsBoardResizeEnabled((value) => !value),
           },
           {
             label: "Move",
+            action: "editor:boardMove",
             active: isBoardMoveEnabled,
             toggle: () => setIsBoardMoveEnabled((value) => !value),
           },
@@ -3033,18 +3458,22 @@ export default function BoardEditor({
             key={option.label}
             type="button"
             aria-pressed={option.active}
+            data-shortcut-action={option.action}
+            data-shortcut-label={option.label}
+            data-shortcut-category="Board Settings"
             onClick={option.toggle}
-            className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+            className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
           >
-            <span>{option.label}</span>
+            <span className="settings-label settings-label-strong">{option.label}</span>
             {renderSwitch(option.active)}
           </button>
         ))}
       </div>
       <button type="button" aria-pressed={keepBoardContentPosition} onClick={()=>setKeepBoardContentPosition(value=>!value)}
+        data-shortcut-action="editor:keepBoardContentPosition" data-shortcut-label="Keep Content in Place" data-shortcut-category="Board Settings"
         title="Keep element positions fixed while adding or removing board space"
-        className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white">
-        <span>Keep content in place</span>{renderSwitch(keepBoardContentPosition)}
+        className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white">
+        <span className="settings-label settings-label-strong">Keep Content in Place</span>{renderSwitch(keepBoardContentPosition)}
       </button>
       <div className="h-px w-full bg-gray-200" />
 
@@ -3052,10 +3481,11 @@ export default function BoardEditor({
         <button
           type="button"
           aria-pressed={showGrid}
+          data-shortcut-action="editor:boardGrid" data-shortcut-label="Board Grid" data-shortcut-category="Board Settings"
           onClick={() => setShowGrid((value) => !value)}
-          className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+          className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
         >
-          <span>Board Grid</span>
+          <span className="settings-label settings-label-strong">Board Grid</span>
           {renderSwitch(showGrid)}
         </button>
         <div
@@ -3064,8 +3494,8 @@ export default function BoardEditor({
             !showGrid && "pointer-events-none opacity-50",
           )}
         >
-          <div className="flex items-center justify-between gap-2 text-xs font-semibold text-gray-500">
-            <span>Color</span>
+          <div className="settings-row flex items-center justify-between gap-2 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Color</span>
             <ColorPicker
               value={gridColor}
               onChange={(color) => setGridColor(color)}
@@ -3076,42 +3506,13 @@ export default function BoardEditor({
               }
             />
           </div>
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            <span className="flex items-center justify-between">
-              <span>Thickness</span>
-              <span className="rounded bg-white px-1 text-black">
-                {gridThickness}px
-              </span>
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={gridThickness}
-              onChange={(event) =>
-                setGridThickness(parseInt(event.target.value, 10))
-              }
-              className="w-full accent-blue-500"
-            />
+          <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Thickness</span>
+            <RangeSlider ariaLabel="Board grid thickness" min={1} max={10} step={1} value={gridThickness} suffix="px" onChange={setGridThickness} />
           </label>
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            <span className="flex items-center justify-between">
-              <span>Size</span>
-              <span className="rounded bg-white px-1 text-black">
-                {gridSize}px
-              </span>
-            </span>
-            <input
-              type="range"
-              min="10"
-              max="200"
-              step="2"
-              value={gridSize}
-              onChange={(event) =>
-                setGridSize(parseInt(event.target.value, 10))
-              }
-              className="w-full accent-blue-500"
-            />
+          <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Size</span>
+            <RangeSlider ariaLabel="Board grid size" min={10} max={200} step={1} value={gridSize} suffix="px" onChange={setGridSize} />
           </label>
         </div>
       </div>
@@ -3121,10 +3522,11 @@ export default function BoardEditor({
         <button
           type="button"
           aria-pressed={showWorkspaceGrid}
+          data-shortcut-action="editor:workspaceGrid" data-shortcut-label="Background Grid" data-shortcut-category="Board Settings"
           onClick={() => setShowWorkspaceGrid((value) => !value)}
-          className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+          className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
         >
-          <span>Background Grid</span>
+          <span className="settings-label settings-label-strong">Background Grid</span>
           {renderSwitch(showWorkspaceGrid)}
         </button>
         <div
@@ -3133,8 +3535,8 @@ export default function BoardEditor({
             !showWorkspaceGrid && "pointer-events-none opacity-50",
           )}
         >
-          <div className="flex items-center justify-between gap-2 text-xs font-semibold text-gray-500">
-            <span>Color</span>
+          <div className="settings-row flex items-center justify-between gap-2 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Color</span>
             <ColorPicker
               value={workspaceGridColor}
               onChange={(color) => setWorkspaceGridColor(color)}
@@ -3145,42 +3547,13 @@ export default function BoardEditor({
               }
             />
           </div>
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            <span className="flex items-center justify-between">
-              <span>Thickness</span>
-              <span className="rounded bg-white px-1 text-black">
-                {workspaceGridThickness}px
-              </span>
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="10"
-              value={workspaceGridThickness}
-              onChange={(event) =>
-                setWorkspaceGridThickness(parseInt(event.target.value, 10))
-              }
-              className="w-full accent-blue-500"
-            />
+          <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Thickness</span>
+            <RangeSlider ariaLabel="Background grid thickness" min={1} max={10} step={1} value={workspaceGridThickness} suffix="px" onChange={setWorkspaceGridThickness} />
           </label>
-          <label className="flex flex-col gap-1 text-xs font-semibold text-gray-500">
-            <span className="flex items-center justify-between">
-              <span>Size</span>
-              <span className="rounded bg-white px-1 text-black">
-                {workspaceGridSize}px
-              </span>
-            </span>
-            <input
-              type="range"
-              min="10"
-              max="200"
-              step="2"
-              value={workspaceGridSize}
-              onChange={(event) =>
-                setWorkspaceGridSize(parseInt(event.target.value, 10))
-              }
-              className="w-full accent-blue-500"
-            />
+          <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-semibold text-gray-500">
+            <span className="settings-label">Size</span>
+            <RangeSlider ariaLabel="Background grid size" min={10} max={200} step={1} value={workspaceGridSize} suffix="px" onChange={setWorkspaceGridSize} />
           </label>
         </div>
       </div>
@@ -3193,20 +3566,16 @@ export default function BoardEditor({
             active: snapToGrid,
             toggle: () => setSnapToGrid((value) => !value),
           },
-          {
-            label: "Object Snapping",
-            active: enableObjectSnapping,
-            toggle: () => setEnableObjectSnapping((value) => !value),
-          },
         ].map((option) => (
           <button
             key={option.label}
             type="button"
             aria-pressed={option.active}
+            data-shortcut-action="editor:snapToGrid" data-shortcut-label="Snap to Grid" data-shortcut-category="Board Settings"
             onClick={option.toggle}
-            className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+            className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
           >
-            <span>{option.label}</span>
+            <span className="settings-label settings-label-strong">{option.label}</span>
             {renderSwitch(option.active)}
           </button>
         ))}
@@ -3225,70 +3594,10 @@ export default function BoardEditor({
     Icon: React.ElementType,
     label: string,
   ) => (
-    <div className="flex items-center gap-2 text-[10px] font-extrabold uppercase tracking-wider text-gray-500">
-      <Icon className="h-4 w-4 text-gray-600" />
+    <div className="flex items-center gap-2 text-xs font-bold text-gray-900">
+      <Icon className="h-4 w-4 text-gray-700" />
       <span>{label}</span>
     </div>
-  );
-
-  const renderToolDefaultsSettings = (showHeading = true) => (
-    <section className="flex flex-col gap-3 border-b-2 border-gray-200 pb-3 last:border-b-0 last:pb-0">
-      {showHeading && renderSettingsSectionHeading(Wrench, "Global Tool Settings")}
-      <div className="flex flex-col gap-2">
-        <button
-          type="button"
-          aria-pressed={alwaysOnTop}
-          onClick={() => setAlwaysOnTop((value) => !value)}
-          className="flex w-full items-center justify-between gap-3 rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
-        >
-          <span>Always on top</span>
-          {renderSwitch(alwaysOnTop)}
-        </button>
-        <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-          <span>Tool mode</span>
-          <SegmentedControl label="Tool mode" value={keepToolActive ? 'fixed' : 'unfixed'} onChange={value => setKeepToolActive(value === 'fixed')} options={[{ value: 'unfixed', label: 'Unfixed' }, { value: 'fixed', label: 'Fixed' }]} />
-        </div>
-        <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-          <span>Preview</span>
-          <SegmentedControl label="Preview" value={previewMode} onChange={setPreviewMode} options={[{ value: 'box', label: 'Translucent' }, { value: 'realistic', label: 'True' }]} />
-        </div>
-        <div className="flex flex-col gap-1">
-          <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">
-            Fallback tool
-          </span>
-          <div className="flex rounded-lg border border-gray-200 bg-gray-100 p-1 shadow-inner">
-            <button
-              type="button"
-              onClick={() => setKeepToolActiveFallback("pan")}
-              className={cn(
-                "flex-1 rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                keepToolActiveFallback === "pan"
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              Hand
-            </button>
-            <button
-              type="button"
-              onClick={() => setKeepToolActiveFallback("select")}
-              className={cn(
-                "flex-1 rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                keepToolActiveFallback === "select"
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              Pointer
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-          <span>Tool mode shortcut</span>
-          {renderShortcutRecorder("toolMode", toolModeShortcut, setToolModeShortcut)}
-        </div>
-      </div>
-    </section>
   );
 
   const renderToolbarCustomizationSettings = (showHeading = true) => (
@@ -3302,6 +3611,55 @@ export default function BoardEditor({
       )}
     </section>
   );
+
+  const renderObjectPresetPicker = (
+    preset: ObjectPreset,
+    closeContainer: "more" | "panel" | "settings" = "settings",
+  ) => {
+    const sourceName = preset.element?.name?.trim() || (preset.element && toTitleCase(preset.element.type));
+    return (
+      <>
+        {sourceName && <span data-preset-source-name title={sourceName} className="max-w-[5.5rem] min-w-0 truncate text-[11px] text-gray-500">{sourceName}</span>}
+        <button
+          type="button"
+          onClick={() => beginObjectPresetPicking(preset.id, closeContainer)}
+          aria-pressed={pickingObjectPresetId === preset.id}
+          aria-label="Select Object"
+          title="Select Object"
+          className={cn("flex h-6 shrink-0 items-center gap-1 rounded px-1 text-[10px] font-semibold hover:bg-blue-50 hover:text-blue-700", pickingObjectPresetId === preset.id ? "bg-blue-50 text-blue-700" : "text-gray-500")}
+        >
+          <MousePointer2 className="h-3 w-3" />
+          Select Object
+        </button>
+      </>
+    );
+  };
+
+  const beginObjectPresetPicking = (
+    presetId: string,
+    closeContainer: "more" | "panel" | "settings" = "settings",
+  ) => {
+    if (pickingObjectPresetId === presetId) {
+      cancelObjectPresetPicking();
+      return;
+    }
+    if (!pickingObjectPresetId) selectionBeforePresetPickingRef.current = [...selectedIds];
+    if (closeContainer === "more") {
+      setShowMoreToolsDropdown(false);
+      if (detachedMoreMenuId === "object-presets") setDetachedMoreMenuId(null);
+    } else if (closeContainer === "panel") {
+      setShowObjectPresetsPanel(false);
+    }
+    setPresetSelectionCandidateId(null);
+    setPickingObjectPresetId(presetId);
+    setActiveTool("select");
+  };
+
+  const chooseObjectPresetCandidate = (element: BoardElement) => {
+    if (!pickingObjectPresetId || element.type === "layer" || element.isEraser) return;
+    setPresetSelectionCandidateId(element.id);
+    setSelectedIds([element.id]);
+  };
 
   const renderPresetSettings = (showHeading = true) => (
     <section className="flex flex-col gap-2 border-b-2 border-gray-200 pb-3 last:border-b-0 last:pb-0">
@@ -3317,7 +3675,7 @@ export default function BoardEditor({
         className="flex w-full items-center justify-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-bold text-gray-600 transition-colors hover:border-blue-300 hover:text-blue-700"
       >
         <Plus className="h-3.5 w-3.5" />
-        Add preset
+        Add Preset
       </button>
       {objectPresets.length === 0 ? (
         <span className="rounded-lg border border-gray-200 bg-white px-2 py-2 text-[10px] font-semibold text-gray-400">
@@ -3341,31 +3699,10 @@ export default function BoardEditor({
                     ),
                   )
                 }
-                className="min-w-0 flex-1 bg-transparent text-[11px] font-bold text-gray-600 outline-none"
+                className="min-w-0 flex-1 bg-transparent text-xs font-bold text-gray-600 outline-none"
                 aria-label={`Rename ${preset.name}`}
               />
-              {renderPresetShortcutRecorder(preset)}
-              <button
-                type="button"
-                onClick={() => {
-                  setPickingObjectPresetId(preset.id);
-                  setActiveTool("select");
-                }}
-                className={cn(
-                  "rounded p-1 hover:bg-blue-50 hover:text-blue-700",
-                  pickingObjectPresetId === preset.id
-                    ? "bg-blue-50 text-blue-700"
-                    : "text-gray-400",
-                )}
-                title={preset.element ? "Pick another object" : "Pick an object"}
-                aria-label={preset.element ? "Pick another object" : "Pick an object"}
-              >
-                {pickingObjectPresetId === preset.id ? (
-                  <Check className="h-3 w-3" />
-                ) : (
-                  <ChevronRight className="h-3 w-3" />
-                )}
-              </button>
+              {renderObjectPresetPicker(preset)}
               <button
                 type="button"
                 onClick={() =>
@@ -3392,105 +3729,146 @@ export default function BoardEditor({
       <button
         type="button"
         aria-pressed={highlightAll}
+        data-shortcut-action="editor:highlightAll"
+        data-shortcut-label="Highlight All"
+        data-shortcut-category="Physics & Behavior"
         onClick={() => setHighlightAll((value) => !value)}
-        className="flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
+        className="settings-row flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
       >
-        <span>Highlight all</span>
+        <span className="settings-label settings-label-strong">Highlight All</span>
         {renderSwitch(highlightAll)}
       </button>
-      <div className="flex flex-col gap-1">
-        <span className="text-xs font-bold text-gray-700">Prevent overlap</span>
-        <div className="flex rounded-lg border border-gray-200 bg-gray-100 p-1 shadow-inner">
-          {[
-            { mode: "none", label: "Off" },
-            { mode: "partial", label: "Partial" },
-            { mode: "full", label: "Full" },
-          ].map((option) => (
-            <button
-              key={option.mode}
-              type="button"
-              onClick={() =>
-                setOverlapMode(option.mode as "none" | "partial" | "full")
-              }
-              className={cn(
-                "flex-1 rounded-md px-2 py-1.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
-                overlapMode === option.mode
-                  ? "bg-white text-blue-600 shadow-sm ring-1 ring-black/5"
-                  : "text-gray-500 hover:bg-gray-200/50 hover:text-black",
-              )}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-          <span>Overlap shortcut</span>
-          {renderShortcutRecorder("overlap", overlapShortcut, setOverlapShortcut)}
+      <div className="settings-row flex items-center justify-between gap-2 pl-1 text-xs font-bold text-gray-700">
+        <span className="settings-label">Overlap</span>
+        <div data-shortcut-action="editor:overlap" data-shortcut-label="Overlap" data-shortcut-category="Physics & Behavior">
+          <SegmentedControl label="Overlap" value={overlapMode}
+            onChange={setOverlapMode}
+            options={[{ mode: 'none', label: 'On' }, { mode: 'partial', label: 'Partial' }, { mode: 'full', label: 'Off' }].map(({ mode, label }) => ({ value: mode, label }))} />
         </div>
       </div>
     </section>
   );
 
+  const renderShortcutCategory = (label: string, children: React.ReactNode) => (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-[9px] font-extrabold uppercase tracking-wider text-gray-500">
+        {label}
+      </span>
+      <div className="flex min-w-0 flex-col gap-2">{children}</div>
+    </div>
+  );
+
+  const renderShortcutRow = (
+    label: string,
+    recorder: React.ReactNode,
+    description = label,
+  ) => (
+    <div className="settings-row flex min-w-0 items-center justify-between gap-3 text-xs font-bold text-gray-700">
+      <span className="settings-label settings-label-strong min-w-0 truncate" title={`${label}: ${description}`}>
+        {label}
+      </span>
+      {recorder}
+    </div>
+  );
+
   const renderShortcutSettings = (showHeading = true) => (
     <section className="flex flex-col gap-2 border-b-2 border-gray-200 pb-3 last:border-b-0 last:pb-0">
-      {showHeading && renderSettingsSectionHeading(Keyboard, "Shortcuts & Zoom")}
-      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-        <span>Grid on/off</span>
-        {renderShortcutRecorder("gridToggle", gridToggleShortcut, setGridToggleShortcut)}
-      </div>
-      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-        <span>Crop</span>
-        {renderShortcutRecorder("crop", cropShortcut, setCropShortcut)}
-      </div>
-      <button
-        type="button"
-        aria-pressed={altResizeCrops}
-        onClick={() => setAltResizeCrops((value) => !value)}
-        className="flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white"
-      >
-        <span>Crop while resizing</span>
-        {renderSwitch(altResizeCrops)}
+      {showHeading && renderSettingsSectionHeading(Keyboard, "Shortcuts")}
+      <button type="button" aria-pressed={shortcutAssignmentMode}
+        onClick={() => setShortcutAssignmentMode((value) => !value)}
+        className={cn(
+          "settings-row flex w-full items-center justify-between px-1 py-1 text-left text-xs font-bold transition-colors",
+          shortcutAssignmentMode
+            ? "text-blue-800"
+            : "text-gray-700 hover:text-gray-900",
+        )}>
+        <span className="settings-label settings-label-strong">{shortcutAssignmentMode ? "Click a setting to add its shortcut" : "Add Shortcut"}</span>
+        {renderSwitch(shortcutAssignmentMode)}
       </button>
-      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-        <span>Cut</span>
-        {renderShortcutRecorder("cut", cutShortcut, setCutShortcut)}
-      </div>
-      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-        <span>Scroll zoom</span>
-        <div className="flex items-center gap-1">
-          {renderShortcutRecorder("scrollZoom", scrollZoomShortcut, setScrollZoomShortcut)}
-          <span className="text-[10px] font-bold uppercase text-gray-500">+ Scroll</span>
+      {renderShortcutCategory("Active Tool", <>
+        {renderShortcutRow("Keep Tool Active", renderShortcutRecorder("toolMode", toolModeShortcut, setToolModeShortcut, false, "Toggle whether the current tool stays active after placing an object."), "Toggle whether the current tool stays active after placing an object.")}
+        {renderShortcutRow("Preview", renderShortcutRecorder("preview", previewShortcut, setPreviewShortcut, false, "Cycle Area and Object preview for the current tool."), "Cycle Area and Object preview for the current tool.")}
+        {renderShortcutRow("Ratio", renderShortcutRecorder("activeRatio", activeToolRatioShortcut, setActiveToolRatioShortcut, false, "Toggle proportional scaling for the current tool."), "Toggle proportional scaling for the current tool.")}
+      </>)}
+      {renderShortcutCategory("Board Settings", <>
+        {renderShortcutRow("Grid On/Off", renderShortcutRecorder("gridToggle", gridToggleShortcut, setGridToggleShortcut, false, "Show or hide the main board grid."), "Show or hide the main board grid.")}
+      </>)}
+      {renderShortcutCategory("Settings", renderShortcutRow("Crop (+ LMB)", renderShortcutRecorder("crop", cropShortcut, setCropShortcut, !altResizeCrops, "Hold the shortcut while dragging with the left mouse button to crop during resize."), "Hold the shortcut while dragging with the left mouse button to crop during resize."))}
+      {renderShortcutCategory("Physics & Behavior", renderShortcutRow("Overlap", renderShortcutRecorder("overlap", overlapShortcut, setOverlapShortcut, false, "Cycle overlap behavior: On, Partial, and Off."), "Cycle overlap behavior: On, Partial, and Off."))}
+      {renderShortcutCategory("Editing", renderShortcutRow("Cut", renderShortcutRecorder("cut", cutShortcut, setCutShortcut, false, "Cut the selected board elements to the clipboard."), "Cut the selected board elements to the clipboard."))}
+      {renderShortcutCategory("Zoom", renderShortcutRow("Zoom (+ Scroll)", renderShortcutRecorder("scrollZoom", scrollZoomShortcut, setScrollZoomShortcut, false, "Hold the shortcut and scroll to zoom the board."), "Hold the shortcut and scroll to zoom the board."))}
+      {shortcutAssignmentError && <p role="alert" className="text-[10px] font-semibold text-red-600">{shortcutAssignmentError}</p>}
+      {objectPresets.length > 0 && renderShortcutCategory("Object Presets", objectPresets.map((preset) => (
+        <div key={preset.id} className="settings-row flex min-w-0 items-center justify-between gap-3 text-xs font-bold text-gray-700">
+          <span className="settings-label settings-label-strong min-w-0 truncate" title={preset.name}>{preset.name}</span>
+          <div className="flex shrink-0 items-center gap-1">
+            {renderPresetShortcutRecorder(preset)}
+            {preset.shortcut && <button type="button" aria-label={`Remove ${preset.name} shortcut`} title="Remove shortcut"
+              onClick={() => setObjectPresets(current => current.map(item => item.id === preset.id ? { ...item, shortcut: "" } : item))}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-red-500 hover:bg-red-50 hover:text-red-700"><X className="h-3.5 w-3.5" /></button>}
+          </div>
         </div>
+      )))}
+      {[...new Set<string>(customSettingShortcuts.map((binding) => binding.category))].map((category) =>
+        renderShortcutCategory(category, customSettingShortcuts.filter((binding) => binding.category === category).map((binding) => (
+          <div key={binding.id} className="settings-row flex min-w-0 items-center justify-between gap-3 text-xs font-bold text-gray-700">
+            <span className="settings-label settings-label-strong min-w-0 truncate" title={`${binding.label}: ${binding.description || binding.label}`}>{binding.label}</span>
+            <div className="flex shrink-0 items-center gap-1">
+              {renderCustomShortcutRecorder(binding)}
+              <button type="button" aria-label={`Remove ${binding.label} shortcut`} title="Remove shortcut"
+                onClick={() => setCustomSettingShortcuts((current) => current.filter((item) => item.id !== binding.id))}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-red-500 hover:bg-red-50 hover:text-red-700">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        ))),
+      )}
+    </section>
+  );
+
+  const renderZoomSettings = () => (
+    <section className="flex flex-col gap-2 border-b-2 border-gray-200 pb-3 last:border-b-0 last:pb-0">
+      <button type="button" aria-pressed={altResizeCrops}
+        data-shortcut-action="editor:crop"
+        data-shortcut-label="Crop"
+        data-shortcut-category="Settings"
+        onClick={() => setAltResizeCrops((value) => !value)}
+        className="settings-row flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white">
+        <span className="settings-label settings-label-strong">Crop</span>{renderSwitch(altResizeCrops)}
+      </button>
+      <button type="button" aria-pressed={enableObjectSnapping}
+        data-shortcut-action="editor:objectSnapping"
+        data-shortcut-label="Object Snapping"
+        data-shortcut-category="Settings"
+        onClick={() => setEnableObjectSnapping((value) => !value)}
+        className="settings-row flex items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 transition-colors hover:bg-white">
+        <span className="settings-label settings-label-strong">Object Snapping</span>{renderSwitch(enableObjectSnapping)}
+      </button>
+      <div data-shortcut-action="settings:keepToolActiveFallback" data-shortcut-label="Fallback Tool"
+        data-shortcut-description="Choose which tool becomes active after Keep Tool Active is turned off."
+        data-shortcut-category="Settings"
+        className="settings-row flex items-center justify-between gap-3 text-xs font-bold text-gray-900">
+        <span className="settings-label settings-label-strong">Fallback Tool</span>
+        <SegmentedControl label="Fallback Tool" value={keepToolActiveFallback}
+          onChange={setKeepToolActiveFallback}
+          options={[{ value: 'pan', label: 'Hand' }, { value: 'select', label: 'Pointer' }]} />
       </div>
-      <label className="flex flex-col gap-1 text-xs font-bold text-gray-700">
-        <span>Scroll zoom strength</span>
-        <input
-          type="range"
-          min="0.1"
-          max="5"
-          step="0.1"
-          value={scrollZoomSensitivity}
-          onChange={(event) => setScrollZoomSensitivity(parseFloat(event.target.value))}
-          className="w-full accent-blue-500"
-        />
-      </label>
-      <div className="flex items-center justify-between gap-3 text-xs font-bold text-gray-700">
-        <span>Zoom towards</span>
-        <SegmentedControl label="Zoom towards" value={zoomToCursor ? 'cursor' : 'center'}
+      <div data-shortcut-action="editor:zoomToCursor" data-shortcut-label="Zoom Toward" data-shortcut-category="Settings" className="settings-row flex items-center justify-between gap-3 pl-1 text-xs font-bold text-gray-700">
+        <span className="settings-label">Zoom Toward</span>
+        <SegmentedControl label="Zoom Toward" value={zoomToCursor ? 'cursor' : 'center'}
           onChange={value => setZoomToCursor(value === 'cursor')}
           options={[{ value: 'cursor', label: 'Cursor' }, { value: 'center', label: 'Center' }]} />
       </div>
-      <label className="flex flex-col gap-1 text-xs font-bold text-gray-700">
-        <span>Click zoom strength</span>
-        <input
-          type="range"
-          min="0.1"
-          max="5"
-          step="0.1"
-          value={clickZoomSensitivity}
-          onChange={(event) => setClickZoomSensitivity(parseFloat(event.target.value))}
-          className="w-full accent-blue-500"
-        />
+      <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-bold text-gray-700">
+        <span className="settings-label">Scroll Zoom Strength</span>
+        <RangeSlider value={scrollZoomSensitivity} min={0.1} max={5} step={0.1} suffix="x"
+          ariaLabel="Scroll zoom strength" onChange={setScrollZoomSensitivity} />
+      </label>
+      <label className="settings-field flex flex-col gap-1 pl-1 text-xs font-bold text-gray-700">
+        <span className="settings-label">Click Zoom Strength</span>
+        <RangeSlider value={clickZoomSensitivity} min={0.1} max={5} step={0.1} suffix="x"
+          ariaLabel="Click zoom strength" onChange={setClickZoomSensitivity} />
       </label>
     </section>
   );
@@ -3505,8 +3883,6 @@ export default function BoardEditor({
           includeToolSettings: false,
           showHeading,
         });
-      case "toolDefaults":
-        return renderToolDefaultsSettings(showHeading);
       case "presetSettings":
         return renderPresetSettings(showHeading);
       case "behaviorSettings":
@@ -3574,7 +3950,7 @@ export default function BoardEditor({
                 toggleSection();
               }}
               className={cn(
-                "shrink-0 rounded-md px-2 py-1 text-[10px] font-extrabold uppercase tracking-wider transition-colors",
+                "shrink-0 rounded-md px-2 py-1 text-[10px] font-extrabold tracking-normal transition-colors",
                 expanded
                   ? "bg-blue-100 text-blue-700"
                   : "bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-800",
@@ -3587,7 +3963,9 @@ export default function BoardEditor({
               type="button"
               aria-expanded={expanded}
               aria-controls={contentId}
-              aria-label={`${label} settings`}
+              aria-label={label === "General Settings"
+                ? `${expanded ? "Collapse" : "Expand"} ${label}`
+                : `${label || "Zoom"} settings`}
               onClick={toggleSection}
               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
             >
@@ -3618,14 +3996,46 @@ export default function BoardEditor({
         renderToolbarCustomizationSettings(false),
       )}
       {renderGeneralSettingsAccordion(
+        "zoomSettings",
+        "General Settings",
+        Gear,
+        renderZoomSettings(),
+      )}
+      {renderGeneralSettingsAccordion(
         "alignmentGuides",
-        "Alignment & spacing",
+        "Guides & Measurements",
         Ruler,
-        <button type="button" aria-label="Show alignment and spacing" aria-pressed={smartGuidesEnabled}
-          onClick={() => { setSmartGuidesEnabled(value => !value); setVisibleGuides([]); }}
-          className="flex w-full items-center justify-between gap-2 px-1 py-1 text-left text-xs font-bold text-gray-700">
-          <span>Show guides</span>{renderSwitch(smartGuidesEnabled)}
-        </button>,
+        <div className="flex flex-col gap-2">
+          <button type="button" aria-label="Show Guides" aria-pressed={smartGuidesEnabled}
+            data-shortcut-action="editor:showGuides" data-shortcut-label="Show Guides" data-shortcut-category="Guides & Measurements"
+            onClick={() => { setSmartGuidesEnabled(value => !value); setVisibleGuides([]); }}
+            className="settings-row flex w-full items-center justify-between gap-2 px-1 py-1 text-left text-xs font-bold text-gray-700">
+            <span className="settings-label settings-label-strong">Show Guides</span>{renderSwitch(smartGuidesEnabled)}
+          </button>
+          {smartGuidesEnabled && <div className="flex flex-col gap-2 border-t border-gray-200 pt-2">
+            <div className="settings-row flex items-center justify-between gap-2 pl-1 text-xs font-bold text-gray-700">
+              <span className="settings-label">Density</span>
+              <div data-shortcut-action="editor:smartGuideDensity" data-shortcut-label="Guide Density" data-shortcut-category="Guides & Measurements">
+              <SegmentedControl label="Guide Density" value={smartGuideDensity} onChange={value => { setSmartGuideDensity(value); setVisibleGuides([]); }}
+                options={[{value:"low",label:"Low"},{value:"mid",label:"Mid"},{value:"high",label:"High"}]} />
+              </div>
+            </div>
+            {([
+              ["Alignment Lines", smartGuideAlignment, setSmartGuideAlignment, "editor:smartGuideAlignment"],
+              ["Pixel Distances", smartGuideDistances, setSmartGuideDistances, "editor:smartGuideDistances"],
+              ["Size Ratios", smartGuideRatios, setSmartGuideRatios, "editor:smartGuideRatios"],
+              ["Angles Between Objects", smartGuideAngles, setSmartGuideAngles, "editor:smartGuideAngles"],
+            ] as const).map(([label, enabled, setEnabled, action]) => (
+              <button key={action} type="button" aria-pressed={enabled}
+                data-shortcut-action={action} data-shortcut-label={label} data-shortcut-category="Guides & Measurements"
+                onClick={() => { setEnabled(value => !value); setVisibleGuides([]); }}
+                title={label === "Alignment Lines" ? "Matching colors connect guides to the same object relationship." : undefined}
+                className="settings-row flex w-full items-center justify-between gap-2 px-1 py-1 text-left text-xs font-bold text-gray-700">
+                <span className="settings-label">{label}</span>{renderSwitch(enabled)}
+              </button>
+            ))}
+          </div>}
+        </div>,
       )}
       {getGeneralSettingsSections(toolbarLayout)
         // Presets are managed by the Object Presets workflow in More; keep
@@ -3656,8 +4066,8 @@ export default function BoardEditor({
     const textType = selectedText?.type ?? (isScalableText(activeTool) ? activeTool as ElementType : "text");
     return (
     <div className="mt-0 pt-0">
-      <div className="mb-3">
-        <span className="text-xs font-semibold text-gray-500">Font Size</span>
+      <div className="settings-row mb-3 flex min-w-0 items-center gap-2">
+        <span className="settings-label tool-inline-size-label">Size</span>
         <TextPixelSizeControl
           value={displayedTextFontSize(target, textType)}
           variant="settings"
@@ -3665,8 +4075,8 @@ export default function BoardEditor({
           onCommit={applyTextFontSize}
         />
       </div>
-      <div className="flex items-center justify-between text-xs font-semibold text-gray-500">
-        <span>Text Color</span>
+      <div className="settings-row flex items-center justify-between text-xs font-semibold text-gray-600">
+        <span className="settings-label">Text Color</span>
         <ColorPicker
           value={elements.find(element => element.id === selectedId)?.textColor || pendingProps.textColor || "#000000"}
           onChange={changeTextColor}
@@ -3677,10 +4087,18 @@ export default function BoardEditor({
         />
       </div>
       <button type="button" aria-pressed={target.textScaling === true}
+        data-shortcut-action="editor:textScaling" data-shortcut-label="Text Scaling" data-shortcut-category="Text"
         onPointerDown={event => event.preventDefault()}
         onClick={() => update({ textScaling: target.textScaling !== true })}
-        className="mt-2 flex w-full items-center justify-between text-xs font-semibold text-gray-500">
-        <span>Text scaling</span>{renderSwitch(target.textScaling === true)}
+        className="settings-row mt-2 flex w-full items-center justify-between rounded-lg px-1 py-1 text-xs font-bold text-gray-900 hover:bg-white">
+        <span className="settings-label settings-label-strong">Text Scaling</span>{renderSwitch(target.textScaling === true)}
+      </button>
+      <button type="button" aria-pressed={target.textLineCapacityLimit !== false}
+        data-shortcut-action="editor:textLineCapacity" data-shortcut-label="Limit Text" data-shortcut-category="Text"
+        onPointerDown={event => event.preventDefault()}
+        onClick={() => update({ textLineCapacityLimit: target.textLineCapacityLimit === false })}
+        className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-xs font-bold text-gray-900 hover:bg-white">
+        <span className="settings-label settings-label-strong">Limit Text</span>{renderSwitch(target.textLineCapacityLimit !== false)}
       </button>
     </div>
   );
@@ -3688,113 +4106,87 @@ export default function BoardEditor({
 
   const renderSelectToolSettings = () => (
     <>
-      <div className="mb-2 flex flex-col gap-1.5">
-        <span className="text-xs font-bold text-gray-800">Selection</span>
-        <SegmentedControl label="Selection mode" value={selectMode} onChange={mode => { setSelectMode(mode); setActiveTool("select"); }}
-          options={[{value:"rectangle",label:"Rectangle"},{value:"lasso",label:"Lasso"},{value:"polygon",label:"Polygon"}]} />
-      </div>
-      <div className="flex flex-col gap-1.5">
-        <button
-          type="button"
-          data-select-setting-toggle="lock-time"
-          className="flex w-full items-center justify-between cursor-pointer group text-left"
-          onClick={() => setIsSelectionLockEnabled(!isSelectionLockEnabled)}
-        >
-          <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-            Lock Time (ms)
-          </span>
-          {renderSwitch(isSelectionLockEnabled)}
-        </button>
-        <input
-          type="number"
-          value={isSelectionLockEnabled ? selectionLockTimeInput : ""}
-          onChange={(event) => {
-            const rawValue = event.target.value;
-            setSelectionLockTimeInput(rawValue);
-            setSelectionLockTime(
-              rawValue.trim() === "" ? 0 : parseInt(rawValue, 10) || 0,
-            );
-          }}
-          disabled={!isSelectionLockEnabled}
-          placeholder={isSelectionLockEnabled ? "250" : "Off"}
-          min="0"
-          step="100"
-          className="w-full bg-gray-50 border-[2px] border-gray-300 rounded-md px-2 py-1 text-xs font-semibold text-gray-800 outline-none focus:border-blue-500 disabled:opacity-50 transition-colors"
-        />
-      </div>
-      <div className="w-full h-[2px] bg-gray-300 my-1" />
-      <div className="flex flex-col gap-1.5">
-        <button
-          type="button"
-          data-select-setting-toggle="spin-snap"
-          className="flex w-full items-center justify-between cursor-pointer group text-left"
-          onClick={() => setSpinSnapEnabled(!spinSnapEnabled)}
-        >
-          <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-            Spin Snap
-          </span>
-          {renderSwitch(spinSnapEnabled)}
-        </button>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            value={spinSnapDegrees}
-            onChange={(event) =>
-              setSpinSnapDegrees(
-                Math.max(
-                  1,
-                  Math.min(180, parseInt(event.target.value, 10) || 1),
-                ),
-              )
-            }
-            disabled={!spinSnapEnabled}
-            min="1"
-            max="180"
-            step="1"
-            className="w-full bg-gray-50 border-[2px] border-gray-300 rounded-md px-2 py-1 text-xs font-semibold text-gray-800 outline-none focus:border-blue-500 disabled:opacity-50 transition-colors"
-          />
-          <span className="text-[10px] font-bold text-gray-500 uppercase">
-            deg
-          </span>
+      <div className="settings-row mb-2 flex items-center justify-between gap-2 text-xs font-bold text-gray-900">
+        <span className="settings-label settings-label-strong">Selection</span>
+        <div data-shortcut-action="editor:selectMode" data-shortcut-label="Selection" data-shortcut-category="Select">
+          <SegmentedControl label="Selection" value={selectMode} onChange={mode => { setSelectMode(mode); setActiveTool("select"); }}
+            options={[{value:"rectangle",label:"Rectangle"},{value:"lasso",label:"Lasso"},{value:"polygon",label:"Polygon"}]} />
         </div>
       </div>
-      <button
-        type="button"
-        className="flex w-full items-center justify-between cursor-pointer group mt-1 text-left"
-        onClick={() => setProportionalScale(!proportionalScale)}
-      >
-        <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-          Ratio Scaling
-        </span>
-        {renderSwitch(proportionalScale)}
+      <button type="button" aria-pressed={selectMinimumCell}
+        data-shortcut-action="editor:selectMinimumCell" data-shortcut-label="Start With One Grid Cell" data-shortcut-category="Select"
+        onClick={() => setSelectMinimumCell(value => !value)}
+        className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 hover:bg-white">
+        <span className="settings-label settings-label-strong">Start With One Grid Cell</span>{renderSwitch(selectMinimumCell)}
       </button>
+      <div className="settings-row flex min-w-0 items-center gap-2">
+        <button type="button" data-select-setting-toggle="lock-time"
+          data-shortcut-action="editor:lockInTime" data-shortcut-label="Lock Time (ms)" data-shortcut-category="Select"
+          aria-pressed={isSelectionLockEnabled} onClick={() => setIsSelectionLockEnabled(value => !value)}
+          className="settings-row min-w-0 flex-1 rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 hover:bg-white">
+          <span className="settings-label settings-label-strong">Lock Time (ms)</span>
+        </button>
+        <NumericField ariaLabel="Lock time in milliseconds" value={selectionLockTime} min={0} step={1}
+          disabled={!isSelectionLockEnabled} onCommit={setSelectionLockTime} compact className="w-[3rem]" />
+        <button type="button" aria-label="Lock Time" data-select-setting-toggle="lock-time-switch"
+          data-shortcut-action="editor:lockInTime" data-shortcut-label="Lock Time (ms)" data-shortcut-category="Select"
+          aria-pressed={isSelectionLockEnabled} onClick={() => setIsSelectionLockEnabled(value => !value)}
+          className="shrink-0">
+          {renderSwitch(isSelectionLockEnabled)}
+        </button>
+      </div>
+      <div className="settings-row flex min-w-0 items-center gap-2">
+        <button type="button" data-select-setting-toggle="spin-snap"
+          data-shortcut-action="editor:spinSnap" data-shortcut-label="Spin Snap (deg)" data-shortcut-category="Select"
+          aria-pressed={spinSnapEnabled} onClick={() => setSpinSnapEnabled(value => !value)}
+          className="settings-row min-w-0 flex-1 rounded-lg px-1 py-1 text-left text-xs font-bold text-gray-700 hover:bg-white">
+          <span className="settings-label settings-label-strong">Spin Snap (deg)</span>
+        </button>
+        <NumericField ariaLabel="Spin snap angle in degrees" value={spinSnapDegrees} min={1} max={180} step={1}
+          disabled={!spinSnapEnabled} onCommit={setSpinSnapDegrees} compact className="w-[3rem]" />
+        <button type="button" aria-label="Spin Snap" data-select-setting-toggle="spin-snap"
+          data-shortcut-action="editor:spinSnap" data-shortcut-label="Spin Snap (deg)" data-shortcut-category="Select"
+          aria-pressed={spinSnapEnabled} onClick={() => setSpinSnapEnabled(value => !value)}
+          className="shrink-0">
+          {renderSwitch(spinSnapEnabled)}
+        </button>
+      </div>
       <button
         type="button"
-        className="flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
+        data-shortcut-action="editor:autoSelectAfterPlacing"
+        data-shortcut-label="Auto Select After Placing"
+        data-shortcut-category="Select"
+        className="settings-row flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
         onClick={() => setAutoSelectOnPlace(!autoSelectOnPlace)}
       >
-        <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-          Auto-select After Draw
+        <span className="settings-label settings-label-strong text-xs font-bold text-gray-800 select-none group-hover:text-black">
+          Auto Select After Placing
         </span>
         {renderSwitch(autoSelectOnPlace)}
       </button>
       <button
         type="button"
-        className="flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
+        data-shortcut-action="editor:switchToolAfterPlacing"
+        data-shortcut-label="Switch Tool After Placing"
+        data-shortcut-category="Select"
+        className="settings-row flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
         onClick={() => setSwitchToolAfterPlacing(!switchToolAfterPlacing)}
       >
-        <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-          Switch tool after placing
+        <span className="settings-label settings-label-strong text-xs font-bold text-gray-800 select-none group-hover:text-black">
+          Switch Tool After Placing
         </span>
         {renderSwitch(switchToolAfterPlacing)}
       </button>
       <button
         type="button"
-        className="flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
+        data-shortcut-action="editor:selectSwitchesToObjectTool"
+        data-shortcut-label="Select Switches to Object Tool"
+        data-shortcut-category="Select"
+        className="settings-row flex w-full items-center justify-between cursor-pointer group mb-1 text-left"
         onClick={() => setAutoToolOnSelect(!autoToolOnSelect)}
       >
-        <span className="text-xs font-bold text-gray-800 select-none group-hover:text-black">
-          Select switches to object tool
+        <span className="settings-label settings-label-strong text-xs font-bold text-gray-800 select-none group-hover:text-black">
+          Select Switches to Object Tool
         </span>
         {renderSwitch(autoToolOnSelect)}
       </button>
@@ -3814,22 +4206,24 @@ export default function BoardEditor({
     <>
       <button
         type="button"
-        className="flex w-full items-center justify-between cursor-pointer group text-left"
+        data-shortcut-action="editor:allowEditing" data-shortcut-label="Allow Editing Elements" data-shortcut-category="Hand"
+        className="settings-row flex w-full items-center justify-between cursor-pointer group text-left"
         onClick={() => setPanEditingEnabled(!allowEditing)}
       >
-        <span className="text-xs font-bold text-gray-700 select-none">
+        <span className="settings-label settings-label-strong text-xs font-bold text-gray-700 select-none">
           Allow Editing Elements
         </span>
         {renderSwitch(allowEditing)}
       </button>
       <button
         type="button"
-        className="flex w-full items-center justify-between cursor-pointer group text-left"
+        data-shortcut-action="editor:allowMovingInPan" data-shortcut-label="Allow Moving Elements" data-shortcut-category="Hand"
+        className="settings-row flex w-full items-center justify-between cursor-pointer group text-left"
         onClick={() =>
           setAllowMovingElementsInPan(!allowMovingElementsInPan)
         }
       >
-        <span className="text-xs font-bold text-gray-700 select-none">
+        <span className="settings-label settings-label-strong text-xs font-bold text-gray-700 select-none">
           Allow Moving Elements
         </span>
         {renderSwitch(allowMovingElementsInPan)}
@@ -3879,11 +4273,13 @@ export default function BoardEditor({
           <span>{shape.label}</span>
         </button>
       ))}
-      {activeTool === "triangle" && <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs font-bold text-gray-600">
-        <span>Corners</span>
-        <SegmentedControl label="Triangle corners" value={triangleProps.strokeLinejoin ?? 'miter'}
+      {activeTool === "triangle" && <div className="settings-row flex items-center justify-between gap-2 px-2 py-1 text-xs font-bold text-gray-600">
+        <span className="settings-label">Corners</span>
+        <div data-shortcut-action="editor:triangleCorners" data-shortcut-label="Triangle Corners" data-shortcut-category="Shapes">
+        <SegmentedControl label="Triangle Corners" value={triangleProps.strokeLinejoin ?? 'miter'}
           onChange={value => selectedTriangle ? updateElement(selectedTriangle.id,{strokeLinejoin:value}) : updatePendingToolProps({strokeLinejoin:value})}
           options={[{value:'miter',label:'Sharp'},{value:'round',label:'Rounded'}]} />
+        </div>
       </div>}
     </div>
     );
@@ -3900,8 +4296,8 @@ export default function BoardEditor({
     const shapeGuesser = pendingProps.drawingAssistGuess === true;
     return (
       <div className="flex flex-col gap-3">
-        <div className="flex items-center justify-between text-xs font-semibold text-gray-500 mb-1">
-          <span>Color</span>
+        <div className="settings-row flex items-center justify-between text-xs font-semibold text-gray-600 mb-1">
+          <span className="settings-label">Color</span>
           <ColorPicker
             value={selectedDraw?.borderColor || pendingProps.borderColor || "#000000"}
             onChange={(color) =>
@@ -3914,119 +4310,72 @@ export default function BoardEditor({
             customSlots={2}
           />
         </div>
-        <label className="flex flex-col gap-1">
-          <span className="flex items-center justify-between text-xs font-semibold text-gray-500">
-            <span>Stroke Width</span>
-            <span className="text-black bg-gray-100 rounded px-1">
-              {pendingProps.borderWidth || 4}px
-            </span>
-          </span>
-          <input
-            type="range"
-            min="1"
-            max="30"
-            value={pendingProps.borderWidth || 4}
-            onChange={(event) =>
-              updatePendingToolProps({
-                borderWidth: parseInt(event.target.value, 10),
-              })
-            }
-            className="w-full accent-blue-500"
-          />
-        </label>
-        <div className="border-t border-gray-200 pt-2 mt-1">
+        <div className="settings-row mb-1 flex min-w-0 items-center gap-2 text-xs font-semibold text-gray-600">
+          <span className="settings-label tool-inline-size-label">Size</span>
+          <RangeSlider compact ariaLabel="Draw size" min={1} max={30} step={1}
+            value={pendingProps.borderWidth ?? 4} suffix="px"
+            onChange={(borderWidth) => updatePendingToolProps({ borderWidth })} className="min-w-0 flex-1" />
+        </div>
+        <div className="pt-1">
           <button
             type="button"
-            className="flex w-full items-center justify-between cursor-pointer group mb-2 text-left"
+            data-shortcut-action="editor:drawingAssistance" data-shortcut-label="Drawing Assistance" data-shortcut-category="Draw"
+            className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 cursor-pointer group mb-1 text-left"
             onClick={() =>
               updatePendingToolProps({ isSmooth: !drawingAssistance })
             }
           >
-            <span className="text-xs font-bold text-gray-800 select-none">
+            <span className="settings-label settings-label-strong text-xs font-bold text-gray-900 select-none">
               Drawing Assistance
             </span>
             {renderSwitch(drawingAssistance)}
           </button>
           {drawingAssistance && (
-            <div className="pl-2 flex flex-col gap-2">
+            <div className="flex flex-col gap-2">
               <button
                 type="button"
-                className="flex w-full items-center justify-between cursor-pointer group text-left"
+                data-shortcut-action="editor:lineSmoothing" data-shortcut-label="Line Smoothing" data-shortcut-category="Draw"
+                className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 cursor-pointer group text-left"
                 onClick={() =>
                   updatePendingToolProps({
                     drawingAssistSmooth: !lineSmoothing,
                   })
                 }
               >
-                <span className="text-xs font-medium text-gray-600 select-none">
+                <span className="settings-label settings-label-strong text-xs font-bold text-gray-900 select-none">
                   Line Smoothing
                 </span>
                 {renderSwitch(lineSmoothing)}
               </button>
               {lineSmoothing && (
-                <label className="flex flex-col gap-2 my-2">
-                  <span className="flex items-center justify-between text-xs font-semibold text-gray-500">
-                    <span>Strength</span>
-                    <span className="text-gray-500">
-                      {pendingProps.drawingAssistSmoothStrength ?? 5}/10
-                    </span>
-                  </span>
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    step="1"
-                    value={pendingProps.drawingAssistSmoothStrength ?? 5}
-                    onChange={(event) =>
-                      updatePendingToolProps({
-                        drawingAssistSmoothStrength: parseInt(
-                          event.target.value,
-                          10,
-                        ),
-                      })
-                    }
-                    className="w-full accent-blue-400 h-1"
-                  />
+                <label className="settings-field flex flex-col gap-2 my-2">
+                  <span className="settings-label">Strength</span>
+                  <RangeSlider ariaLabel="Line smoothing strength" min={1} max={10} step={1}
+                    value={pendingProps.drawingAssistSmoothStrength ?? 5} suffix="/10"
+                    onChange={(drawingAssistSmoothStrength) => updatePendingToolProps({ drawingAssistSmoothStrength })} />
                 </label>
               )}
               <button
                 type="button"
-                className="flex w-full items-center justify-between cursor-pointer group text-left"
+                data-shortcut-action="editor:shapeGuessing" data-shortcut-label="Shape Guessing" data-shortcut-category="Draw"
+                className="settings-row flex w-full items-center justify-between rounded-lg px-1 py-1 cursor-pointer group text-left"
                 onClick={() =>
                   updatePendingToolProps({
                     drawingAssistGuess: !shapeGuesser,
                   })
                 }
               >
-                <span className="text-xs font-medium text-gray-600 select-none">
+                <span className="settings-label settings-label-strong text-xs font-bold text-gray-900 select-none">
                   Shape Guessing
                 </span>
                 {renderSwitch(shapeGuesser)}
               </button>
               {shapeGuesser && (
-                <label className="flex flex-col gap-1 pl-2 border-l-2 border-gray-100 ml-1 mt-1">
-                  <span className="flex items-center justify-between text-xs font-semibold text-gray-500">
-                    <span>Strength</span>
-                    <span className="text-gray-500">
-                      {pendingProps.drawingAssistStrength ?? 5}/10
-                    </span>
-                  </span>
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    step="1"
-                    value={pendingProps.drawingAssistStrength ?? 5}
-                    onChange={(event) =>
-                      updatePendingToolProps({
-                        drawingAssistStrength: parseInt(
-                          event.target.value,
-                          10,
-                        ),
-                      })
-                    }
-                    className="w-full accent-blue-400 h-1"
-                  />
+                <label className="settings-field flex flex-col gap-1 mt-1">
+                  <span className="settings-label">Strength</span>
+                  <RangeSlider ariaLabel="Shape guessing strength" min={1} max={10} step={1}
+                    value={pendingProps.drawingAssistStrength ?? 5} suffix="/10"
+                    onChange={(drawingAssistStrength) => updatePendingToolProps({ drawingAssistStrength })} />
                 </label>
               )}
             </div>
@@ -4037,18 +4386,20 @@ export default function BoardEditor({
   };
 
   const renderFillToolSettings = () => (
-    <div className="flex items-center justify-between gap-4 text-xs font-semibold text-gray-500 mb-1">
-      <span className="whitespace-nowrap">Color</span>
-      <div className="flex items-center gap-2">
-        <Palette className="w-4 h-4 text-gray-400" />
-        <ColorPicker
-          value={fillToolColor}
-          onChange={setFillToolColor}
-          customColors={customColors.fill}
-          onAddCustomColor={(color, index) =>
-            handleAddCustomColor(color, index, "fill")
-          }
-        />
+    <div className="flex flex-col gap-2">
+      <div data-shortcut-action="editor:fillMode" data-shortcut-label="Fill Target" data-shortcut-category="Fill"
+        className="settings-row flex items-center justify-between gap-3 text-xs font-semibold text-gray-600">
+        <span className="settings-label">Fill Target</span>
+        <SegmentedControl label="Fill Target" value={fillMode} onChange={setFillMode}
+          options={[{ value: "area", label: "Area" }, { value: "object", label: "Object" }]} />
+      </div>
+      <div className="settings-row flex items-center justify-between gap-4 text-xs font-semibold text-gray-500">
+        <span className="settings-label whitespace-nowrap">Color</span>
+        <div className="flex items-center gap-2">
+          <Palette className="w-4 h-4 text-gray-400" />
+          <ColorPicker value={fillToolColor} onChange={setFillToolColor} customColors={customColors.fill}
+            onAddCustomColor={(color, index) => handleAddCustomColor(color, index, "fill")} />
+        </div>
       </div>
     </div>
   );
@@ -4068,13 +4419,13 @@ export default function BoardEditor({
         }
         className="flex w-full items-center justify-center gap-1 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-[11px] font-bold text-gray-600 hover:border-blue-300 hover:text-blue-700"
       >
-        <Plus className="h-3.5 w-3.5" /> Add preset
+        <Plus className="h-3.5 w-3.5" /> Add Preset
       </button>
-      {objectPresets.length > 0 && <div className="flex flex-col gap-1">
+      {objectPresets.length > 0 && <div className="mt-0.5 flex flex-col gap-1 pb-1">
         {objectPresets.map((preset) => (
             <div
               key={`inline-preset-${preset.id}`}
-              className="flex items-center gap-1 rounded-md bg-white px-1.5 py-1"
+              className="flex items-center gap-1 rounded-md bg-white px-1.5 py-0.5"
             >
               <input
                 value={preset.name}
@@ -4087,31 +4438,10 @@ export default function BoardEditor({
                     ),
                   )
                 }
-                className="min-w-0 flex-1 bg-transparent text-[11px] font-bold text-gray-600 outline-none"
+                className="min-w-0 flex-1 bg-transparent text-xs font-bold text-gray-600 outline-none"
                 aria-label={`Rename ${preset.name}`}
               />
-              <button
-                type="button"
-                onClick={() => {
-                  setPickingObjectPresetId(preset.id);
-                  setActiveTool("select");
-                }}
-                aria-pressed={pickingObjectPresetId === preset.id}
-                className={cn(
-                  "rounded p-1 hover:bg-blue-50 hover:text-blue-700",
-                  pickingObjectPresetId === preset.id
-                    ? "bg-blue-50 text-blue-700"
-                    : "text-gray-400",
-                )}
-                title={preset.element ? "Pick another object" : "Pick an object"}
-                aria-label={preset.element ? "Pick another object" : "Pick an object"}
-              >
-                {pickingObjectPresetId === preset.id ? (
-                  <Check className="h-3 w-3" />
-                ) : (
-                  <ChevronRight className="h-3 w-3" />
-                )}
-              </button>
+              {renderObjectPresetPicker(preset, "more")}
               <button
                 type="button"
                 onClick={() =>
@@ -4128,7 +4458,6 @@ export default function BoardEditor({
             </div>
           ))}
       </div>}
-      {renderAlwaysOnTopControl("object-presets")}
     </>
   );
 
@@ -4164,7 +4493,9 @@ export default function BoardEditor({
           </div>
         );
       case "media":
-        return renderMenuSettingsBlock("media", true);
+        return renderMediaSettings(true);
+      case "zoom":
+        return renderMenuSettingsBlock("zoom", true);
       case "table":
         return renderMenuSettingsBlock("table", true);
       case "draw":
@@ -4198,15 +4529,12 @@ export default function BoardEditor({
       case "board":
         return renderMenuSettingsBlock("grid", true);
       case "link":
-        return (
-          <div className="flex flex-col gap-3">
-            {renderAlwaysOnTopControl("link")}
-          </div>
-        );
+        return footer("link");
       case "object-presets":
         return (
           <div className="flex flex-col gap-3">
             {renderObjectPresetsInlineSettings()}
+            {footer("object-presets")}
           </div>
         );
       default:
@@ -4216,15 +4544,17 @@ export default function BoardEditor({
 
   const renderEraserToolSettings = () => (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
-        <span>Mode</span>
-        <SegmentedControl label="Eraser mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
+      <div className="settings-row flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
+        <span className="settings-label">Eraser Mode</span>
+        <div data-shortcut-action="editor:eraserMode" data-shortcut-label="Eraser Mode" data-shortcut-category="Eraser"><SegmentedControl label="Eraser Mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} /></div>
       </div>
-      <div className="flex items-center justify-between text-xs font-semibold text-gray-500"><span>Size</span><span className="text-black bg-gray-100 rounded px-1">{eraserSize}px</span></div>
-      <input type="range" min={1} max={80} value={eraserSize} onChange={event => setEraserSize(parseInt(event.target.value, 10) || 20)} className="w-full accent-blue-500" />
-      <div className="flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
-        <span>Shape</span>
-        <SegmentedControl label="Eraser shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} />
+      <div className="settings-row flex items-center justify-between gap-3 text-xs font-semibold text-gray-500">
+        <span className="settings-label">Shape</span>
+        <div data-shortcut-action="editor:eraserShape" data-shortcut-label="Eraser Shape" data-shortcut-category="Eraser"><SegmentedControl label="Eraser Shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} /></div>
+      </div>
+      <div className="settings-row flex min-w-0 items-center gap-2 text-xs font-semibold text-gray-500">
+        <span className="settings-label tool-inline-size-label">Size</span>
+        <RangeSlider compact ariaLabel="Eraser size" min={1} max={80} step={1} value={eraserSize} suffix="px" onChange={setEraserSize} className="min-w-0 flex-1" />
       </div>
     </div>
   );
@@ -4244,32 +4574,19 @@ export default function BoardEditor({
     const settings = getWebSettings(selectedWeb ?? pendingProps);
     return (
       <div className="flex flex-col gap-2">
-        <div className="flex items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider text-gray-500">
-          <span>Device mode</span>
-          <div className="flex gap-1">
-            {(Object.keys(WEB_DEVICE_PROFILES) as WebDeviceMode[]).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                aria-pressed={settings.deviceMode === mode}
-                onClick={() => {
-                  if (mode !== settings.deviceMode) updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } });
-                }}
-                className={cn(
-                  "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors",
-                  settings.deviceMode === mode
-                    ? "border-blue-300 bg-blue-50 text-blue-700"
-                    : "border-gray-200 bg-white text-gray-500 hover:bg-gray-100",
-                )}
-              >
-                {WEB_DEVICE_PROFILES[mode].label}
-              </button>
-            ))}
-          </div>
+        <div data-shortcut-action="web:deviceMode" data-shortcut-label="Device Mode" data-shortcut-category="Web" className="settings-row flex items-center justify-between gap-2 px-1 text-xs font-bold text-gray-700">
+          <span className="settings-label">Device Mode</span>
+          <SegmentedControl label="Device Mode" value={settings.deviceMode}
+            onChange={(mode) => {
+              if (mode !== settings.deviceMode) updatePendingWebSettings({ webDeviceMode: mode, size: { ...WEB_DEVICE_PROFILES[mode].defaultSize } });
+            }}
+            options={(Object.keys(WEB_DEVICE_PROFILES) as WebDeviceMode[]).map((mode) => ({ value: mode, label: WEB_DEVICE_PROFILES[mode].label }))} />
         </div>
-        <button type="button" aria-pressed={settings.popupBlocker} onClick={() => updatePendingWebSettings({ webPopupBlocker: !settings.popupBlocker })}
-          className="flex items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-600 hover:bg-white">
-          <span>Block popups</span>{renderSwitch(settings.popupBlocker)}
+        <button type="button" aria-pressed={settings.popupBlocker}
+          data-shortcut-action="web:popupBlocker" data-shortcut-label="Block Popups" data-shortcut-category="Web"
+          onClick={() => updatePendingWebSettings({ webPopupBlocker: !settings.popupBlocker })}
+          className="settings-row flex items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-600 hover:bg-white">
+          <span className="settings-label settings-label-strong">Block Popups</span>{renderSwitch(settings.popupBlocker)}
         </button>
         <>
         {desktopWebRuntime && (
@@ -4277,75 +4594,58 @@ export default function BoardEditor({
             <button
               type="button"
               aria-pressed={settings.rememberSession}
+              data-shortcut-action="web:rememberSession" data-shortcut-label="Remember Session" data-shortcut-category="Web"
               onClick={() =>
                 updatePendingWebSettings({
                   webRememberSession: !settings.rememberSession,
                 })
               }
-              className="flex items-center justify-between rounded-md px-1 py-1 text-left text-[11px] font-bold text-gray-600 hover:bg-white"
+              className="settings-row flex items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-600 hover:bg-white"
             >
-              <span>Remember session</span>
-              <span
-                className={cn(
-                  "rounded-md px-1.5 py-0.5 text-[9px] uppercase tracking-wider",
-                  settings.rememberSession
-                    ? "bg-blue-50 text-blue-700"
-                    : "bg-gray-100 text-gray-500",
-                )}
-              >
-                {settings.rememberSession ? "On" : "Off"}
-              </span>
+              <span className="settings-label settings-label-strong">Remember Session</span>
+              {renderSwitch(settings.rememberSession)}
             </button>
             </>
         )}
             <button
               type="button"
               aria-pressed={settings.adBlock}
+              data-shortcut-action="web:adBlock" data-shortcut-label="Ad Blocker" data-shortcut-category="Web"
               disabled={!desktopWebRuntime}
               title={!desktopWebRuntime ? 'Available in the desktop app' : 'Block known ad and tracking requests'}
               onClick={() =>
                 updatePendingWebSettings({ webAdBlock: !settings.adBlock })
               }
-              className="flex items-center justify-between rounded-md px-1 py-1 text-left text-[11px] font-bold text-gray-600 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
+              className="settings-row flex items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-600 hover:bg-white disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <span>Ad blocker</span>
-              <span
-                className={cn(
-                  "rounded-md px-1.5 py-0.5 text-[9px] uppercase tracking-wider",
-                  settings.adBlock
-                    ? "bg-blue-50 text-blue-700"
-                    : "bg-gray-100 text-gray-500",
-                )}
-              >
-                {settings.adBlock && desktopWebRuntime && selectedWeb ? <WebBlockingBadge partition={getWebPartition(selectedWeb)} /> : settings.adBlock ? "On" : "Off"}
+              <span className="settings-label settings-label-strong">Ad Blocker</span>
+              <span className="flex items-center gap-2">
+                {settings.adBlock && desktopWebRuntime && selectedWeb && <WebBlockingBadge partition={getWebPartition(selectedWeb)} />}
+                {renderSwitch(settings.adBlock)}
               </span>
             </button>
-            <div role="group" aria-label="Cookie blocker" title={!desktopWebRuntime ? 'Available in the desktop app' : 'Block cookie transmission and storage'} className="flex items-center justify-between gap-2 text-[11px] font-bold text-gray-600">
-              <span>Cookie blocker</span>
-              <div className="flex gap-1">
-                {(["off", "third-party", "all"] as WebCookieBlockerMode[]).map(
-                  (mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      disabled={!desktopWebRuntime}
-                      aria-pressed={settings.cookieBlocker === mode}
-                      onClick={() =>
-                        updatePendingWebSettings({ webCookieBlocker: mode })
-                      }
-                      className={cn(
-                        "rounded-md border px-1.5 py-1 text-[9px] font-bold transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
-                        settings.cookieBlocker === mode
-                          ? "border-blue-300 bg-blue-50 text-blue-700"
-                          : "border-gray-200 bg-white text-gray-500 hover:bg-gray-100",
-                      )}
-                    >
-                      {WEB_COOKIE_BLOCKER_LABELS[mode]}
-                    </button>
-                  ),
-                )}
-              </div>
+            <div role="group" aria-label="Cookie Blocker" title={!desktopWebRuntime ? 'Available in the desktop app' : 'Block cookie transmission and storage'}
+              data-shortcut-action="web:cookieBlocker" data-shortcut-label="Cookie Blocker" data-shortcut-category="Web"
+              className="settings-row flex items-center justify-between gap-2 px-1 text-xs font-bold text-gray-700">
+              <span className="settings-label">Cookie Blocker</span>
+              <SegmentedControl label="Cookie Blocker" disabled={!desktopWebRuntime}
+                value={settings.cookieBlocker}
+                onChange={(mode) => updatePendingWebSettings({ webCookieBlocker: mode })}
+                options={(["off", "third-party", "all"] as WebCookieBlockerMode[]).map((mode) => ({ value: mode, label: WEB_COOKIE_BLOCKER_LABELS[mode] }))} />
             </div>
+            <div data-shortcut-action="web:fullscreenMode" data-shortcut-label="Fullscreen Mode" data-shortcut-category="Web"
+              className="settings-row flex items-center justify-between gap-2 px-1 text-xs font-bold text-gray-700">
+              <span className="settings-label shrink-0 whitespace-nowrap">Fullscreen Mode</span>
+              <SegmentedControl narrow label="Fullscreen Mode" value={settings.fullscreenMode}
+                onChange={(mode) => updatePendingWebSettings({ webFullscreenMode: mode })}
+                options={[{ value: "area", label: "Web Area" }, { value: "real", label: "Real Fullscreen" }]} />
+            </div>
+            <button type="button" aria-pressed={settings.controlsHidden}
+              data-shortcut-action="web:controlsHidden" data-shortcut-label="Hide Web Controls" data-shortcut-category="Web"
+              onClick={() => updatePendingWebSettings({ webControlsHidden: !settings.controlsHidden })}
+              className="settings-row flex w-full items-center justify-between rounded-md px-1 py-1 text-left text-xs font-bold text-gray-700 hover:bg-white">
+              <span className="settings-label settings-label-strong">Hide Web Controls</span>{renderSwitch(settings.controlsHidden)}
+            </button>
         </>
       </div>
     );
@@ -4358,9 +4658,6 @@ export default function BoardEditor({
 
   useEffect(() => {
     return () => {
-      if (objectDefaultsSavedTimerRef.current) {
-        clearTimeout(objectDefaultsSavedTimerRef.current);
-      }
       if (objectDuplicatedTimerRef.current) clearTimeout(objectDuplicatedTimerRef.current);
     };
   }, []);
@@ -4910,6 +5207,7 @@ export default function BoardEditor({
     const handleClickOutside = (e: MouseEvent | TouchEvent) => {
       const target = e.target as HTMLElement;
       if (
+        target.closest("[data-preset-picker-finish]") ||
         target.closest(".toolbar-dropdown") ||
         target.closest("[data-toolbar-item]")
       ) {
@@ -4932,9 +5230,6 @@ export default function BoardEditor({
       document.removeEventListener("touchstart", handleClickOutside);
     };
   }, [
-    alwaysOnTop,
-    keepToolActive,
-    previewMode,
     detachedMoreMenuId,
     pickingObjectPresetId,
     toolSettingsOverrides,
@@ -5061,8 +5356,9 @@ export default function BoardEditor({
           finalRect.w = size.width;
           finalRect.h = size.height;
         } else {
-          finalRect.w = Math.ceil(finalRect.w/spreadsheetCellSize.width)*spreadsheetCellSize.width;
-          finalRect.h = Math.ceil(finalRect.h/spreadsheetCellSize.height)*spreadsheetCellSize.height;
+          const size = snapAdvancedGridViewportSize(null, finalRect.w, finalRect.h, spreadsheetCellSize);
+          finalRect.w = size.width;
+          finalRect.h = size.height;
         }
       }
       if (bounds) {
@@ -5187,6 +5483,9 @@ export default function BoardEditor({
       ? createBoardSurface(newElement.id, newElement.position, newElement.size!, newElement.color, newElement.zIndex)
       : newElement;
     pushElements([...latestElements, placedElement]);
+    // New boards are root-level surfaces, so leave a nested Layers view where
+    // that root-level object (and subsequent board content) would be hidden.
+    if (type === "board" && currentLayerView) setCurrentLayerView(null);
 
     finishToolUse(type);
 
@@ -5427,11 +5726,12 @@ export default function BoardEditor({
   };
 
   const toolForSelectedElement = (element: BoardElement) => {
-    if(element.type==='group')return 'select';
+    // The Board tool creates new surfaces. Existing board surfaces are edited
+    // through Select and must not reactivate the creation tool when selected.
+    if(element.type==='group' || element.type==='board')return 'select';
     if (element.type === "image" || element.type === "media") return "media";
     if (element.type === "embed") return "embed";
     if (element.type === "section") return "section";
-    if (element.type === "board") return "board";
     return element.type;
   };
 
@@ -5651,6 +5951,19 @@ export default function BoardEditor({
     pushElements(result.elements);setSelectedId(result.group.id);setQuickAddRegion(null);setSelectMode('rectangle');setActiveTool('select');
     if(currentLayerView&&createElementHierarchy(result.elements).isDescendantOf(currentLayerView,result.group.id))setCurrentLayerView(result.group.parentId??null);
   };
+  const moveSelectionArea=()=>{
+    if(!quickAddRegion)return;
+    const latest=syncLiveEditableState(elementsRef.current);
+    const ids=selectElementsInOutline(latest,selectionOutline(quickAddRegion),respectLayerVisibility);
+    if(!ids.length)return;
+    setSelectedId(ids.length===1?ids[0]:null);
+    setQuickAddRegion(null);
+    setSelectMode('rectangle');
+    setActiveTool('select');
+    // Tool/mode changes may clear the previous selection. Apply the region's
+    // element IDs after those changes so the floating multi-selection remains.
+    setSelectedIds(ids);
+  };
   const ungroupSelection=()=>{
     if(!selectedId)return;
     const result=ungroupAreaElements(elementsRef.current,selectedId);
@@ -5795,15 +6108,24 @@ export default function BoardEditor({
       "lineHeight",
       "isBold",
       "isItalic",
+      "textLineCapacityLimit",
       "mediaControlsHidden",
+      "mediaDisabled",
       "mediaLoop",
       "mediaPlaybackRate",
       "mediaVolume",
       "webRememberSession",
       "webDeviceMode",
+      "webFullscreenMode",
+      "webControlsHidden",
       "webAdBlock",
       "webCookieBlocker",
       "webPopupBlocker",
+      "isSmooth",
+      "drawingAssistSmooth",
+      "drawingAssistSmoothStrength",
+      "drawingAssistGuess",
+      "drawingAssistStrength",
     ];
     const defaults: Partial<BoardElement> = {};
     keys.forEach((key) => {
@@ -5838,12 +6160,7 @@ export default function BoardEditor({
       pendingProps: nextPendingProps,
     })).then(accepted => {
       if (accepted === false) return;
-      setObjectDefaultsSaved(true);
-      if (objectDefaultsSavedTimerRef.current) clearTimeout(objectDefaultsSavedTimerRef.current);
-      objectDefaultsSavedTimerRef.current = setTimeout(() => {
-        setObjectDefaultsSaved(false);
-        objectDefaultsSavedTimerRef.current = null;
-      }, 900);
+      setSavedObjectDefaultsSignature(`${type}:${JSON.stringify(defaults)}`);
     });
   };
 
@@ -5914,7 +6231,7 @@ export default function BoardEditor({
   };
 
   const pickObjectForPreset = (presetId: string, element: BoardElement) => {
-    if (element.type === "layer" || element.type === "draw" || element.isEraser) {
+    if (element.type === "layer" || element.isEraser) {
       return;
     }
     const hierarchy=createElementHierarchy(elementsRef.current);
@@ -5929,6 +6246,13 @@ export default function BoardEditor({
       ),
     );
     setPickingObjectPresetId(null);
+    setPresetSelectionCandidateId(null);
+  };
+
+  const finishObjectPresetPicking = () => {
+    if (!pickingObjectPresetId || !presetSelectionCandidateId) return;
+    const element = elementsRef.current.find(item => item.id === presetSelectionCandidateId);
+    if (element) pickObjectForPreset(pickingObjectPresetId, element);
   };
 
   const getLayerPanelElements = (includePreview = true) => {
@@ -6141,15 +6465,17 @@ export default function BoardEditor({
   } = {}): BoardEditorSettings => ({
     activeTool,
     selectMode,
+    selectMinimumCell,
     spreadsheetCellWidth:spreadsheetCellSize.width,
     spreadsheetCellHeight:spreadsheetCellSize.height,
     spreadsheetMode,
     customColors,
     pendingProps: overrides.pendingProps ?? pendingProps,
-    alwaysOnTop,
-    keepToolActive,
     keepToolActiveFallback,
     toolModeShortcut,
+    previewShortcut,
+    activeToolRatioShortcut,
+    customSettingShortcuts,
     gridToggleShortcut,
     overlapShortcut,
     cropShortcut,
@@ -6157,14 +6483,19 @@ export default function BoardEditor({
     zoomToCursor,
     keepBoardContentPosition,
     cutShortcut,
-    proportionalScale,
     altResizeCrops,
-    previewMode,
+    mediaPlaybackDisabled,
+    objectPresetsPanelAlwaysOnTop,
     toolMenuSettingsOverrides: toolSettingsOverrides,
     isSelectionLockEnabled,
     selectionLockTime,
     enableObjectSnapping,
     smartGuidesEnabled,
+    smartGuideDensity,
+    smartGuideAlignment,
+    smartGuideDistances,
+    smartGuideRatios,
+    smartGuideAngles,
     autoSelectOnPlace,
       switchToolAfterPlacing,
     autoToolOnSelect,
@@ -6173,6 +6504,7 @@ export default function BoardEditor({
     allowEditing,
     allowMovingElementsInPan,
     fillToolColor,
+    fillMode,
     eraserMode,
     eraserSize,
     eraserShape,
@@ -6355,57 +6687,6 @@ export default function BoardEditor({
     return kind === 'template' ? 'Template saved.' : 'New board saved in My Noteboards.';
   };
 
-  const handleConfirmPresetSave = async () => {
-    if (presetSaving) return;
-    setPresetSaving(true);
-    setPresetSaveError('');
-    const candidate = pendingPresetRef.current ?? {
-      id: 'preset-' + generateId(),
-      name: presetName || "Custom Preset",
-      description: "Custom preset created from page.",
-      icon: "LayoutGrid",
-      elements: presetContentChecked
-        ? structuredClone(elements)
-        : [],
-      sectionSheets: presetContentChecked
-        ? structuredClone(sectionSheets)
-        : [],
-      width: presetSettingsChecked ? pageDimensions.width : undefined,
-      height: presetSettingsChecked ? pageDimensions.height : undefined,
-      workspaceWidth: presetSettingsChecked
-        ? workspaceDimensions.width
-        : undefined,
-      workspaceHeight: presetSettingsChecked
-        ? workspaceDimensions.height
-        : undefined,
-      showGrid: presetSettingsChecked ? showGrid : undefined,
-      snapToGrid: presetSettingsChecked ? snapToGrid : undefined,
-      showWorkspaceGrid: presetSettingsChecked ? showWorkspaceGrid : undefined,
-      gridColor: presetSettingsChecked ? gridColor : undefined,
-      boardColor: presetSettingsChecked ? boardColor : undefined,
-      gridThickness: presetSettingsChecked ? gridThickness : undefined,
-      gridSize: presetSettingsChecked ? gridSize : undefined,
-      workspaceGridColor: presetSettingsChecked ? workspaceGridColor : undefined,
-      workspaceGridThickness: presetSettingsChecked ? workspaceGridThickness : undefined,
-      workspaceGridSize: presetSettingsChecked ? workspaceGridSize : undefined,
-      editorSettings: presetSettingsChecked
-        ? collectEditorSettings()
-        : undefined,
-      brightness: undefined,
-      isBuiltIn: false,
-    };
-    pendingPresetRef.current = candidate;
-    try {
-      if (await onSavePreset(candidate) === false) throw new Error('The preset was not acknowledged.');
-      pendingPresetRef.current = null;
-      setShowSaveModal(false);
-    } catch (error) {
-      setPresetSaveError(error instanceof Error ? error.message : 'Could not save the preset. Please retry.');
-    } finally {
-      setPresetSaving(false);
-    }
-  };
-
   const selectedElement = elements.find((el) => el.id === selectedId);
 
   const jumpToElement = (id: string) => {
@@ -6571,7 +6852,6 @@ export default function BoardEditor({
 
     if (activeTool === "fill") {
       setIsInteracting(true);
-      beginAreaGesture({ x: exactX, y: exactY }, e.pointerId, activeTool);
       void applyFillAtPoint({ x: exactX, y: exactY }, { x: e.clientX, y: e.clientY });
       return;
     }
@@ -6591,6 +6871,25 @@ export default function BoardEditor({
 
     beginAreaGesture(snappedPoint, e.pointerId, activeTool, pointerPoint);
     setIsInteracting(true);
+  };
+
+  const getSelectAreaRect = (
+    start: { x: number; y: number },
+    current: { x: number; y: number },
+    bounds?: { minX: number; minY: number; maxX: number; maxY: number },
+  ) => {
+    if (selectMinimumCell) return getMinimumAreaRect(start, current, gridSize, bounds);
+    let x = Math.min(start.x, current.x);
+    let y = Math.min(start.y, current.y);
+    let right = Math.max(start.x, current.x);
+    let bottom = Math.max(start.y, current.y);
+    if (bounds) {
+      x = Math.max(bounds.minX, x);
+      y = Math.max(bounds.minY, y);
+      right = Math.min(bounds.maxX, right);
+      bottom = Math.min(bounds.maxY, bottom);
+    }
+    return { x, y, w: Math.max(0, right - x), h: Math.max(0, bottom - y) };
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -6722,7 +7021,7 @@ export default function BoardEditor({
         const current = resolvePlacementPoint(activeAreaGesture.start, activeAreaGesture.current, activeTool);
         const rect = activeTool === 'line' || activeTool === 'arrow'
           ? getLinePlacementRect(activeAreaGesture.start, current, gridSize, snapToGrid).rect
-          : getMinimumAreaRect(activeAreaGesture.start, current, gridSize, bounds ?? undefined);
+          : getSelectAreaRect(activeAreaGesture.start, current, bounds ?? undefined);
         const preview = buildRegionElement(activeTool as ElementType, rect,
           activeTool === 'line' || activeTool === 'arrow' ? {rotation:getLinePlacementRect(activeAreaGesture.start,current,gridSize,snapToGrid).rotation} : undefined);
         if (preview) updateSmartGuides(preview, preview.position, false);
@@ -6732,7 +7031,7 @@ export default function BoardEditor({
       const selected = elementsRef.current.find(element => element.id === selectedId);
       const hovered = elementsRef.current.find(element => element.id === hoveredId && element.id !== selectedId && elementHierarchy.isVisible(element.id,respectLayerVisibility));
       setVisibleGuides((e.ctrlKey || e.metaKey) && selected && hovered
-        ? smartGuides(selected,selected.position,[hovered],zoom,false).guides : []);
+        ? smartGuides(selected,selected.position,[hovered],zoom,false,getSmartGuideOptions()).guides : []);
     }
   };
 
@@ -6826,17 +7125,18 @@ export default function BoardEditor({
     tool: string,
   ) => {
     if (tool === "select" || (current.x === start.x && current.y === start.y)) return current;
+    const ratio = getEffectiveToolMenuSettings(getToolMenuId(tool)).ratio;
     if (tool === 'table') {
       const dx=current.x-start.x,dy=current.y-start.y;
       if (spreadsheetMode==='simple') {
         const size=snapGridObjectSize(Math.abs(dx),Math.abs(dy),spreadsheetCellSize);
         return {x:start.x+(dx<0?-1:1)*size.width,y:start.y+(dy<0?-1:1)*size.height};
       }
-      return {x:start.x+(dx<0?-1:1)*Math.max(spreadsheetCellSize.width,Math.round(Math.abs(dx)/spreadsheetCellSize.width)*spreadsheetCellSize.width),
-        y:start.y+(dy<0?-1:1)*Math.max(spreadsheetCellSize.height,Math.round(Math.abs(dy)/spreadsheetCellSize.height)*spreadsheetCellSize.height)};
+      const size=snapAdvancedGridViewportSize(null,Math.abs(dx),Math.abs(dy),spreadsheetCellSize);
+      return {x:start.x+(dx<0?-1:1)*size.width,y:start.y+(dy<0?-1:1)*size.height};
     }
     const line = tool === "line" || tool === "arrow";
-    if (line && proportionalScale) {
+    if (line && ratio) {
       const dx = current.x - start.x;
       const dy = current.y - start.y;
       const extent = Math.max(Math.abs(dx), Math.abs(dy));
@@ -6847,7 +7147,7 @@ export default function BoardEditor({
       return line && snapToGrid ? gridPoint : getSnapPoint(gridPoint.x, gridPoint.y, line ? 8 : 30);
     };
     return line ? resolveLineDragPoint(start, current, projectPoint)
-      : resolveAreaDragPoint(start, current, gridSize, projectPoint, proportionalScale);
+      : resolveAreaDragPoint(start, current, gridSize, projectPoint, ratio);
   };
 
   const handlePointerUp = (event?: React.PointerEvent | PointerEvent) => {
@@ -6972,28 +7272,41 @@ export default function BoardEditor({
           const start = currentDrawPoints[0];
           const end = currentDrawPoints[currentDrawPoints.length - 1];
           const distStartEnd = Math.hypot(start.x - end.x, start.y - end.y);
-          const isClosed = distStartEnd < maxDim * 0.25;
+          const strength = Math.max(1, Math.min(10, pendingProps.drawingAssistStrength ?? 5));
+          const strengthProgress = (strength - 1) / 9;
+          const isClosed = distStartEnd < maxDim * (0.14 + strengthProgress * 0.11);
 
-          let cx = (minX + maxX) / 2;
-          let cy = (minY + maxY) / 2;
-          let avgR = (w + h) / 4;
-          let varR = 0;
-          currentDrawPoints.forEach((p) => {
-            let r = Math.hypot(p.x - cx, p.y - cy);
-            varR += Math.abs(r - avgR);
-          });
-          varR /= Math.max(1, currentDrawPoints.length);
+          if (isClosed) {
+            const recognitionEpsilon = Math.max(maxDim * (0.014 + strengthProgress * 0.042), 1);
+            const recognitionOutline = douglasPeucker(
+              [...currentDrawPoints, { ...start }],
+              recognitionEpsilon,
+            );
+            const shapeGuess = guessClosedDrawingShape(
+              currentDrawPoints,
+              recognitionOutline,
+              strength,
+            );
+            if (shapeGuess) {
+              drawnType = shapeGuess.type;
+              if (shapeGuess.type === "rectangle" && shapeGuess.square) {
+                const side = (w + h) / 2;
+                const centerX = (minX + maxX) / 2;
+                const centerY = (minY + maxY) / 2;
+                minX = centerX - side / 2;
+                maxX = centerX + side / 2;
+                minY = centerY - side / 2;
+                maxY = centerY + side / 2;
+              }
+            }
+          }
 
-          // If it closely resembles a circle/ellipse, map to ellipse element
-          if (isClosed && varR < avgR * 0.22 && currentDrawPoints.length > 10) {
-            drawnType = "ellipse";
-          } else {
-            // Adaptive shape guessing via Ramer-Douglas-Peucker
-            // This natively handles lines, triangles, squares, pentagons, stars, etc. perfectly
-            const strength = pendingProps.drawingAssistStrength ?? 5; // 1 to 10
+          if (drawnType === "draw") {
+            // Higher strength progressively ignores stroke noise and reduces
+            // outline complexity. Shapes outside the recognizer stay freeform.
             const epsilon = Math.max(
-              maxDim * (0.15 - (strength - 1) * 0.015),
-              2,
+              maxDim * (0.05 + strengthProgress * 0.22),
+              1,
             );
             let simplified = douglasPeucker(currentDrawPoints, epsilon);
 
@@ -7018,8 +7331,9 @@ export default function BoardEditor({
 
             newPoints = simplified;
             drawnType = "draw";
-            // Sharp corners for guessed shapes
-            smooth = false;
+            // Preserve polygon corners while retaining smoothing for open
+            // strokes when both assistance modes are enabled.
+            smooth = isClosed ? false : pendingProps.drawingAssistSmooth !== false;
           }
         }
 
@@ -7187,13 +7501,12 @@ export default function BoardEditor({
                 : undefined,
             );
           } else if (activeTool === "select") {
-            const selectionRect = getMinimumAreaRect(
+            const selectionRect = getSelectAreaRect(
               snappedStart,
               snappedCurrent,
-              gridSize,
               activeBounds ?? undefined,
             );
-            if (activeAreaGesture?.activated) {
+            if (activeAreaGesture?.activated && (selectMinimumCell || activeAreaGesture.moved)) {
               setQuickAddRegion({
                 x: selectionRect.x,
                 y: selectionRect.y,
@@ -7255,7 +7568,7 @@ export default function BoardEditor({
   const updateSmartGuides=(element:BoardElement,position:{x:number;y:number},allowSnap=true,excludedIds?:Set<string>)=>{
     if(!smartGuidesEnabled)return position;
     const others=elementsRef.current.filter(other=>!excludedIds?.has(other.id)&&!elementHierarchy.isDescendantOf(other.id,element.id)&&elementHierarchy.isVisible(other.id,respectLayerVisibility));
-    const result=smartGuides(element,position,[mainSurface,...others],zoomRef.current,allowSnap&&enableObjectSnapping);
+    const result=smartGuides(element,position,[mainSurface,...others],zoomRef.current,allowSnap&&enableObjectSnapping,getSmartGuideOptions());
     setVisibleGuides(result.guides);return result.position;
   };
   const outlineSelection=useOutlineSelection({tool:activeTool,mode:selectMode,zoom,surface:boardSurfaceRef,elements,selectedIds,
@@ -7323,11 +7636,37 @@ export default function BoardEditor({
     parentId: creationParentId(currentDrawPoints[0]), zIndex: Math.max(0, maximumBy<BoardElement>(elements, element=>element.zIndex)) + 1,
   }, elements, elementPolygon({ position: { x: maskMinX, y: maskMinY }, size: { width: maskWidth, height: maskHeight } })) : undefined;
 
-
+  const handleShortcutAssignmentClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (!shortcutAssignmentMode) return;
+    const setting = event.target instanceof Element
+      ? event.target.closest<HTMLElement>("[data-shortcut-action]")
+      : null;
+    const target = setting?.dataset.shortcutAction;
+    if (!setting || !target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setShortcutAssignmentError("");
+    const existing = customSettingShortcuts.find((binding) => binding.target === target);
+    if (existing) {
+      setRecordingCustomShortcutId(existing.id);
+      return;
+    }
+    const label = setting.dataset.shortcutLabel || setting.getAttribute("aria-label") || setting.textContent?.trim() || target;
+    setCustomSettingShortcuts((current) => [...current, {
+      id: generateId(),
+      label,
+      description: setting.dataset.shortcutDescription || SHORTCUT_ACTION_DESCRIPTIONS[target] || setting.getAttribute("title") || `${label}.`,
+      category: setting.dataset.shortcutCategory || "General",
+      target,
+      shortcut: "",
+    }]);
+  };
 
   return (
     <div
       className="h-screen flex flex-col bg-[#2e2e2e] overflow-hidden"
+      data-shortcut-assignment-mode={shortcutAssignmentMode ? "true" : undefined}
+      onClickCapture={handleShortcutAssignmentClick}
       data-board-interacting={isInteracting || !!toolbarDragId || !!returnDraggingId || undefined}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -7340,92 +7679,6 @@ export default function BoardEditor({
       }}
     >
       {showBoardSaveModal && <SaveAsDialog name={title} onClose={() => setShowBoardSaveModal(false)} onSave={handleSaveAs} />}
-
-      {showSaveModal && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white shadow-2xl rounded-3xl border-4 border-gray-800 p-6 max-w-sm w-full flex flex-col gap-4">
-            <h3 className="font-bold text-lg text-gray-900 border-b-2 border-gray-100 pb-2 flex justify-between">
-              Save as Preset
-              <button
-                disabled={presetSaving || Boolean(pendingPresetRef.current)}
-                onClick={() => setShowSaveModal(false)}
-                className="text-gray-500 hover:text-black hover:bg-gray-100 p-1 rounded-md"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </h3>
-            <div className="flex flex-col gap-1">
-              <label className="text-xs text-gray-600 font-bold uppercase tracking-wider">
-                Preset Name:
-              </label>
-              <input
-                type="text"
-                value={presetName}
-                disabled={presetSaving || Boolean(pendingPresetRef.current)}
-                onChange={(e) => setPresetName(e.target.value)}
-                className="w-full px-3 py-2 text-sm border-2 border-gray-300 rounded-lg focus:border-blue-500 outline-none font-bold transition-colors"
-                placeholder="My Custom Preset"
-              />
-            </div>
-            <span className="text-xs text-gray-600 font-bold uppercase tracking-wider mt-2">
-              Select what to include:
-            </span>
-            <div
-              className="flex items-center justify-between cursor-pointer group mt-2"
-              aria-disabled={presetSaving || Boolean(pendingPresetRef.current)}
-              onClick={() => { if (!presetSaving && !pendingPresetRef.current) setPresetSettingsChecked(!presetSettingsChecked); }}
-            >
-              <span className="text-sm font-bold text-gray-700 select-none">
-                Settings (Size, Grid)
-              </span>
-              <div
-                className={cn(
-                  "w-7 h-4 rounded-full flex items-center p-0.5 transition-colors duration-200 ease-in-out shrink-0 border border-black/10",
-                  presetSettingsChecked ? "bg-blue-500" : "bg-gray-200",
-                )}
-              >
-                <div
-                  className={cn(
-                    "w-3 h-3 bg-white rounded-full shadow-sm transform transition-transform duration-200 ease-in-out",
-                    presetSettingsChecked ? "translate-x-3" : "translate-x-0",
-                  )}
-                />
-              </div>
-            </div>
-            <div
-              className="flex items-center justify-between cursor-pointer group mb-1"
-              aria-disabled={presetSaving || Boolean(pendingPresetRef.current)}
-              onClick={() => { if (!presetSaving && !pendingPresetRef.current) setPresetContentChecked(!presetContentChecked); }}
-            >
-              <span className="text-sm font-bold text-gray-700 select-none">
-                Content (Elements)
-              </span>
-              <div
-                className={cn(
-                  "w-7 h-4 rounded-full flex items-center p-0.5 transition-colors duration-200 ease-in-out shrink-0 border border-black/10",
-                  presetContentChecked ? "bg-blue-500" : "bg-gray-200",
-                )}
-              >
-                <div
-                  className={cn(
-                    "w-3 h-3 bg-white rounded-full shadow-sm transform transition-transform duration-200 ease-in-out",
-                    presetContentChecked ? "translate-x-3" : "translate-x-0",
-                  )}
-                />
-              </div>
-            </div>
-            <button
-              type="button"
-              disabled={presetSaving}
-              onClick={handleConfirmPresetSave}
-              className="bg-blue-600 text-white px-4 py-2 mt-2 rounded-lg font-bold hover:bg-blue-700 transition-colors w-full shadow-sm"
-            >
-              {presetSaving ? 'Saving…' : pendingPresetRef.current ? 'Retry Save Preset' : 'Save Preset'}
-            </button>{" "}
-            {presetSaveError && <p role="alert" className="mt-2 text-xs text-red-700">{presetSaveError}</p>}
-          </div>
-        </div>
-      )}
 
       {/* Top Bar */}
       <header className="relative min-h-16 border-b-4 border-gray-800 bg-gray-100 px-1 min-[900px]:px-3 py-2 flex flex-nowrap items-center gap-2 z-[250] shrink-0 overflow-visible">
@@ -7472,7 +7725,7 @@ export default function BoardEditor({
               value={title}
               aria-label="Board name"
               onChange={(e) => setBoardTitle(e.target.value)}
-              className="shrink-0 font-bold text-base min-[900px]:text-lg tracking-tight text-[#1A1A1A] bg-transparent border border-transparent outline-none rounded-md pl-2 pr-2 py-1 w-44 min-[900px]:w-60 hover:bg-white hover:border-gray-300 focus:bg-white focus:border-blue-300 focus:shadow-sm transition-colors truncate"
+              className="shrink-0 font-bold text-base min-[900px]:text-lg tracking-tight text-[#1A1A1A] bg-transparent border border-transparent outline-none rounded-md pl-2 pr-2 py-1 w-52 min-[900px]:w-72 hover:bg-white hover:border-gray-300 focus:bg-white focus:border-blue-300 focus:shadow-sm transition-colors truncate"
             />
           </div>
         </div>
@@ -7554,15 +7807,16 @@ export default function BoardEditor({
                     ? "text-[#1A1A1A] bg-white ring-2 ring-gray-200 shadow-sm"
                     : "text-gray-500 hover:text-[#1A1A1A] hover:bg-gray-200",
                 )}
-                title="General Settings"
+                title="Settings"
+                aria-label="Settings"
               >
                 <Settings2 className="w-4 h-4" />
               </button>
 
                 {showZoomSettingsDropdown && (
                   <div className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-3 z-[100] flex flex-col gap-3 w-72 max-h-[80vh] overflow-y-auto">
-                    <div className="border-b-[3px] border-gray-400 pb-1 text-[10px] font-bold uppercase tracking-wider text-gray-500">
-                      General Settings
+                    <div className="border-b-[3px] border-gray-400 pb-1 text-xs font-bold normal-case tracking-normal text-gray-700">
+                      Settings
                     </div>
                     <div className="menu-scroll-viewport min-h-0 overflow-y-auto">{renderGeneralSettingsContent()}</div>
 
@@ -7578,14 +7832,16 @@ export default function BoardEditor({
               )}
             >
               <button
+                type="button"
                 onClick={() => activateToolbarTool("zoom")}
                 className={cn(
                   "p-2 rounded-lg transition-all flex items-center justify-center",
                   activeTool === "zoom"
-                    ? "text-[#1A1A1A] bg-white"
+                    ? "text-[#1A1A1A] bg-white ring-2 ring-gray-200 shadow-sm"
                     : "text-gray-500 hover:text-[#1A1A1A] hover:bg-gray-200",
                 )}
                 title="Zoom Tool"
+                aria-label="Zoom Tool"
               >
                 <ZoomIn className="w-4 h-4" />
               </button>
@@ -7837,7 +8093,7 @@ export default function BoardEditor({
                     "-mx-3 -mt-3 mb-1",
                     true,
                   )}
-                  {renderMenuSettingsBlock("media", true)}
+                  {renderMediaSettings(true)}
                 </div>
               )}
             </div>
@@ -7929,22 +8185,7 @@ export default function BoardEditor({
               {showFillDropdown && (
                 <div className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl w-72 p-3 z-[100]">
                   {renderToolMenuTitle("Fill Settings")}
-                  <div className="flex flex-col gap-3">
-                    <div className="flex items-center justify-between gap-4 text-xs font-semibold text-gray-500 mb-1">
-                      <span className="whitespace-nowrap">Color</span>
-                      <div className="flex items-center gap-2">
-                        <Palette className="w-4 h-4 text-gray-400" />
-                        <ColorPicker
-                          value={fillToolColor}
-                          onChange={(c) => setFillToolColor(c)}
-                          customColors={customColors.fill}
-                          onAddCustomColor={(c, i) =>
-                            handleAddCustomColor(c, i, "fill")
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  {renderFillToolSettings()}
                   {renderMenuSettingsBlock("fill")}
                 </div>
               )}
@@ -8101,9 +8342,6 @@ export default function BoardEditor({
                   className="toolbar-dropdown absolute top-full left-1/2 -translate-x-1/2 mt-5 bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-1 z-[100] flex flex-col gap-1 w-80 max-h-[80vh] overflow-x-hidden overflow-y-auto text-left"
                 >
                   {renderToolMenuTitle("More", "-mx-1 -mt-1 mb-1")}
-                  <div className="mx-1 mb-1 rounded-lg border border-gray-200 bg-gray-50 p-1">
-                    {renderAlwaysOnTopControl("more")}
-                  </div>
                   {toolbarLayout.more.map((id) => {
                     const item = TOOLBAR_ITEMS.find(
                       (candidate) => candidate.id === id,
@@ -8174,6 +8412,7 @@ export default function BoardEditor({
                       </div>
                     );
                   })}
+                  <div className="mx-1">{renderMenuSettingsBlock("more", true)}</div>
                 </div>
               )}
             </div>
@@ -8650,6 +8889,17 @@ export default function BoardEditor({
             Finish
           </button>
         )}
+        {pickingObjectPresetId && (
+          <button
+            type="button"
+            data-preset-picker-finish="true"
+            onClick={finishObjectPresetPicking}
+            disabled={!presetSelectionCandidateId}
+            className="absolute left-1/2 top-full mt-2 z-[200] -translate-x-1/2 rounded-lg border-2 border-gray-400 bg-white px-4 py-1.5 text-[11px] font-bold uppercase tracking-wider text-gray-700 shadow-sm hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Finish Selecting
+          </button>
+        )}
       </header>
 
       {/* Main Workspace Area with Paint-like resizable board */}
@@ -8792,6 +9042,7 @@ export default function BoardEditor({
                 tabIndex={-1}
                 aria-label="Board canvas"
                 data-board-root="true"
+                data-preset-picking={pickingObjectPresetId ? "true" : undefined}
                 className="absolute top-0 left-0 touch-none select-none outline-none"
                 style={{
                   width: pageDimensions.width,
@@ -8803,15 +9054,33 @@ export default function BoardEditor({
                       ? isInteracting
                         ? "grabbing"
                         : "grab"
-                      : "crosshair",
+                      : activeTool === "select"
+                        ? "default"
+                        : activeTool === "text"
+                          ? "text"
+                          : "crosshair",
                 }}
                 onPointerDown={handlePointerDown}
                 onPointerDownCapture={(event) => {
+                  if (pickingObjectPresetId && event.button === 0 && (event.target as HTMLElement).closest('[data-board-element="true"][data-board-element-id]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    return;
+                  }
                   startSelectionMove(event);
                   if (activeTool === "fill" && event.button === 0) {
                     handlePointerDown(event);
                     event.stopPropagation();
                   }
+                }}
+                onClickCapture={(event) => {
+                  if (!pickingObjectPresetId) return;
+                  const target = (event.target as HTMLElement).closest<HTMLElement>('[data-board-element="true"][data-board-element-id]');
+                  const element = elementsRef.current.find(item => item.id === target?.dataset.boardElementId);
+                  if (!element) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  chooseObjectPresetCandidate(element);
                 }}
                 onContextMenu={(e) => e.preventDefault()}
                 onDragOver={(e) => {
@@ -8834,7 +9103,7 @@ export default function BoardEditor({
                   className="absolute inset-0 overflow-visible pointer-events-none"
                   data-board-surface="true"
                 >
-                {outlineSelection.enabled&&<div data-selection-tool={selectMode} className="absolute cursor-crosshair touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
+                {outlineSelection.enabled&&<div data-selection-tool={selectMode} className="absolute cursor-default touch-none pointer-events-auto" style={{left:-boardPosition.x/zoom,top:-boardPosition.y/zoom,width:workspaceDimensions.width/zoom,height:workspaceDimensions.height/zoom,zIndex:100000}}
                   onDoubleClick={event=>{if(selectMode==='polygon'&&outlineSelection.points.length>=3){event.preventDefault();event.stopPropagation();outlineSelection.finish();}}}/>}
                 {outlineSelection.points.length>0&&<svg className="pointer-events-none absolute inset-0 overflow-visible" data-selection-outline={selectMode} style={{width:pageDimensions.width,height:pageDimensions.height,zIndex:100001}}>
                   <path d={`M${outlineSelection.outline.map(point=>`${point.x},${point.y}`).join(' L')}`} fill="none" stroke="#3b82f6" strokeWidth={1.5/zoom} strokeDasharray={`${5/zoom} ${4/zoom}`} />
@@ -8877,12 +9146,12 @@ export default function BoardEditor({
                         let h = Math.abs(previewCurrent.y - dragStart.y);
 
                         if (activeTool === "select") {
-                          const selectionRect = getMinimumAreaRect(
+                          const selectionRect = getSelectAreaRect(
                             dragStart,
                             previewCurrent,
-                            gridSize,
                             activeSurfaceBoundsRef.current ?? undefined,
                           );
+                          if (!selectMinimumCell && selectionRect.w === 0 && selectionRect.h === 0) return null;
                           minX = selectionRect.x;
                           minY = selectionRect.y;
                           w = selectionRect.w;
@@ -9083,6 +9352,8 @@ export default function BoardEditor({
                       renderZIndex={renderIndex + 1}
                       matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
                       matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
+                      mediaPlaybackDisabled={mediaPlaybackDisabled}
+                      globalBrightness={globalBrightness}
                       allowEditing={
                         allowEditing && !elementHierarchy.isLocked(el.id)
                       }
@@ -9103,7 +9374,7 @@ export default function BoardEditor({
                       manualLinkSourceId={manualLinkSourceId}
                       onSelect={() => {
                         if (pickingObjectPresetId) {
-                          pickObjectForPreset(pickingObjectPresetId, el);
+                          chooseObjectPresetCandidate(el);
                           return;
                         }
                         if ((window as any).justLinkedElement) {
@@ -9173,7 +9444,7 @@ export default function BoardEditor({
                         }
                       }}
                       snap={snap}
-                      proportionalScale={proportionalScale}
+                      proportionalScale={getEffectiveToolMenuSettings(getToolMenuId(toolForSelectedElement(el))).ratio}
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
@@ -9255,6 +9526,8 @@ export default function BoardEditor({
                       renderZIndex={-5000 + renderIndex}
                       matchingToolEditing={getActiveToolMenuSettings().allowEditing ?? false}
                       matchingToolMoving={getActiveToolMenuSettings().allowMoving ?? false}
+                      mediaPlaybackDisabled={mediaPlaybackDisabled}
+                      globalBrightness={globalBrightness}
                       allowEditing={
                         allowEditing && !elementHierarchy.isLocked(el.id)
                       }
@@ -9275,7 +9548,7 @@ export default function BoardEditor({
                       manualLinkSourceId={manualLinkSourceId}
                       onSelect={() => {
                         if (pickingObjectPresetId) {
-                          pickObjectForPreset(pickingObjectPresetId, el);
+                          chooseObjectPresetCandidate(el);
                           return;
                         }
                         setSelectedId(el.id);
@@ -9306,7 +9579,7 @@ export default function BoardEditor({
                         }
                       }}
                       snap={snap}
-                      proportionalScale={proportionalScale}
+                      proportionalScale={getEffectiveToolMenuSettings(getToolMenuId(toolForSelectedElement(el))).ratio}
                       globalPreviewMode={getActiveToolMenuSettings().previewMode}
                       zoomRef={zoomRef}
                       sceneHierarchy={elementHierarchy}
@@ -9440,13 +9713,24 @@ export default function BoardEditor({
                         transformOrigin: "top center",
                       }}
                       onPointerDown={(e) => {e.preventDefault();e.stopPropagation();}}
+                      onClick={(e) => e.stopPropagation()}
                     >
                     <motion.div initial={{opacity:0,scale:.95}} animate={{opacity:1,scale:1}} exit={{opacity:0,scale:.95}}
                       className="bg-white border-[3px] border-gray-400 rounded-xl shadow-xl p-2 flex gap-2 items-center">
                       <div className="flex gap-1 items-center">
-                        <span className="text-xs font-bold text-gray-500 mr-2 ml-1">
-                          Add:
-                        </span>
+                        <button type="button" title="Move area" aria-label="Move area" onClick={moveSelectionArea} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <Move className="w-5 h-5" />
+                        </button>
+                        <button type="button" title="Copy area" onClick={() => void copySelectionToSystem(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <Copy className="w-5 h-5" />
+                        </button>
+                        <button type="button" title="Merge area" onClick={mergeSelectionArea} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <Layers className="w-5 h-5" />
+                        </button>
+                        <button type="button" title="Paste into area" onClick={() => void pasteSystemClipboard(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                          <ClipboardPaste className="w-5 h-5" />
+                        </button>
+                        <div className="mx-1 h-6 w-px bg-gray-300" />
                         {QUICK_ADD_TOOLS.map((tool) => (
                           <button
                             key={tool.type}
@@ -9471,16 +9755,6 @@ export default function BoardEditor({
                             <tool.icon className="w-5 h-5" />
                           </button>
                         ))}
-                        <div className="mx-1 h-6 w-px bg-gray-300" />
-                        <button type="button" title="Copy area" onClick={() => void copySelectionToSystem(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-                          <Copy className="w-5 h-5" />
-                        </button>
-                        <button type="button" title="Paste into area" onClick={() => void pasteSystemClipboard(quickAddRegion)} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-                          <ClipboardPaste className="w-5 h-5" />
-                        </button>
-                        <button type="button" title="Merge area" onClick={mergeSelectionArea} className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
-                          <Layers className="w-5 h-5" />
-                        </button>
                       </div>
                     </motion.div>
                     </div>
@@ -9492,23 +9766,25 @@ export default function BoardEditor({
                     <AnimatePresence>
                       {showObjectPresetsPanel && (
                         <motion.div
+                      ref={objectPresetsPanelRef}
                       initial={{ opacity: 0, y: 8, scale: 0.96 }}
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: 8, scale: 0.96 }}
                       className="toolbar-dropdown fixed right-8 top-24 z-[500] w-80 max-h-[70vh] overflow-y-auto rounded-2xl border-[3px] border-gray-800 bg-white p-3 shadow-2xl"
+                      style={{ ...objectPresetsPanelStyle, filter: globalBrightness === 100 ? undefined : `brightness(${globalBrightness}%)` }}
                       onPointerDown={(e) => e.stopPropagation()}
                     >
-                      <div className="flex items-center justify-between border-b-[3px] border-gray-300 pb-2">
+                      <div {...objectPresetsDragHandleProps} data-panel-drag-handle="object-presets" title="Drag to move" className="flex cursor-move items-center justify-between border-b-[3px] border-gray-300 pb-2">
                         <div className="flex items-center gap-2">
                           <ClipboardPaste className="w-4 h-4 text-gray-600" />
-                          <span className="text-[11px] font-extrabold uppercase tracking-wider text-gray-700">
+                          <span className="text-[11px] font-extrabold tracking-normal text-gray-700">
                             Object Presets
                           </span>
                         </div>
                         <button
                           onClick={() => {
                             setShowObjectPresetsPanel(false);
-                            setPickingObjectPresetId(null);
+                            cancelObjectPresetPicking();
                           }}
                           className="rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 hover:text-black"
                           title="Close"
@@ -9517,15 +9793,14 @@ export default function BoardEditor({
                         </button>
                       </div>
 
-                      <div className="mt-2 rounded-lg border border-gray-200 bg-gray-50 p-1">
-                        {renderAlwaysOnTopControl("object-presets")}
-                      </div>
+                      <button type="button" aria-pressed={objectPresetsPanelAlwaysOnTop}
+                        data-shortcut-action="editor:objectPresetsPanelAlwaysOnTop" data-shortcut-label="Keep This Window Always On Top" data-shortcut-category="Object Presets"
+                        onClick={() => setObjectPresetsPanelAlwaysOnTop(value => !value)}
+                        className="mt-2 flex w-full items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-left text-xs font-bold text-gray-700 hover:bg-gray-100">
+                        <span>Keep This Window Always On Top</span>{renderSwitch(objectPresetsPanelAlwaysOnTop)}
+                      </button>
 
-                      {pickingObjectPresetId && (
-                        <div className="mt-3 rounded-xl border-2 border-blue-200 bg-blue-50 px-3 py-2 text-[11px] font-bold text-blue-700">
-                          Pick an object on the board for this preset.
-                        </div>
-                      )}
+                      {pickingObjectPresetId && <p className="mt-2 text-[11px] text-gray-500">Select an object, then press Finish Selecting.</p>}
 
                       <button
                         onClick={() =>
@@ -9540,32 +9815,20 @@ export default function BoardEditor({
                         className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-gray-300 bg-gray-50 px-3 py-2 text-xs font-bold text-gray-700 hover:border-gray-500 hover:bg-gray-100"
                       >
                         <Plus className="w-4 h-4" />
-                        Add preset
+                        Add Preset
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setPresetName((page.title || "Custom") + " Preset");
-                          setShowSaveModal(true);
-                        }}
-                        className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border-2 border-blue-200 bg-blue-50 px-3 py-2 text-xs font-bold text-blue-700 hover:border-blue-400 hover:bg-blue-100"
-                      >
-                        <Save className="w-4 h-4" />
-                        Save board preset
-                      </button>
-
-                      <div className="mt-3 flex flex-col gap-2">
+                      <div className="mt-2 flex flex-col gap-1.5">
                         {objectPresets.map((preset) => (
                           <div
                             key={preset.id}
                             className={cn(
-                              "rounded-xl border-2 bg-gray-50 p-2",
+                              "rounded-xl border-2 bg-gray-50 px-2 py-1.5",
                               pickingObjectPresetId === preset.id
                                 ? "border-blue-400"
                                 : "border-gray-200",
                             )}
                           >
-                            <div className="flex items-center gap-2">
+                            <div className="flex min-w-0 items-center gap-1.5">
                               <input
                                 value={preset.name}
                                 onChange={(e) =>
@@ -9577,51 +9840,23 @@ export default function BoardEditor({
                                     ),
                                   )
                                 }
-                                className="min-w-0 flex-1 rounded-lg border-2 border-gray-200 bg-white px-2 py-1 text-xs font-bold text-gray-700 outline-none focus:border-blue-400"
+                                className="min-w-0 flex-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-bold text-gray-700 outline-none focus:border-blue-400"
+                                aria-label={`Rename ${preset.name}`}
                               />
+                              {renderObjectPresetPicker(preset, "panel")}
                               <button
                                 onClick={() =>
                                   setObjectPresets((prev) =>
                                     prev.filter((item) => item.id !== preset.id),
                                   )
                                 }
-                                className="rounded-lg border-2 border-red-200 bg-red-50 p-1.5 text-red-600 hover:bg-red-100"
+                                aria-label="Delete preset"
+                                className="rounded-lg border border-red-200 bg-red-50 p-1 text-red-600 hover:bg-red-100"
                                 title="Delete preset"
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
-                              <button
-                                className={cn(
-                                  "rounded-lg border-2 p-1.5",
-                                  preset.element
-                                    ? "border-green-200 bg-green-50 text-green-700"
-                                    : "border-gray-200 bg-white text-gray-400",
-                                )}
-                                title={
-                                  preset.element
-                                    ? "Preset has an object"
-                                    : "No object picked"
-                                }
-                              >
-                                <Check className="w-4 h-4" />
-                              </button>
                             </div>
-                            <button
-                              onClick={() => {
-                                setPickingObjectPresetId(preset.id);
-                                setActiveTool("select");
-                              }}
-                              className="mt-2 w-full rounded-lg border-2 border-gray-300 bg-white px-3 py-2 text-xs font-bold text-gray-600 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
-                            >
-                              {preset.element
-                                ? "Pick another object"
-                                : "Pick an object"}
-                            </button>
-                            {preset.element && (
-                              <div className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
-                                {toTitleCase(preset.element.type)}
-                              </div>
-                            )}
                           </div>
                         ))}
                       </div>
@@ -9629,7 +9864,7 @@ export default function BoardEditor({
                       <button
                         onClick={() => {
                           setShowObjectPresetsPanel(false);
-                          setPickingObjectPresetId(null);
+                          cancelObjectPresetPicking();
                         }}
                         className="mt-3 flex w-full items-center justify-center rounded-xl bg-black px-3 py-2 text-white hover:bg-gray-800"
                       >
@@ -10264,6 +10499,7 @@ export default function BoardEditor({
                   title="Flip Horizontally"
                   aria-label="Flip Horizontally"
                   aria-pressed={targetProps.flipX === true}
+                  data-shortcut-action="editor:flipX" data-shortcut-label="Flip Horizontally" data-shortcut-category="Transform"
                   onClick={() => onUpdateTarget({ flipX: !targetProps.flipX })}
                   className={cn(
                     "p-2 rounded-lg transition-colors border-2",
@@ -10279,6 +10515,7 @@ export default function BoardEditor({
                   title="Flip Vertically"
                   aria-label="Flip Vertically"
                   aria-pressed={targetProps.flipY === true}
+                  data-shortcut-action="editor:flipY" data-shortcut-label="Flip Vertically" data-shortcut-category="Transform"
                   onClick={() => onUpdateTarget({ flipY: !targetProps.flipY })}
                   className={cn(
                     "p-2 rounded-lg transition-colors border-[3px]",
@@ -10304,6 +10541,11 @@ export default function BoardEditor({
               type: activeType as ElementType,
               ...(activeType === "fill" ? { color: fillToolColor } : {}),
             };
+            const defaultsType = activeType as ElementType;
+            const currentObjectDefaultsSignature = `${defaultsType}:${JSON.stringify(getObjectDefaultProps(defaultsSource))}`;
+            const savedTypeDefaults = objectDefaults[defaultsType];
+            const objectDefaultsSaved = savedObjectDefaultsSignature === currentObjectDefaultsSignature ||
+              (savedTypeDefaults !== undefined && JSON.stringify(savedTypeDefaults) === JSON.stringify(getObjectDefaultProps(defaultsSource)));
 
             const isTextLike =
               TEXT_TYPES.includes(activeType) || activeType === "sticky";
@@ -10312,24 +10554,23 @@ export default function BoardEditor({
               <AnimatePresence>
                 <ToolPropertiesBar key="bottom-toolbar">
                   {activeType === 'table' && <div className={bottomToolbarGroupClass}>
-                    {!selectedElement ? <SegmentedControl label="Spreadsheet mode" value={spreadsheetMode} onChange={setSpreadsheetMode} options={[{value:'advanced',label:'Advanced'},{value:'simple',label:'Simple'}]}/> : <span className="px-2 text-xs font-semibold text-gray-600">{getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='simple'?'Simple':'Advanced'}</span>}
+                    {!selectedElement ? <div data-shortcut-action="editor:spreadsheetMode" data-shortcut-label="Spreadsheet Mode" data-shortcut-category="Spreadsheet"><SegmentedControl variant="toolbar" label="Spreadsheet Mode" value={spreadsheetMode} onChange={setSpreadsheetMode} options={[{value:'advanced',label:'Advanced'},{value:'simple',label:'Simple'}]}/></div> : <span className="px-2 text-xs font-semibold text-gray-600">{getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='simple'?'Simple':'Advanced'}</span>}
                     <SpreadsheetCellSizeControls key={selectedElement?.id ?? 'new-spreadsheet'} width={selectedElement?selectedCellSize.width:spreadsheetCellSize.width} height={selectedElement?selectedCellSize.height:spreadsheetCellSize.height} onCommit={updateSpreadsheetCellSize}/>
-                    {selectedElement && getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='advanced' && <button type="button" className="rounded-md border border-gray-300 px-2 py-1.5 text-xs font-semibold" onClick={()=>openSpreadsheetEditor(selectedElement.id)}>Edit spreadsheet</button>}
+                    {selectedElement && getSpreadsheetMode(parseWorkbookDocument(selectedElement.content))==='advanced' && <button type="button" className="rounded-md border border-gray-300 px-2 py-1.5 text-xs font-semibold" onClick={()=>openSpreadsheetEditor(selectedElement.id)}>Edit Spreadsheet</button>}
                     {spreadsheetSizeError && <span role="alert" className="max-w-48 text-xs text-red-600">{spreadsheetSizeError}</span>}
                   </div>}
                   {activeTool === 'eraser' && !selectedElement && (
                     <div className={bottomToolbarGroupClass}>
-                      <SegmentedControl label="Eraser mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
+                      <SegmentedControl variant="toolbar" label="Eraser Mode" value={eraserMode} onChange={setEraserMode} options={[{ value: 'element', label: 'Whole' }, { value: 'partial', label: 'Partial' }]} />
                       {eraserMode === 'partial' && (
                         <>
                           <div className="flex items-center gap-1.5 px-2 border-l-2 border-gray-200">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Shape</span>
-                            <SegmentedControl label="Eraser shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} />
+                            <span className="text-[10px] font-bold tracking-normal text-gray-500">Shape</span>
+                            <SegmentedControl variant="toolbar" label="Eraser Shape" value={eraserShape} onChange={setEraserShape} options={[{ value: 'round', label: 'Round' }, { value: 'square', label: 'Square' }]} />
                           </div>
                           <div className="flex items-center gap-2 px-2 border-l-2 border-gray-200">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-gray-500">Size</span>
-                            <input type="range" min="2" max="100" value={eraserSize} onChange={(e) => setEraserSize(Number(e.target.value))} className="w-24" />
-                            <span className="text-[10px] font-bold text-gray-700">{eraserSize}px</span>
+                            <span className="text-[10px] font-bold tracking-normal text-gray-500">Size</span>
+                            <RangeSlider compact ariaLabel="Eraser size" min={2} max={100} step={1} value={eraserSize} suffix="px" onChange={setEraserSize} className="w-[180px]" />
                           </div>
                         </>
                       )}
@@ -10337,6 +10578,8 @@ export default function BoardEditor({
                   )}
                   {activeTool === 'fill' && !selectedElement && (
                     <div className={bottomToolbarGroupClass}>
+                      <SegmentedControl variant="toolbar" label="Fill Target" value={fillMode} onChange={setFillMode}
+                        options={[{ value: "area", label: "Area" }, { value: "object", label: "Object" }]} />
                       <div className="flex items-center gap-1.5" title="Fill Color">
                         <PaintBucket className="w-5 h-5 text-gray-500" />
                         <ColorPicker
@@ -10351,12 +10594,6 @@ export default function BoardEditor({
                   {/* Text Formatting */}
                   {isTextLike && (
                     <div className={bottomToolbarGroupClass}>
-                      <TextPixelSizeControl
-                        value={displayedTextFontSize(targetProps, activeType)}
-                        variant="toolbar"
-                        onCaptureSelection={() => captureTextSizeSelection(selectedElement?.id ?? null)}
-                        onCommit={applyTextFontSize}
-                      />
                       <div className="flex gap-1 items-center bg-gray-100 border-[3px] border-gray-300 p-1 rounded-xl">
                         <button
                           onPointerDown={(e) => {
@@ -10489,6 +10726,7 @@ export default function BoardEditor({
                       <div className="flex gap-2 items-center">
                         <div className="flex bg-gray-100 border-[3px] border-gray-300 rounded-xl p-1 gap-1 items-center">
                           <button
+                            type="button"
                             onPointerDown={(e) => {
                               e.preventDefault();
                               const isFrame =
@@ -10500,6 +10738,7 @@ export default function BoardEditor({
                                   targetProps.borderColor || "#1e293b",
                               });
                             }}
+                            data-shortcut-action="editor:textFrame" data-shortcut-label="Text Frame" data-shortcut-category="Text"
                             className={cn(
                               "p-1.5 rounded-lg transition-colors border-[3px] flex items-center justify-center gap-1.5 px-2 text-gray-500 hover:bg-white hover:text-[#1A1A1A] border-transparent",
                               targetProps.borderWidth !== undefined &&
@@ -10513,6 +10752,8 @@ export default function BoardEditor({
                           </button>
                           <div className="w-px h-4 bg-gray-300 mx-0.5" />
                           {isScalableText(activeType) && <button
+                            type="button"
+                            data-shortcut-action="editor:textLines" data-shortcut-label="Toggle Lines" data-shortcut-category="Text"
                             onPointerDown={(e) => {
                               e.preventDefault();
                               const snap = targetProps.textSnapToGrid;
@@ -10524,16 +10765,17 @@ export default function BoardEditor({
                                 ? "bg-white border-gray-300 text-gray-800 shadow-sm"
                                 : "",
                             )}
-                            title="Toggled-Lines"
+                            title="Toggle Lines"
                           >
                             <Equal className="w-4 h-4" />
                           </button>}
                           {isScalableText(activeType) && <button
-                            type="button" title="Text scaling" aria-label="Text scaling" aria-pressed={targetProps.textScaling === true}
+                            type="button" title="Text Scaling" aria-label="Text Scaling" aria-pressed={targetProps.textScaling === true}
+                            data-shortcut-action="editor:textScaling" data-shortcut-label="Text Scaling" data-shortcut-category="Text"
                             onPointerDown={event => event.preventDefault()}
                             onClick={() => onUpdateTarget({ textScaling: targetProps.textScaling !== true })}
                             className={cn("flex items-center gap-1.5 rounded-lg border-[3px] border-transparent px-2 py-1.5 text-gray-500 transition-colors hover:bg-white hover:text-[#1A1A1A]", targetProps.textScaling && "bg-white border-gray-300 text-gray-800 shadow-sm")}>
-                            <Maximize className="h-4 w-4" /><span className="text-[11px] font-bold">Text scaling</span>
+                            <Maximize className="h-4 w-4" /><span className="text-[11px] font-bold">Text Scaling</span>
                           </button>}
                           {isScalableText(activeType) && targetProps.textSnapToGrid && (
                             <>
@@ -10550,7 +10792,7 @@ export default function BoardEditor({
                                         : "everywhere",
                                   });
                                 }}
-                                className="px-2 py-0.5 text-[10px] font-extrabold tracking-wider uppercase text-blue-600 hover:bg-white rounded-md transition-all border border-blue-200 hover:border-blue-400 bg-blue-50/50 leading-none"
+                                className="px-2 py-0.5 text-[10px] font-extrabold tracking-normal text-blue-600 hover:bg-white rounded-md transition-all border border-blue-200 hover:border-blue-400 bg-blue-50/50 leading-none"
                                 title="Format: All area vs Text lines only"
                               >
                                 {targetProps.textLinesMode === "everywhere"
@@ -10561,11 +10803,22 @@ export default function BoardEditor({
                           )}
                         </div>
                       </div>
+                      {isScalableText(activeType) && (
+                        <button type="button" aria-label="Limit Text"
+                          aria-pressed={targetProps.textLineCapacityLimit !== false}
+                          data-shortcut-action="editor:textLineCapacity"
+                          data-shortcut-label="Limit Text"
+                          data-shortcut-category="Text"
+                          onClick={() => onUpdateTarget({ textLineCapacityLimit: targetProps.textLineCapacityLimit === false })}
+                          className="flex shrink-0 items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-[10px] font-bold text-gray-600 transition-colors hover:bg-white">
+                          <span>Limit Text</span><ToggleSwitch checked={targetProps.textLineCapacityLimit !== false} compact />
+                        </button>
+                      )}
                     </div>
                   )}
 
                   {/* Colors */}
-                  {(colors.fill || colors.stroke || colors.text) && (
+                  {(colors.fill || (colors.stroke && !isTextLike)) && (
                     <div className={bottomToolbarGroupClass}>
                       {colors.fill && <div
                         className="flex items-center gap-1.5"
@@ -10585,22 +10838,6 @@ export default function BoardEditor({
                           transparentTitle="Transparent Background"
                         />
                       </div>}
-                      {colors.text && (
-                        <div
-                          className="flex items-center gap-1.5 ml-2"
-                          title="Text Color"
-                        >
-                          <Type className="w-5 h-5 text-gray-500" />
-                          <ColorPicker
-                            value={targetProps.textColor || "#000000"}
-                            onChange={changeTextColor}
-                            customColors={customColors.text}
-                            onAddCustomColor={(c, i) =>
-                              handleAddCustomColor(c, i, "text")
-                            }
-                          />
-                        </div>
-                      )}
                       {/* Non-text stroke colors */}
                       {colors.stroke && !isTextLike && (
                         <div
@@ -10623,8 +10860,28 @@ export default function BoardEditor({
                     </div>
                   )}
 
+                  {isTextLike && colors.text && (
+                    <div className={bottomToolbarGroupClass} aria-label="Text Color and Size">
+                      <div className="flex items-center gap-1.5" title="Text Color">
+                        <Type className="w-5 h-5 text-gray-500" />
+                        <ColorPicker
+                          value={targetProps.textColor || "#000000"}
+                          onChange={changeTextColor}
+                          customColors={customColors.text}
+                          onAddCustomColor={(color, index) => handleAddCustomColor(color, index, "text")}
+                        />
+                      </div>
+                      <TextPixelSizeControl
+                        value={displayedTextFontSize(targetProps, activeType)}
+                        variant="toolbar"
+                        onCaptureSelection={() => captureTextSizeSelection(selectedElement?.id ?? null)}
+                        onCommit={applyTextFontSize}
+                      />
+                    </div>
+                  )}
+
                   {isTextLike && colors.stroke && (textFrameEnabled || textLinesEnabled) && (
-                    <div className={bottomToolbarGroupClass} aria-label="Text frame and line settings">
+                    <div className={bottomToolbarGroupClass} aria-label="Text Frame and Line Settings">
                       <div className="flex items-center gap-1.5" title="Frame Color">
                         <Square className="w-5 h-5 text-gray-500" />
                         <ColorPicker
@@ -10651,9 +10908,9 @@ export default function BoardEditor({
                         <PixelSettingControl
                           label="Frame thickness (px)"
                           value={targetProps.borderWidth ?? 2}
-                          min={0.25}
+                          min={0}
                           max={500}
-                          step={0.25}
+                          step={1}
                           onCommit={(value) => onUpdateTarget({ borderWidth: value })}
                         />
                       )}
@@ -10662,9 +10919,9 @@ export default function BoardEditor({
                           <PixelSettingControl
                             label="Rule thickness (px)"
                             value={resolvedTextLines.thickness}
-                            min={0.25}
+                          min={1}
                             max={100}
-                            step={0.25}
+                            step={1}
                             onCommit={(value) => onUpdateTarget({ textLineThickness: value })}
                           />
                           <PixelSettingControl
@@ -10687,7 +10944,7 @@ export default function BoardEditor({
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
                         title="Border / Line Width"
                       >
-                        <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                        <span className="text-[11px] font-bold text-gray-600 tracking-normal">
                           Thickness
                         </span>
                         <input
@@ -10729,7 +10986,7 @@ export default function BoardEditor({
                           className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
                           title="Border Radius"
                         >
-                          <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                          <span className="text-[11px] font-bold text-gray-600 tracking-normal">
                             Radius
                           </span>
                           <input
@@ -10763,7 +11020,7 @@ export default function BoardEditor({
                   {activeType === "triangle" && <div className={bottomToolbarGroupClass}>
                     <div className="flex items-center gap-2 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1" title="Triangle corners">
                       <span className="text-[11px] font-bold text-gray-600">Corners</span>
-                      <SegmentedControl label="Triangle corners" value={targetProps.strokeLinejoin ?? 'miter'}
+                      <SegmentedControl variant="toolbar" label="Triangle corners" value={targetProps.strokeLinejoin ?? 'miter'}
                         onChange={value => onUpdateTarget({strokeLinejoin:value})}
                         options={[{value:'miter',label:'Sharp'},{value:'round',label:'Rounded'}]} />
                     </div>
@@ -10775,31 +11032,12 @@ export default function BoardEditor({
                         className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
                         title="Opacity"
                       >
-                        <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                        <span className="text-[11px] font-bold text-gray-600 tracking-normal">
                           Opacity
                         </span>
-                        <input
-                          type="range"
-                          min="0"
-                          max="100"
-                          value={
-                            targetProps.opacity !== undefined
-                              ? targetProps.opacity
-                              : 100
-                          }
-                          onChange={(e) =>
-                            onUpdateTarget({
-                              opacity: parseInt(e.target.value),
-                            })
-                          }
-                          className="w-16 accent-black"
-                        />
-                        <span className="text-[11px] font-bold tracking-wider text-gray-600 select-none min-w-[4ch] text-right leading-none tabular-nums">
-                          {targetProps.opacity !== undefined
-                            ? targetProps.opacity
-                            : 100}
-                          %
-                        </span>
+                        <RangeSlider compact ariaLabel="Opacity" min={0} max={100} step={1}
+                          value={targetProps.opacity ?? 100} suffix="%"
+                          onChange={(opacity) => onUpdateTarget({ opacity })} className="w-[170px]" />
                       </div>
                     </div>
                   )}
@@ -10833,7 +11071,7 @@ export default function BoardEditor({
                               className="flex items-center gap-1.5 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors"
                               title="Browser Device Mode"
                             >
-                              <span className="text-[11px] font-bold text-gray-600 uppercase tracking-wider">
+                              <span className="text-[11px] font-bold text-gray-600 tracking-normal">
                                 Device
                               </span>
                               <div className="flex items-center gap-1">
@@ -10869,7 +11107,23 @@ export default function BoardEditor({
                               </div>
                             </div>
 
-                            <button type="button" title="Block popups" aria-label="Block popups" aria-pressed={webSettings.popupBlocker}
+                            <div className="flex h-12 min-h-12 shrink-0 items-center gap-2 border-r-2 border-gray-300 pr-3">
+                              <div data-shortcut-action="web:fullscreenMode" data-shortcut-label="Fullscreen Mode" data-shortcut-category="Web">
+                                <SegmentedControl narrow label="Fullscreen Mode" value={webSettings.fullscreenMode}
+                                  onChange={(mode) => onUpdateTarget({ webFullscreenMode: mode })}
+                                  options={[{ value: "area", label: "Web Area" }, { value: "real", label: "Real Fullscreen" }]} />
+                              </div>
+                              <button type="button" aria-label="Hide Web Controls" title="Hide Web Controls"
+                                aria-pressed={webSettings.controlsHidden}
+                                data-shortcut-action="web:controlsHidden" data-shortcut-label="Hide Web Controls" data-shortcut-category="Web"
+                                onClick={() => onUpdateTarget({ webControlsHidden: !webSettings.controlsHidden })}
+                                className={cn("flex h-8 items-center gap-1.5 rounded-lg border px-2 text-[10px] font-bold transition-colors", webSettings.controlsHidden ? "border-blue-300 bg-blue-50 text-blue-700" : "border-gray-300 bg-gray-50 text-gray-600 hover:bg-gray-100")}>
+                                {webSettings.controlsHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                                Controls
+                              </button>
+                            </div>
+
+                            <button type="button" title="Block Popups" aria-label="Block Popups" aria-pressed={webSettings.popupBlocker}
                               onClick={() => onUpdateTarget({ webPopupBlocker: !webSettings.popupBlocker })}
                               className={cn('flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold transition-colors', webSettings.popupBlocker ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400')}>
                               <SquareDashed className="h-4 w-4" />Popups
@@ -10887,7 +11141,7 @@ export default function BoardEditor({
                                     })
                                   }
                                   className={cn(
-                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold uppercase tracking-wider transition-colors",
+                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold tracking-normal transition-colors",
                                     webSettings.rememberSession
                                       ? "border-blue-200 bg-blue-50 text-blue-700"
                                       : "border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400",
@@ -10898,8 +11152,8 @@ export default function BoardEditor({
                                 </button>
 
                                 <button
-                                  title="Ad and tracker blocker"
-                                  aria-label="Ad blocker"
+                                  title="Ad and Tracker Blocker"
+                                  aria-label="Ad Blocker"
                                   aria-pressed={webSettings.adBlock}
                                   onClick={() =>
                                     onUpdateTarget({
@@ -10907,7 +11161,7 @@ export default function BoardEditor({
                                     })
                                   }
                                   className={cn(
-                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold uppercase tracking-wider transition-colors",
+                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold tracking-normal transition-colors",
                                     webSettings.adBlock
                                       ? "border-blue-200 bg-blue-50 text-blue-700"
                                       : "border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400",
@@ -10923,14 +11177,14 @@ export default function BoardEditor({
                                 </button>
 
                                 <button
-                                  title="Cookie blocker: Off / Third-party / All"
+                                  title="Cookie Blocker: Off / External / All"
                                   onClick={() =>
                                     onUpdateTarget({
                                       webCookieBlocker: nextCookieMode,
                                     })
                                   }
                                   className={cn(
-                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold uppercase tracking-wider transition-colors",
+                                    "flex items-center gap-1.5 rounded-xl border-[3px] px-2 py-1 text-[11px] font-bold tracking-normal transition-colors",
                                     webSettings.cookieBlocker !== "off"
                                       ? "border-blue-200 bg-blue-50 text-blue-700"
                                       : "border-gray-300 bg-gray-50 text-gray-500 hover:border-gray-400",
@@ -10955,7 +11209,7 @@ export default function BoardEditor({
                                     id: selectedElement.id,
                                   })
                                 }
-                                className="flex items-center gap-1.5 rounded-xl border-[3px] border-gray-300 bg-gray-50 px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-gray-600 transition-colors hover:border-gray-400 hover:bg-white disabled:opacity-40 disabled:pointer-events-none"
+                                className="flex items-center gap-1.5 rounded-xl border-[3px] border-gray-300 bg-gray-50 px-2 py-1 text-[11px] font-bold tracking-normal text-gray-600 transition-colors hover:border-gray-400 hover:bg-white disabled:opacity-40 disabled:pointer-events-none"
                               >
                                 <RotateCcw className="w-4 h-4" />
                                 Clear
@@ -10967,42 +11221,7 @@ export default function BoardEditor({
                     </div>
                   )}
 
-                  {/* Specific Options */}
-                  {false && activeType === "draw" && (
-                    <div className={bottomToolbarGroupClass}>
-                      <div
-                        className="flex items-center justify-between cursor-pointer group mt-1 bg-white p-2 border-[2px] border-gray-200 rounded-xl hover:bg-gray-50 transition-all"
-                        onClick={() =>
-                          onUpdateTarget({
-                            isSmooth: !(targetProps.isSmooth || false),
-                          })
-                        }
-                      >
-                        <span className="text-xs font-bold text-gray-600 select-none group-hover:text-black">
-                          Smoothing
-                        </span>
-                        <div
-                          className={cn(
-                            "w-7 h-4 rounded-full flex items-center p-0.5 transition-colors duration-200 ease-in-out shrink-0 border border-black/10",
-                            targetProps.isSmooth || false
-                              ? "bg-blue-500"
-                              : "bg-gray-200",
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              "w-3 h-3 bg-white rounded-full shadow-sm transform transition-transform duration-200 ease-in-out",
-                              targetProps.isSmooth || false
-                                ? "translate-x-3"
-                                : "translate-x-0",
-                            )}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {[
+                  {([
                     "image",
                     "media",
                     "triangle",
@@ -11013,7 +11232,7 @@ export default function BoardEditor({
                     "hexagon",
                     "rectangle",
                     "section",
-                  ].includes(activeType) && (
+                  ].includes(activeType) || isTextLike) && (
                     <div className={bottomToolbarGroupClass}>
                       {(() => {
                         const ratioDefaultOn =
@@ -11023,6 +11242,8 @@ export default function BoardEditor({
                           : targetProps.keepRatio === true;
                         return (
                           <button
+                            type="button"
+                            data-shortcut-action="editor:elementRatio" data-shortcut-label="Preserve Ratio" data-shortcut-category="Transform"
                             title="Preserve Ratio"
                             onClick={() => {
                               const willKeep = !ratioActive;
@@ -11063,43 +11284,49 @@ export default function BoardEditor({
                           >
                             <Maximize className="w-4 h-4" />
                             <span className="text-[10px] font-bold">
-                              RATIO
+                              Ratio
                             </span>
                           </button>
                         );
                       })()}
-                      {activeType === "media" &&
-                        inferMediaMime(
-                          targetProps.content,
-                          targetProps.mediaMime,
-                        ).startsWith("video") && (
-                          <>
-                            <button
-                              title={
-                                targetProps.mediaControlsHidden
-                                  ? "Show Player Controls"
-                                  : "Hide Player Controls"
-                              }
-                              onClick={() =>
-                                onUpdateTarget({
-                                  mediaControlsHidden:
-                                    !targetProps.mediaControlsHidden,
-                                })
-                              }
-                              className={cn(
-                                "p-2 rounded-lg transition-colors border-2 flex items-center gap-1",
-                                !targetProps.mediaControlsHidden
-                                  ? "bg-gray-200 border-gray-300 text-[#1A1A1A]"
-                                  : "border-transparent text-gray-500 hover:bg-gray-100 hover:border-gray-300",
-                              )}
-                            >
-                              <Film className="w-4 h-4" />
-                              <span className="text-[10px] font-bold">
-                                PLAYER
-                              </span>
-                            </button>
-                          </>
-                        )}
+                      {(activeType === "image" || activeType === "media") && (
+                        <>
+                          <button
+                            type="button"
+                            title={targetProps.mediaDisabled ? "Enable media" : "Disable media"}
+                            aria-label={targetProps.mediaDisabled ? "Enable media" : "Disable media"}
+                            aria-pressed={!!targetProps.mediaDisabled}
+                            data-shortcut-action="editor:mediaDisabled" data-shortcut-label="Disable Media" data-shortcut-category="Media"
+                            onClick={() => onUpdateTarget({ mediaDisabled: !targetProps.mediaDisabled })}
+                            className={cn(
+                              "p-2 rounded-lg transition-colors border-2 flex items-center gap-1",
+                              targetProps.mediaDisabled
+                                ? "bg-gray-200 border-gray-300 text-[#1A1A1A]"
+                                : "border-transparent text-gray-500 hover:bg-gray-100 hover:border-gray-300",
+                            )}
+                          >
+                            <EyeOff className="w-4 h-4" />
+                            <span className="text-[10px] font-bold">Media</span>
+                          </button>
+                          <button
+                            type="button"
+                            title={targetProps.mediaControlsHidden ? "Show Media Controls" : "Hide Media Controls"}
+                            aria-label={targetProps.mediaControlsHidden ? "Show Media Controls" : "Hide Media Controls"}
+                            aria-pressed={!!targetProps.mediaControlsHidden}
+                            data-shortcut-action="editor:mediaControlsHidden" data-shortcut-label="Hide Media Controls" data-shortcut-category="Media"
+                            onClick={() => onUpdateTarget({ mediaControlsHidden: !targetProps.mediaControlsHidden })}
+                            className={cn(
+                              "p-2 rounded-lg transition-colors border-2 flex items-center gap-1",
+                              targetProps.mediaControlsHidden
+                                ? "bg-gray-200 border-gray-300 text-[#1A1A1A]"
+                                : "border-transparent text-gray-500 hover:bg-gray-100 hover:border-gray-300",
+                            )}
+                          >
+                            <Film className="w-4 h-4" />
+                            <span className="text-[10px] font-bold">CONTROLS</span>
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
 
@@ -11146,7 +11373,7 @@ export default function BoardEditor({
                     <button
                       type="button"
                       data-save-object-defaults="true"
-                      disabled={selectedElement?.type==='group'}
+                      disabled={selectedElement?.type==='group' || objectDefaultsSaved}
                       title={selectedElement?.type==='group'?'Ungroup to save individual object settings':'Save settings for this object type'}
                       aria-label="Save settings for this object type"
                       onClick={() =>
@@ -11158,13 +11385,13 @@ export default function BoardEditor({
                             )
                       }
                       className={cn(
-                        "relative p-2 rounded-xl transition-all border-[3px] flex items-center justify-center shadow-sm disabled:opacity-40 disabled:cursor-not-allowed",
+                        "relative flex h-10 min-w-[84px] items-center justify-center rounded-xl border-[3px] px-3 text-xs font-bold transition-colors shadow-sm disabled:cursor-not-allowed",
                         objectDefaultsSaved
-                          ? "text-green-700 bg-green-50 border-green-300 scale-110"
-                          : "text-blue-700 bg-blue-50 hover:text-blue-800 hover:bg-blue-100 border-blue-200 hover:border-blue-300",
+                          ? cn("text-gray-400 bg-gray-100 border-gray-300 opacity-70", savedObjectDefaultsSignature === currentObjectDefaultsSignature && "save-confirm-flash")
+                          : "text-gray-600 bg-gray-100 hover:text-gray-900 hover:bg-gray-200 border-gray-300 hover:border-gray-400",
                       )}
                     >
-                      <Check className="w-5 h-5" />
+                      <span>{objectDefaultsSaved ? "Saved" : "Save"}</span>
                     </button>
                   </div>
                 </ToolPropertiesBar>
@@ -11208,6 +11435,8 @@ function BoardElementNode({
   allowEditing = true,
   matchingToolEditing = false,
   matchingToolMoving = false,
+  mediaPlaybackDisabled = false,
+  globalBrightness = 100,
   isInteractionLocked = false,
   allowMovingElementsInPan = false,
   webSelectInteraction = false,
@@ -11232,6 +11461,8 @@ function BoardElementNode({
   allowEditing?: boolean;
   matchingToolEditing?: boolean;
   matchingToolMoving?: boolean;
+  mediaPlaybackDisabled?: boolean;
+  globalBrightness?: number;
   allowMovingElementsInPan?: boolean;
   webSelectInteraction?: boolean;
   webHandInteraction?: boolean;
@@ -11586,8 +11817,13 @@ function BoardElementNode({
         }, 750);
       }
 
-      const simpleDoc=resizeElement.type==='table'?parseWorkbookDocument(resizeElement.content):null;
-      const minSize = simpleDoc?.mode==='simple'?fitGridObjectSize(simpleDoc,0,0):getElementMinSize(resizeElement);
+      const spreadsheetDoc=resizeElement.type==='table'?parseWorkbookDocument(resizeElement.content):null;
+      const spreadsheetCell=workbookCellSize(spreadsheetDoc);
+      const minSize = spreadsheetDoc?.mode==='simple'
+        ? fitGridObjectSize(spreadsheetDoc,0,0)
+        : spreadsheetDoc?.mode==='advanced'
+          ? snapAdvancedGridViewportSize(spreadsheetDoc,0,0,spreadsheetCell)
+          : getElementMinSize(resizeElement);
       let finalW: number;
       let finalH: number;
       if (isProportional) {
@@ -11608,16 +11844,15 @@ function BoardElementNode({
         finalH = Math.max(minSize.height, localSnap(Math.abs(signedH)));
       }
 
-      if (element.type === 'table' && !isProportional) {
-        const cell=workbookCellSize(parseWorkbookDocument(resizeElement.content));
-        const doc=parseWorkbookDocument(resizeElement.content);
-        if (doc?.mode==='simple') {
-          const size=fitGridObjectSize(doc,finalW,finalH);
+      if (element.type === 'table') {
+        if (spreadsheetDoc?.mode==='simple') {
+          const size=fitGridObjectSize(spreadsheetDoc,finalW,finalH);
           if (dir.includes('e') || dir.includes('w')) finalW=size.width;
           if (dir.includes('n') || dir.includes('s')) finalH=size.height;
         } else {
-          if (dir.includes('e') || dir.includes('w')) finalW=Math.max(Math.ceil(minSize.width/cell.width)*cell.width,Math.round(finalW/cell.width)*cell.width);
-          if (dir.includes('n') || dir.includes('s')) finalH=Math.max(Math.ceil(minSize.height/cell.height)*cell.height,Math.round(finalH/cell.height)*cell.height);
+          const size=snapAdvancedGridViewportSize(spreadsheetDoc,finalW,finalH,spreadsheetCell);
+          if (dir.includes('e') || dir.includes('w')) finalW=size.width;
+          if (dir.includes('n') || dir.includes('s')) finalH=size.height;
         }
       }
 
@@ -12050,6 +12285,8 @@ function BoardElementNode({
       ? inferMediaMime(element.content, element.mediaMime)
       : "";
   const hasPlayableMediaControls =
+    !mediaPlaybackDisabled &&
+    !element.mediaDisabled &&
     !isInteractionLocked &&
     activeTool !== "draw" &&
     element.type === "media" &&
@@ -12173,8 +12410,11 @@ function BoardElementNode({
           ? "pointer-events-none"
         : isInteractionLocked
           ? "pointer-events-none"
-        : element.type === "board" && !canInteract
-          ? "cursor-crosshair pointer-events-auto"
+        : element.type === "board"
+          ? cn(
+              "pointer-events-auto",
+              !canInteract && activeTool === "board" && "cursor-crosshair",
+            )
           : element.type === "line"
           ? canInteract
             ? canMove
@@ -12224,6 +12464,18 @@ function BoardElementNode({
           return;
         }
 
+        // Secondary boards are placement surfaces for drawing tools. Their
+        // resize permission must not consume the pointer before the canvas can
+        // place an object inside the board.
+        if (
+          element.type === "board" &&
+          activeTool !== "select" &&
+          activeTool !== "pan" &&
+          activeTool !== "link"
+        ) {
+          return;
+        }
+
         if (!canInteract) return;
 
         if (permissions.canInteractWeb && normalizeWebUrl(element.content)) {
@@ -12232,25 +12484,15 @@ function BoardElementNode({
           return;
         }
 
-        // If only resize is enabled, prevent moving the board body
-        if (
-          element.type === "board" &&
-          !isBoardMoveEnabled &&
-          isBoardResizeEnabled &&
-          activeTool !== "select" &&
-          activeTool !== "pan"
-        ) {
-          e.stopPropagation();
-          onSelect();
-          return;
-        }
         handleDragPointerDown(e);
       }}
       onClick={(e) => {
         if(!isVisiblePointerPoint(e.clientX,e.clientY)&&!isElementControlTarget(e.target)){
           e.preventDefault();e.stopPropagation();return;
         }
-        if (!canInteract && element.type === "board") return;
+        const canSelectBoardWithCreationTool =
+          element.type === "board" && activeTool === "board";
+        if (!canInteract && element.type === "board" && !canSelectBoardWithCreationTool) return;
         e.stopPropagation();
         if (
           element.linkToId &&
@@ -12261,7 +12503,7 @@ function BoardElementNode({
           onJumpToTarget(element.linkToId);
           return;
         }
-        if (canInteract) onSelect();
+        if (canInteract || canSelectBoardWithCreationTool) onSelect();
       }}
       onContextMenu={(e) => {
         if(!isVisiblePointerPoint(e.clientX,e.clientY)&&!isElementControlTarget(e.target)){
@@ -12314,6 +12556,8 @@ function BoardElementNode({
                   allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
                   webInteractive={permissions.canInteractWeb}
+                  mediaPlaybackDisabled={mediaPlaybackDisabled}
+                  globalBrightness={globalBrightness}
                   activeTool={activeTool}
                   showGrid={showGrid}
                   gridColor={gridColor}
@@ -12335,6 +12579,8 @@ function BoardElementNode({
               allowEditing={activeTool !== "crop" && (permissions.canEditText || canResize || canMove || (element.type !== "embed" && permissions.canEditContent))}
                   allowContentEditing={permissions.canEditContent}
                   webInteractive={permissions.canInteractWeb}
+                  mediaPlaybackDisabled={mediaPlaybackDisabled}
+                  globalBrightness={globalBrightness}
               activeTool={activeTool}
               showGrid={showGrid}
               gridColor={gridColor}
@@ -12536,78 +12782,20 @@ function TextPixelSizeControl({
   onCaptureSelection,
   onCommit,
 }: TextPixelSizeControlProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(String(value));
-  const lastCommittedValueRef = useRef(String(value));
-
-  useEffect(() => {
-    if (document.activeElement === inputRef.current) return;
-    const next = String(value);
-    setDraft(next);
-    lastCommittedValueRef.current = next;
-  }, [value]);
-
-  const commit = () => {
-    const parsed = Number(draft);
-    if (!draft.trim() || !Number.isFinite(parsed)) {
-      setDraft(String(value));
-      return;
-    }
-    const next = Math.max(1, Math.min(500, parsed));
-    const normalized = String(next);
-    if (lastCommittedValueRef.current !== normalized) {
-      lastCommittedValueRef.current = normalized;
-      onCommit(next);
-    }
-    setDraft(normalized);
-  };
-
-  const captureSelectionValue = () => {
-    const selectedValue = onCaptureSelection();
-    if (selectedValue !== undefined && Number.isFinite(selectedValue)) {
-      setDraft(String(selectedValue));
-      lastCommittedValueRef.current = String(selectedValue);
-    }
-  };
-
-  const input = (
-    <input
-      ref={inputRef}
-      type="number"
-      data-text-px-control="true"
-      aria-label="Font size in pixels"
-      value={draft}
-      min="1"
-      max="500"
-      step="0.1"
-      onPointerDown={(event) => {
-        event.stopPropagation();
-        captureSelectionValue();
-      }}
-      onFocus={captureSelectionValue}
-      onChange={(event) => setDraft(event.target.value)}
-      onKeyDown={(event) => {
-        event.stopPropagation();
-        if (event.key === "Enter") {
-          event.preventDefault();
-          commit();
-          inputRef.current?.blur();
-        }
-      }}
-      onBlur={commit}
-      className={variant === "settings"
-        ? "mt-1 w-full bg-gray-50 border-[2px] border-gray-300 rounded-md px-2 py-1 text-xs font-semibold text-gray-800 outline-none focus:border-blue-500 transition-colors"
-        : "bg-transparent text-sm font-bold text-gray-800 outline-none w-12 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none placeholder:text-gray-400"}
+  return (
+    <RangeSlider
+      value={value}
+      min={1}
+      max={500}
+      step={1}
+      suffix="px"
+      ariaLabel="Size"
+      dataTextPxControl
+      compact
+      className={variant === "settings" ? "min-w-0 flex-1" : "min-w-[190px] max-w-[230px]"}
+      onValueEntryStart={onCaptureSelection}
+      onChange={onCommit}
     />
-  );
-
-  return variant === "settings" ? (
-    input
-  ) : (
-    <div className="flex items-center gap-1 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors" title="Font Size (px)">
-      {input}
-      <span className="text-[11px] uppercase font-bold tracking-wider text-gray-600 select-none">px</span>
-    </div>
   );
 }
 
@@ -12621,56 +12809,10 @@ interface PixelSettingControlProps {
 }
 
 function PixelSettingControl({ label, value, min, max, step, onCommit }: PixelSettingControlProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [draft, setDraft] = useState(String(value));
-  const lastCommittedValueRef = useRef(String(value));
-
-  useEffect(() => {
-    if (document.activeElement === inputRef.current) return;
-    const next = String(value);
-    setDraft(next);
-    lastCommittedValueRef.current = next;
-  }, [value]);
-
-  const commit = () => {
-    const parsed = Number(draft);
-    if (!draft.trim() || !Number.isFinite(parsed)) {
-      setDraft(String(value));
-      return;
-    }
-    const next = Math.max(min, Math.min(max, parsed));
-    const normalized = String(next);
-    if (lastCommittedValueRef.current !== normalized) {
-      lastCommittedValueRef.current = normalized;
-      onCommit(next);
-    }
-    setDraft(normalized);
-  };
-
   return (
-    <div className="flex items-center gap-1 bg-gray-50 border-[3px] border-gray-300 rounded-xl px-2 py-1 hover:border-gray-400 transition-colors" title={label}>
-      <input
-        ref={inputRef}
-        type="number"
-        aria-label={label}
-        value={draft}
-        min={min}
-        max={max}
-        step={step}
-        onPointerDown={(event) => event.stopPropagation()}
-        onChange={(event) => setDraft(event.target.value)}
-        onKeyDown={(event) => {
-          event.stopPropagation();
-          if (event.key === "Enter") {
-            event.preventDefault();
-            commit();
-            inputRef.current?.blur();
-          }
-        }}
-        onBlur={commit}
-        className="bg-transparent text-sm font-bold text-gray-800 outline-none w-12 text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-      />
-      <span className="text-[11px] uppercase font-bold tracking-wider text-gray-600 select-none">px</span>
+    <div title={label} className="w-[170px] min-w-[150px]">
+      <RangeSlider compact ariaLabel={label} value={value} min={min} max={max} step={step}
+        suffix="px" onChange={onCommit} />
     </div>
   );
 }
@@ -13312,6 +13454,7 @@ function WebBrowserElement({
   const [retryVersion, setRetryVersion] = useState(0);
   const [editingUrl, setEditingUrl] = useState(false);
   const [sessionCleared, setSessionCleared] = useState(false);
+  const [webHistory, setWebHistory] = useState({ back: false, forward: false });
   const [configuredPartition, setConfiguredPartition] = useState('');
   const appliedPrivacyRef = useRef('');
   const webviewRef = useRef<any>(null);
@@ -13323,7 +13466,7 @@ function WebBrowserElement({
   const partition = getWebPartition(element);
   const privacyIdentity = `${partition}:${settings.adBlock}:${settings.cookieBlocker}:${settings.popupBlocker}`;
   const frameIdentity = isElectron ? `${partition}-${settings.deviceMode}` : `${normalizedContent}:${settings.popupBlocker}`;
-  useEffect(() => { setLoadState("loading"); setLoadError(""); }, [frameIdentity, retryVersion, editingUrl]);
+  useEffect(() => { setLoadState("loading"); setLoadError(""); setWebHistory({ back: false, forward: false }); }, [frameIdentity, retryVersion, editingUrl]);
 
   useEffect(() => {
     if (isElectron || !normalizedContent || editingUrl || browserSource.requiresDesktop || loadState !== "loading") return;
@@ -13374,6 +13517,8 @@ function WebBrowserElement({
       webAdBlock: settings.adBlock,
       webCookieBlocker: settings.cookieBlocker,
       webPopupBlocker: settings.popupBlocker,
+      webFullscreenMode: settings.fullscreenMode,
+      webControlsHidden: settings.controlsHidden,
     });
     setLinkInputVal("");
     setEditingUrl(false);
@@ -13405,7 +13550,8 @@ function WebBrowserElement({
           <NativeWebView
             key={`${partition}-${settings.deviceMode}-${retryVersion}`}
             elementId={element.id} src={normalizedContent} partition={partition}
-            deviceMode={settings.deviceMode} interactive={interactive} guestRef={webviewRef}
+            deviceMode={settings.deviceMode} fullscreenMode={settings.fullscreenMode} interactive={interactive} guestRef={webviewRef}
+            onHistoryChange={setWebHistory}
             onReady={() => { setLoadState('ready'); setLoadError(''); }}
             onLoading={() => setLoadState(current => current === 'ready' ? current : 'loading')}
             onError={message => { setLoadState('error'); setLoadError(message); }}
@@ -13425,7 +13571,7 @@ function WebBrowserElement({
             referrerPolicy="strict-origin-when-cross-origin"
             allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
             allowFullScreen
-            onLoad={() => { setLoadState("ready"); setLoadError(""); }}
+            onLoad={() => { setLoadState("ready"); setLoadError(""); setWebHistory({ back: false, forward: false }); }}
             onError={() => { setLoadState("error"); setLoadError("The page could not be loaded here."); }}
             className={cn(
               "w-full h-full bg-white",
@@ -13466,13 +13612,17 @@ function WebBrowserElement({
       {normalizedContent && !editingUrl && !browserSource.requiresDesktop && loadState === "loading" && !loadError && <div role="status" className="pointer-events-none absolute bottom-2 left-2 rounded bg-white/90 px-2 py-1 text-[10px] text-slate-500">Loading page…</div>}
       {normalizedContent && !editingUrl && !!loadError && <div onPointerDown={event => event.stopPropagation()} className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-slate-50 p-4 text-center"><p role="alert" className="text-xs text-slate-600">{loadError}</p><button type="button" onClick={() => setRetryVersion(v => v + 1)} className="rounded-lg border bg-white px-3 py-1 text-xs font-bold pointer-events-auto">Retry</button><a href={normalizedContent} target="_blank" rel="noopener noreferrer" className="text-xs font-semibold text-blue-600 pointer-events-auto">Open in browser</a></div>}
 
-      {normalizedContent && isSelected && (
+      {normalizedContent && isSelected && !settings.controlsHidden && (
         <div className="absolute top-2 right-2 z-30 flex max-w-[calc(100%-1rem)] items-center justify-end gap-1 overflow-hidden opacity-0 transition-opacity group-hover:opacity-100">
-          {!isElectron && <a href={normalizedContent} target="_blank" rel="noopener noreferrer" onPointerDown={event => event.stopPropagation()} title="Open in browser" aria-label="Open in browser" className="flex h-7 w-7 items-center justify-center rounded-md bg-white text-slate-900 shadow-sm ring-1 ring-black/10 pointer-events-auto"><ArrowUpRight className="h-3.5 w-3.5" /></a>}
-          <button type="button" title="Edit web address" aria-label="Edit web address" onPointerDown={event => { event.preventDefault(); event.stopPropagation(); setLinkInputVal(normalizedContent); setEditingUrl(true); }} className="h-7 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 pointer-events-auto">URL</button>
+          {!isElectron && <a href={normalizedContent} target="_blank" rel="noopener noreferrer" onPointerDown={event => event.stopPropagation()} title="Open in Browser" aria-label="Open in Browser" className="flex h-7 w-7 items-center justify-center rounded-md border border-black/60 bg-white text-slate-900 pointer-events-auto"><ArrowUpRight className="h-3.5 w-3.5" /></a>}
+          {isElectron && <>
+            <button type="button" title="Back" aria-label="Back" disabled={!webHistory.back} onPointerDown={event => event.stopPropagation()} onClick={() => webviewRef.current?.goBack?.()} className="flex h-7 w-7 items-center justify-center rounded-md border border-black/60 bg-white text-slate-900 pointer-events-auto hover:bg-gray-100 disabled:opacity-30"><ArrowLeft className="h-3.5 w-3.5" /></button>
+            <button type="button" title="Forward" aria-label="Forward" disabled={!webHistory.forward} onPointerDown={event => event.stopPropagation()} onClick={() => webviewRef.current?.goForward?.()} className="flex h-7 w-7 items-center justify-center rounded-md border border-black/60 bg-white text-slate-900 pointer-events-auto hover:bg-gray-100 disabled:opacity-30"><ArrowRight className="h-3.5 w-3.5" /></button>
+          </>}
+          <button type="button" title="Edit Web Address" aria-label="Edit Web Address" onPointerDown={event => { event.preventDefault(); event.stopPropagation(); setLinkInputVal(normalizedContent); setEditingUrl(true); }} className="h-7 rounded-md border border-black/60 bg-white px-2 text-[10px] font-bold text-slate-900 pointer-events-auto hover:bg-gray-100">URL</button>
           {isElectron && (
             <button
-              className="h-7 shrink-0 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-blue-50 pointer-events-auto"
+              className="h-7 shrink-0 rounded-md border border-black/60 bg-white px-2 text-[10px] font-bold text-slate-900 pointer-events-auto hover:bg-gray-100"
               onPointerDown={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -13491,7 +13641,7 @@ function WebBrowserElement({
             </button>
           )}
           <button
-            className="h-7 shrink-0 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-blue-50 pointer-events-auto"
+            className="h-7 shrink-0 rounded-md border border-black/60 bg-white px-2 text-[10px] font-bold text-slate-900 pointer-events-auto hover:bg-gray-100"
             onPointerDown={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -13520,6 +13670,8 @@ function ElementVisuals({
   allowEditing = true,
   allowContentEditing = false,
   webInteractive = false,
+  mediaPlaybackDisabled = false,
+  globalBrightness = 100,
   activeTool,
   showGrid,
   gridColor,
@@ -13537,6 +13689,8 @@ function ElementVisuals({
   allowEditing?: boolean;
   allowContentEditing?: boolean;
   webInteractive?: boolean;
+  mediaPlaybackDisabled?: boolean;
+  globalBrightness?: number;
   activeTool?: string;
   showGrid?: boolean;
   gridColor?: string;
@@ -13617,6 +13771,14 @@ function ElementVisuals({
     textAlign,
     borderRadius,
   } = element;
+  const isMediaDisabled = (type === "image" || type === "media") &&
+    (mediaPlaybackDisabled || element.mediaDisabled === true);
+
+  useEffect(() => {
+    if (!isMediaDisabled) return;
+    setIsVideoPlaying(false);
+    setIsAudioPlaying(false);
+  }, [isMediaDisabled]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -13849,7 +14011,7 @@ function ElementVisuals({
             }
             allowEditing={allowEditing}
             maxHeight={textMaxHeight}
-            lineCapacityLimit
+            lineCapacityLimit={element.textLineCapacityLimit !== false}
             onJumpToTarget={onJumpToTarget}
             onLinkEdit={onLinkEdit}
             activeTool={activeTool}
@@ -13984,7 +14146,7 @@ function ElementVisuals({
       return <div className="relative pointer-events-none" style={{width:size?.width??100,height:size?.height??40}}>
         {children.filter(child=>child.type!=='layer'&&!child.isEraser&&localHierarchy.isVisible(child.id,true)).sort(localHierarchy.compare).map((child,index)=><div key={child.id} className="absolute pointer-events-none"
           style={{left:child.position.x,top:child.position.y,width:child.size?.width,height:child.size?.height,zIndex:index+1,opacity:(child.opacity??100)/100,transform:`rotate(${child.rotation??0}deg)`,clipPath:getSectionClipPath(child,children)}}>
-          <ElementVisuals element={child} elements={children} onUpdate={()=>{}} allowEditing={false}/>
+          <ElementVisuals element={child} elements={children} onUpdate={()=>{}} allowEditing={false} mediaPlaybackDisabled={mediaPlaybackDisabled} globalBrightness={globalBrightness}/>
         </div>)}
       </div>;
     }
@@ -14077,6 +14239,7 @@ function ElementVisuals({
         </div>
       );
     case "image":
+      if (isMediaDisabled) return <div data-media-disabled="true" aria-label="Disabled media" className="relative" style={{ width: size?.width || 256, height: size?.height || 192, ...containerStyle, opacity: 0 }} />;
       return (
         <div
           className="bg-gray-100 flex flex-col items-center justify-center text-gray-400 gap-2 shadow-sm relative group overflow-hidden"
@@ -14124,7 +14287,7 @@ function ElementVisuals({
                   borderRadius: containerStyle.borderRadius,
                 }}
               />
-              {isSelected && allowEditing && (
+              {isSelected && allowEditing && !element.mediaControlsHidden && (
                 <div
                   className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                   style={{
@@ -14133,7 +14296,7 @@ function ElementVisuals({
                   }}
                 >
                   <label
-                    className="bg-white text-black px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer pointer-events-auto shadow-sm"
+                    className="inline-flex h-8 items-center rounded-md border border-gray-300 bg-white px-3 text-xs font-semibold text-slate-900 cursor-pointer pointer-events-auto shadow-sm hover:bg-gray-100"
                     style={{
                       transform: `rotate(-${element.rotation || 0}deg)`,
                     }}
@@ -14274,6 +14437,8 @@ function ElementVisuals({
         ? size?.height || MEDIA_DEFAULT_SIZE.height
         : size?.height || MEDIA_DEFAULT_SIZE.height;
 
+      if (isMediaDisabled) return <div data-media-disabled="true" aria-label="Disabled media" className="relative" style={{ width: mediaWidth, height: mediaHeight, ...containerStyle, opacity: 0 }} />;
+
       return (
         <div
           className={cn(
@@ -14359,9 +14524,9 @@ function ElementVisuals({
                 />
               </div>
 
-              <button
+              {!element.mediaControlsHidden && <button
                 className={cn(
-                  "absolute left-1/2 top-1/2 z-20 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-white/90 text-slate-900 shadow-lg ring-1 ring-black/10 transition-opacity hover:bg-white",
+                  "absolute left-1/2 top-1/2 z-20 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-gray-300 bg-white text-slate-900 shadow-md ring-1 ring-black/10 transition-opacity hover:bg-gray-100",
                   isVideoPlaying
                     ? "opacity-0 group-hover:opacity-100"
                     : "opacity-100",
@@ -14374,7 +14539,7 @@ function ElementVisuals({
                 ) : (
                   <Play className="ml-0.5 h-5 w-5 fill-current" />
                 )}
-              </button>
+              </button>}
 
               {!element.mediaControlsHidden && (
                 <div
@@ -14385,7 +14550,7 @@ function ElementVisuals({
                   }}
                 >
                   <button
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md hover:bg-slate-200"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white ring-1 ring-slate-200 hover:bg-slate-100"
                     onPointerDown={toggleVideoPlayback}
                     title={isVideoPlaying ? "Pause" : "Play"}
                   >
@@ -14434,13 +14599,13 @@ function ElementVisuals({
                 }
                 onEnded={() => setIsAudioPlaying(false)}
               />
-              <div
+              {!element.mediaControlsHidden && <div
                 className="pointer-events-auto flex w-full min-w-0 items-center gap-2 rounded-xl bg-white/90 px-2.5 py-2 text-slate-900 shadow-lg ring-1 ring-black/10 backdrop-blur"
                 onPointerDown={(e) => e.stopPropagation()}
                 onClick={(e) => e.stopPropagation()}
               >
                 <button
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white ring-1 ring-slate-200 hover:bg-slate-100"
                   onPointerDown={toggleAudioPlayback}
                   title={isAudioPlaying ? "Pause" : "Play"}
                 >
@@ -14471,7 +14636,7 @@ function ElementVisuals({
                   {formatVideoTime(audioDuration)}
                 </span>
                 <button
-                  className="h-7 shrink-0 rounded-md bg-slate-100 px-2 text-[10px] font-bold text-slate-700 hover:bg-slate-200"
+                  className="h-7 shrink-0 rounded-md bg-transparent px-2 text-[10px] font-bold text-slate-700 hover:bg-white/20"
                   onPointerDown={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -14486,20 +14651,10 @@ function ElementVisuals({
                   {(element.mediaPlaybackRate || 1).toString()}x
                 </button>
                 <Volume2 className="h-4 w-4 shrink-0 text-slate-500" />
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={element.mediaVolume ?? 1}
-                  className="w-14 accent-blue-600"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onChange={(e) =>
-                    onUpdate({ mediaVolume: Number(e.target.value) })
-                  }
-                  title="Volume"
-                />
-              </div>
+                <RangeSlider compact ariaLabel="Media volume" min={0} max={100} step={1}
+                  value={Math.round((element.mediaVolume ?? 1) * 100)} suffix="%"
+                  onChange={(value) => onUpdate({ mediaVolume: value / 100 })} className="w-[150px]" />
+              </div>}
             </div>
           ) : (
             <div className="w-full h-full min-w-[180px] min-h-[96px] flex flex-col items-center justify-center gap-2 px-4 py-3 text-center bg-slate-50">
@@ -14532,12 +14687,12 @@ function ElementVisuals({
               </span>
             </div>
           )}
-          {content && isSelected && allowEditing && (
+          {content && isSelected && allowEditing && !element.mediaControlsHidden && (
             <div className="absolute top-2 right-2 z-30 flex max-w-[calc(100%-1rem)] items-center justify-end gap-1 overflow-hidden opacity-0 transition-opacity group-hover:opacity-100">
               {isVideo && (
                 <>
                   <button
-                    className="h-7 shrink-0 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-blue-50 pointer-events-auto"
+                    className="h-7 shrink-0 rounded-md bg-white px-2 text-[10px] font-bold text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-slate-100 pointer-events-auto"
                     onPointerDown={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
@@ -14553,8 +14708,8 @@ function ElementVisuals({
                   </button>
                   <button
                     className={cn(
-                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-blue-50 pointer-events-auto",
-                      element.mediaLoop && "bg-blue-100 text-blue-700",
+                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white text-slate-900 shadow-sm ring-1 ring-black/10 hover:bg-slate-100 pointer-events-auto",
+                      element.mediaLoop && "text-blue-700 ring-blue-300",
                     )}
                     onPointerDown={(e) => {
                       e.preventDefault();
@@ -14567,24 +14722,14 @@ function ElementVisuals({
                   </button>
                   <div className="flex h-7 shrink-0 items-center gap-1 rounded-md bg-white px-2 text-slate-900 shadow-sm ring-1 ring-black/10 pointer-events-auto">
                     <Volume2 className="h-3.5 w-3.5 text-slate-500" />
-                    <input
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.05"
-                      value={element.mediaVolume ?? 1}
-                      className="w-14 accent-blue-600"
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onChange={(e) =>
-                        onUpdate({ mediaVolume: Number(e.target.value) })
-                      }
-                      title="Volume"
-                    />
+                    <RangeSlider compact ariaLabel="Media volume" min={0} max={100} step={1}
+                      value={Math.round((element.mediaVolume ?? 1) * 100)} suffix="%"
+                      onChange={(value) => onUpdate({ mediaVolume: value / 100 })} className="w-[150px]" />
                   </div>
                 </>
               )}
               <label
-                className="shrink-0 bg-white text-black px-2.5 py-1 rounded-md text-[11px] font-bold cursor-pointer pointer-events-auto shadow-sm"
+                className="inline-flex h-7 shrink-0 items-center rounded-md bg-white px-2.5 text-[11px] font-bold text-slate-900 cursor-pointer pointer-events-auto shadow-sm ring-1 ring-black/10 hover:bg-slate-100"
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 Replace
@@ -14617,7 +14762,7 @@ function ElementVisuals({
       );
     }
     case "table":
-      return <SpreadsheetElement element={element} onUpdate={onUpdate} isSelected={isSelected} allowEditing={allowEditing||allowContentEditing}/>;
+      return <SpreadsheetElement element={element} onUpdate={onUpdate} isSelected={isSelected} allowEditing={allowEditing||allowContentEditing} globalBrightness={globalBrightness}/>;
     case "diamond":
       return (
         <div

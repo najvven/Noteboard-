@@ -1,12 +1,14 @@
 /**
- * The three settings shared by tool menus.
+ * Settings shared by tool menus, with fixed app defaults and sparse per-tool overrides.
  *
- * `keepToolActive: true` is the Fixed tool mode; `false` is Unfixed.
- * `previewMode: "box"` is the Translucent preview; `"realistic"` is True.
+ * Per-tool values are sparse overrides of fixed app defaults. No editable
+ * global tool-settings group is persisted.
+ * `previewMode: "box"` is the Area preview; `"realistic"` is Object.
  */
 export interface ToolMenuSettings {
   alwaysOnTop: boolean;
   keepToolActive: boolean;
+  ratio?: boolean;
   previewMode: "box" | "realistic";
   /** Opt-in transforms with the element's own creation tool. */
   allowEditing?: boolean;
@@ -28,22 +30,15 @@ export type ToolMenuSettingsOverrides = Record<
 
 /**
  * Object-picking workflows need to remain available while the user clicks the
- * board, so they intentionally own defaults instead of inheriting Global Tool
- * Settings. Explicit per-workflow overrides still win.
+ * board, so they intentionally own per-tool defaults. Explicit overrides win.
  */
 export const INDEPENDENT_WORKFLOW_MENU_DEFAULTS: Readonly<
-  Record<string, ToolMenuSettings>
+  Record<string, Partial<ToolMenuSettings>>
 > = {
-  link: {
-    alwaysOnTop: true,
-    keepToolActive: true,
-    previewMode: "box",
-  },
-  "object-presets": {
-    alwaysOnTop: true,
-    keepToolActive: true,
-    previewMode: "box",
-  },
+  // These pickers stay open while the user chooses an item. Their other
+  // settings use the same fixed app defaults as other tools.
+  link: { alwaysOnTop: true },
+  "object-presets": { alwaysOnTop: true },
 };
 
 /** Creation tools can have safe, tool-specific transform defaults. */
@@ -55,35 +50,36 @@ export const TOOL_MENU_DEFAULT_OVERRIDES: Readonly<
 
 /**
  * Resolves a tool's effective settings without mutating either input object.
- * An override is intentionally sparse so later global changes remain visible
- * for every setting the tool has not changed itself.
+ * Overrides are intentionally sparse so every unchanged setting stays at
+ * the app default.
  */
 export const resolveToolMenuSettings = (
-  global: Readonly<ToolMenuSettings>,
+  defaults: Readonly<ToolMenuSettings>,
   override?: Readonly<ToolMenuSettingsOverride> | null,
 ): ToolMenuSettings => ({
-  alwaysOnTop: override?.alwaysOnTop ?? global.alwaysOnTop,
-  keepToolActive: override?.keepToolActive ?? global.keepToolActive,
-  previewMode: override?.previewMode ?? global.previewMode,
-  ...((override?.allowEditing ?? global.allowEditing) !== undefined
-    ? { allowEditing: override?.allowEditing ?? global.allowEditing }
+  alwaysOnTop: override?.alwaysOnTop ?? defaults.alwaysOnTop,
+  keepToolActive: override?.keepToolActive ?? defaults.keepToolActive,
+  ratio: override?.ratio ?? defaults.ratio ?? false,
+  previewMode: override?.previewMode ?? defaults.previewMode,
+  ...((override?.allowEditing ?? defaults.allowEditing) !== undefined
+    ? { allowEditing: override?.allowEditing ?? defaults.allowEditing }
     : {}),
-  ...((override?.allowMoving ?? global.allowMoving) !== undefined
-    ? { allowMoving: override?.allowMoving ?? global.allowMoving }
+  ...((override?.allowMoving ?? defaults.allowMoving) !== undefined
+    ? { allowMoving: override?.allowMoving ?? defaults.allowMoving }
     : {}),
-  ...((override?.pageInteractionWithSelect ?? global.pageInteractionWithSelect) !== undefined
-    ? { pageInteractionWithSelect: override?.pageInteractionWithSelect ?? global.pageInteractionWithSelect } : {}),
-  ...((override?.pageInteractionWithHand ?? global.pageInteractionWithHand) !== undefined
-    ? { pageInteractionWithHand: override?.pageInteractionWithHand ?? global.pageInteractionWithHand } : {}),
+  ...((override?.pageInteractionWithSelect ?? defaults.pageInteractionWithSelect) !== undefined
+    ? { pageInteractionWithSelect: override?.pageInteractionWithSelect ?? defaults.pageInteractionWithSelect } : {}),
+  ...((override?.pageInteractionWithHand ?? defaults.pageInteractionWithHand) !== undefined
+    ? { pageInteractionWithHand: override?.pageInteractionWithHand ?? defaults.pageInteractionWithHand } : {}),
 });
 
 export const resolveToolMenuSettingsForId = (
-  global: Readonly<ToolMenuSettings>,
+  defaults: Readonly<ToolMenuSettings>,
   overrides: Readonly<ToolMenuSettingsOverrides> | null | undefined,
   menuId: string,
 ): ToolMenuSettings =>
   resolveToolMenuSettings(
-    INDEPENDENT_WORKFLOW_MENU_DEFAULTS[menuId] ?? global,
+    { ...defaults, ...INDEPENDENT_WORKFLOW_MENU_DEFAULTS[menuId] },
     { ...TOOL_MENU_DEFAULT_OVERRIDES[menuId], ...overrides?.[menuId] },
   );
 
@@ -94,25 +90,25 @@ export const resolveToolMenuSettingsForId = (
  * of menu-setting truth.
  */
 export const isContainerMenuPinned = (
-  global: Readonly<ToolMenuSettings>,
+  defaults: Readonly<ToolMenuSettings>,
   overrides: Readonly<ToolMenuSettingsOverrides> | null | undefined,
   containerId: string,
   childMenuIds: readonly string[] = [],
 ): boolean => {
-  if (resolveToolMenuSettingsForId(global, overrides, containerId).alwaysOnTop) {
+  if (resolveToolMenuSettingsForId(defaults, overrides, containerId).alwaysOnTop) {
     return true;
   }
 
   return childMenuIds.some((childId) =>
-    resolveToolMenuSettingsForId(global, overrides, childId).alwaysOnTop,
+    resolveToolMenuSettingsForId(defaults, overrides, childId).alwaysOnTop,
   );
 };
 
 /**
  * Returns a new override map with one setting changed for one tool.
  *
- * Passing `undefined` clears that key, returning the tool to global
- * inheritance for it. Empty tool override objects are removed as well.
+ * Passing `undefined` clears that key, returning the tool to the app default.
+ * Empty tool override objects are removed as well.
  * Neither the supplied map nor its nested override objects are mutated.
  */
 export const updateToolMenuSettingOverride = <

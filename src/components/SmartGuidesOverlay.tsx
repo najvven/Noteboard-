@@ -18,7 +18,7 @@ const SmartGuidesOverlay = forwardRef<
       style={{ width, height, zIndex: 100002 }}
     >
       {guides.map((guide, index) => (
-        <g key={index} data-guide-kind={guide.kind} data-equal-spacing={guide.equalSpacing || undefined} stroke="#d946b5" strokeWidth={1 / zoom}>
+        <g key={index} data-guide-kind={guide.kind} data-equal-spacing={guide.equalSpacing || undefined} stroke={guide.color ?? "#d946b5"} strokeWidth={1 / zoom}>
           <line
             x1={guide.x1}
             y1={guide.y1}
@@ -26,9 +26,9 @@ const SmartGuidesOverlay = forwardRef<
             y2={guide.y2}
           />
           {guide.extensions?.map((segment,i) => <line key={`extension-${i}`} {...segment} strokeDasharray={`${3 / zoom} ${3 / zoom}`} />)}
-          {guide.kind === "distance" && (
+          {guide.kind !== "alignment" && (
             <>
-              {[
+              {guide.kind === "distance" && [
                 [guide.x1, guide.y1],
                 [guide.x2, guide.y2],
               ].map(([x, y], i) => (
@@ -58,10 +58,10 @@ const SmartGuidesOverlay = forwardRef<
                   fontSize="10"
                   fontFamily="Arial,sans-serif"
                   fontWeight="600"
-                  fill="#b52b94"
+                  fill={guide.color ?? "#b52b94"}
                   stroke="none"
                 >
-                  {guide.label}
+                  {guide.equalSpacing ? `${guide.label} =` : guide.label}
                 </text>
               </g>
             </>

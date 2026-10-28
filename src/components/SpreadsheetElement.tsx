@@ -6,7 +6,7 @@ import React, {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Table2, Check, X, Upload, Download } from "lucide-react";
+import { Table2, ArrowLeft, X, Upload, Download } from "lucide-react";
 import type { BoardElement } from "../types";
 import {
   createWorkbookDocument,
@@ -28,11 +28,13 @@ export default function SpreadsheetElement({
   onUpdate,
   isSelected,
   allowEditing,
+  globalBrightness = 100,
 }: {
   element: BoardElement;
   onUpdate: (updates: Partial<BoardElement>, skipHistory?: boolean) => void;
   isSelected?: boolean;
   allowEditing?: boolean;
+  globalBrightness?: number;
 }) {
   const [expanded, setExpanded] = useState(false),
     [loading, setLoading] = useState(true),
@@ -377,7 +379,7 @@ export default function SpreadsheetElement({
       <div
         ref={object}
         data-spreadsheet-object="true"
-        className="relative overflow-hidden rounded-lg border border-slate-300 bg-white shadow-sm"
+        className="relative overflow-hidden rounded-none border border-slate-300 bg-white shadow-sm"
         style={{
           width: element.size?.width ?? 720,
           height: element.size?.height ?? 420,
@@ -474,10 +476,12 @@ export default function SpreadsheetElement({
                         type="button"
                         disabled={busy}
                         onClick={() => void finish()}
+                        aria-label="Back to board"
+                        title="Back to board"
                         className="flex items-center gap-1 rounded-lg bg-blue-600 px-3 py-1.5 font-semibold text-white disabled:opacity-40"
                       >
-                        <Check className="h-4 w-4" />
-                        {busy ? "Working…" : "Done"}
+                        <ArrowLeft className="h-4 w-4" />
+                        {busy ? "Saving…" : "Back"}
                       </button>
                     )}
                   </>
@@ -532,6 +536,7 @@ export default function SpreadsheetElement({
             ribbonTarget={`spreadsheet-ribbon-${element.id}`}
             onImport={() => importInput.current?.click()}
             onExport={(format) => void exchange(format)}
+            globalBrightness={globalBrightness}
           >
             {alerts}
           </SpreadsheetPanel>,

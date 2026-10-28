@@ -1,4 +1,20 @@
 @import "tailwindcss";
+
+[data-shortcut-assignment-mode="true"] [data-shortcut-action] {
+  cursor: crosshair;
+}
+
+[data-shortcut-assignment-mode="true"] [data-shortcut-action]:hover {
+  outline: 2px solid rgb(59 130 246 / 85%);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+  background-color: rgb(219 234 254 / 32%);
+}
+
+[data-preset-picking="true"],
+[data-preset-picking="true"] * {
+  cursor: crosshair !important;
+}
 @source not "../build/web-filters";
 
 @layer base {
@@ -221,6 +237,40 @@
 
 .toolbar-dropdown .flex-col.gap-3 { gap: 8px; }
 .toolbar-dropdown .menu-settings-content-inner { gap: 6px; }
+.settings-row {
+  min-width: 0;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.settings-field {
+  min-width: 0;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.settings-label {
+  box-sizing: border-box;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 !important;
+  padding-left: var(--settings-label-inset, 0.75rem) !important;
+  text-align: left;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  color: rgb(107 114 128);
+}
+.settings-label-strong {
+  font-weight: 700;
+  color: rgb(75 85 99);
+}
+.settings-label-disabled { color: rgb(156 163 175); }
+.settings-field > .settings-label { flex: none; }
+.settings-label.tool-inline-size-label { flex: 0 0 3rem; }
+.settings-field > .noteboard-range-field {
+  box-sizing: border-box;
+  padding-inline-start: var(--settings-label-inset, 0.75rem);
+}
 [data-toolbar-drag-suppressed="true"] { opacity: 0 !important; pointer-events: none; }
 
 /* Native guests must not intercept pointer release during editor gestures. */
@@ -228,3 +278,10 @@
 html[data-board-pointer-capture] :is(iframe, webview) { pointer-events: none !important; }
 html[data-noteboard-file-drag] :is(iframe, webview) { pointer-events: none !important; }
 [data-merged-group-member], [data-merged-group-member] * { pointer-events: none !important; }
+
+@keyframes save-confirm-border {
+  0% { border-color: rgb(34 197 94); box-shadow: 0 0 0 2px rgb(34 197 94 / 0.32); }
+  100% { border-color: rgb(229 231 235); box-shadow: 0 0 0 0 transparent; }
+}
+
+.save-confirm-flash { animation: save-confirm-border 1.25s ease-out both; }

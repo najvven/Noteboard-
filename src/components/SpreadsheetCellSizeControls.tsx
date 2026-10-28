@@ -39,12 +39,13 @@ export default function SpreadsheetCellSizeControls({
           key={axis}
           className="flex items-center gap-2 text-xs font-semibold text-gray-600"
         >
-          Cell {axis}
+          Cell {axis === "width" ? "Width" : "Height"}
           <input
-            aria-label={`Cell ${axis}`}
+            aria-label={`Cell ${axis === "width" ? "Width" : "Height"}`}
             type="number"
             min={axis === "width" ? 20 : 12}
             max={axis === "width" ? 1000 : 400}
+            step={1}
             value={draft[axis]}
             onChange={(event) =>
               setDraft((current) => ({
@@ -59,7 +60,7 @@ export default function SpreadsheetCellSizeControls({
                 event.currentTarget.blur();
               }
             }}
-            className="w-16 rounded-lg border-2 border-gray-300 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-blue-400"
+            className="w-16 rounded-lg border-2 border-gray-300 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-blue-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
           />
           <span className="text-[10px]">px</span>
         </label>

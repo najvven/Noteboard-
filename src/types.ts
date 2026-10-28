@@ -81,6 +81,7 @@ export interface BoardElement {
   fontWeight?: number;
   textSnapToGrid?: boolean;
   textLinesMode?: 'everywhere' | 'text-only';
+  textLineCapacityLimit?: boolean;
   textLineColor?: string;
   textLineThickness?: number;
   textLineSpacing?: number;
@@ -90,12 +91,15 @@ export interface BoardElement {
   mediaKind?: 'media' | 'web';
   mediaMime?: string;
   mediaControlsHidden?: boolean;
+  mediaDisabled?: boolean;
   mediaLoop?: boolean;
   mediaPlaybackRate?: number;
   mediaVolume?: number;
   webSessionId?: string;
   webRememberSession?: boolean;
   webDeviceMode?: 'desktop' | 'tablet' | 'phone';
+  webFullscreenMode?: 'area' | 'real';
+  webControlsHidden?: boolean;
   webAdBlock?: boolean;
   webCookieBlocker?: 'off' | 'third-party' | 'all';
   webPopupBlocker?: boolean;
@@ -133,18 +137,31 @@ export interface BoardElement {
   sheetCell?: SectionSheetCellMeta;
 }
 
+export interface CustomSettingShortcutBinding {
+  id: string;
+  label: string;
+  description?: string;
+  category: string;
+  target: string;
+  shortcut: string;
+}
+
 export interface BoardEditorSettings {
   activeTool?: string;
   selectMode?: import('./features/board/select-mode').SelectMode;
+  selectMinimumCell?: boolean;
   spreadsheetCellWidth?: number;
   spreadsheetCellHeight?: number;
   spreadsheetMode?: 'advanced' | 'simple';
   customColors?: Record<string, string[]>;
   pendingProps?: Partial<BoardElement>;
-  alwaysOnTop?: boolean;
-  keepToolActive?: boolean;
+  mediaPlaybackDisabled?: boolean;
+  objectPresetsPanelAlwaysOnTop?: boolean;
   keepToolActiveFallback?: 'select' | 'pan';
   toolModeShortcut?: string;
+  previewShortcut?: string;
+  activeToolRatioShortcut?: string;
+  customSettingShortcuts?: CustomSettingShortcutBinding[];
   gridToggleShortcut?: string;
   overlapShortcut?: string;
   cropShortcut?: string;
@@ -152,14 +169,17 @@ export interface BoardEditorSettings {
   zoomToCursor?: boolean;
   keepBoardContentPosition?: boolean;
   cutShortcut?: string;
-  proportionalScale?: boolean;
   altResizeCrops?: boolean;
-  previewMode?: 'box' | 'realistic';
   toolMenuSettingsOverrides?: ToolMenuSettingsOverrides;
   isSelectionLockEnabled?: boolean;
   selectionLockTime?: number;
   enableObjectSnapping?: boolean;
   smartGuidesEnabled?: boolean;
+  smartGuideDensity?: 'low' | 'mid' | 'high';
+  smartGuideAlignment?: boolean;
+  smartGuideDistances?: boolean;
+  smartGuideRatios?: boolean;
+  smartGuideAngles?: boolean;
   autoSelectOnPlace?: boolean;
   switchToolAfterPlacing?: boolean;
   autoToolOnSelect?: boolean;
@@ -168,6 +188,7 @@ export interface BoardEditorSettings {
   allowEditing?: boolean;
   allowMovingElementsInPan?: boolean;
   fillToolColor?: string;
+  fillMode?: 'area' | 'object';
   eraserMode?: 'element' | 'partial';
   eraserSize?: number;
   eraserShape?: 'round' | 'square';

@@ -4,6 +4,7 @@ import type {
   SpreadsheetAction,
   SpreadsheetSelection,
 } from "../features/spreadsheet/editor-bridge";
+import { useDraggablePanel } from "./useDraggablePanel";
 const button =
   "rounded-md border border-gray-200 bg-white px-2 py-1.5 text-xs font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-40";
 /** The live Univer ribbon owns formatting/data commands in both editing views. */
@@ -15,6 +16,7 @@ export default function SpreadsheetPanel({
   onImport,
   onExport,
   ribbonTarget,
+  globalBrightness = 100,
   children,
 }: {
   name: string;
@@ -24,23 +26,27 @@ export default function SpreadsheetPanel({
   onImport: () => void;
   onExport: (format: "xlsx" | "csv") => void;
   ribbonTarget: string;
+  globalBrightness?: number;
   children?: React.ReactNode;
 }) {
   const [input, setInput] = useState("");
+  const { panelRef, panelStyle, dragHandleProps } = useDraggablePanel<HTMLElement>();
   useEffect(
     () => setInput(selection?.input ?? ""),
     [selection?.input, selection?.address, selection?.sheetId],
   );
   return (
     <aside
+      ref={panelRef}
       data-spreadsheet-panel="true"
       aria-label="Spreadsheet settings"
-      className="fixed right-3 top-24 bottom-32 z-[220] w-[320px] max-w-[calc(100vw-24px)] overflow-hidden rounded-xl border-[3px] border-gray-400 bg-white p-3 text-xs shadow-xl"
+      style={{ ...panelStyle, filter: globalBrightness === 100 ? undefined : `brightness(${globalBrightness}%)` }}
+      className="fixed right-3 top-24 z-[220] w-[320px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-14rem)] overflow-hidden rounded-none border-[3px] border-gray-400 bg-white p-3 text-xs shadow-xl"
       onPointerDown={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >
-      <div className="menu-scroll-viewport h-full overflow-y-auto">
-        <div className="mb-2 flex items-center gap-2 border-b-2 border-gray-300 pb-2 font-bold text-gray-800">
+      <div className="menu-scroll-viewport max-h-[calc(100vh-14rem)] overflow-y-auto">
+        <div {...dragHandleProps} data-panel-drag-handle="spreadsheet" title="Drag to move" className="mb-2 flex cursor-move items-center gap-2 border-b-2 border-gray-300 pb-2 font-bold text-gray-800">
           <Table2 className="h-4 w-4" />
           <span className="truncate">{name}</span>
         </div>

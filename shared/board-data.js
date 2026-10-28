@@ -275,6 +275,7 @@ const assertSettingsElementShape = (element, label, partial = false) => {
   for (const field of [
     "keepRatio",
     "textScaling",
+    "textLineCapacityLimit",
     "mediaControlsHidden",
     "mediaLoop",
     "webRememberSession",
@@ -358,12 +359,21 @@ const assertEditorSettings = (settings) => {
       ["selectMode", "string", 100],
       ["keepToolActiveFallback", "string", 20],
       ["toolModeShortcut", "string", 100],
+      ["previewShortcut", "string", 100],
+      ["activeToolRatioShortcut", "string", 100],
+      ["globalRatioShortcut", "string", 100],
       ["gridToggleShortcut", "string", 100],
       ["overlapShortcut", "string", 100],
       ["cropShortcut", "string", 100],
       ["scrollZoomShortcut", "string", 100],
       ["cutShortcut", "string", 100],
       ["fillToolColor", "string", 200],
+      ["fillMode", "string", 20],
+      ["smartGuideDensity", "string", 20],
+      ["smartGuideAlignmentColor", "string", 200],
+      ["smartGuideDistanceColor", "string", 200],
+      ["smartGuideRatioColor", "string", 200],
+      ["smartGuideAngleColor", "string", 200],
       ["eraserMode", "string", 20],
       ["eraserShape", "string", 20],
       ["spreadsheetMode", "string", 20],
@@ -382,6 +392,9 @@ const assertEditorSettings = (settings) => {
   for (const field of [
     "alwaysOnTop",
     "keepToolActive",
+    "mediaPlaybackDisabled",
+    "objectPresetsPanelAlwaysOnTop",
+    "selectMinimumCell",
     "zoomToCursor",
     "keepBoardContentPosition",
     "proportionalScale",
@@ -389,6 +402,10 @@ const assertEditorSettings = (settings) => {
     "isSelectionLockEnabled",
     "enableObjectSnapping",
     "smartGuidesEnabled",
+    "smartGuideAlignment",
+    "smartGuideDistances",
+    "smartGuideRatios",
+    "smartGuideAngles",
     "autoSelectOnPlace",
     "switchToolAfterPlacing",
     "autoToolOnSelect",
@@ -406,6 +423,23 @@ const assertEditorSettings = (settings) => {
   assertSettingEnum(settings, "eraserMode", new Set(["element", "partial"]), label);
   assertSettingEnum(settings, "eraserShape", new Set(["round", "square"]), label);
   assertSettingEnum(settings, "overlapMode", new Set(["none", "partial", "full"]), label);
+  assertSettingEnum(settings, "fillMode", new Set(["area", "object"]), label);
+  assertSettingEnum(settings, "smartGuideDensity", new Set(["low", "mid", "high"]), label);
+
+  if (settings.customSettingShortcuts !== undefined) {
+    if (!Array.isArray(settings.customSettingShortcuts) || settings.customSettingShortcuts.length > 500) {
+      throw new Error(`${label}.customSettingShortcuts is invalid.`);
+    }
+    settings.customSettingShortcuts.forEach((binding, index) => {
+      const bindingLabel = `${label}.customSettingShortcuts[${index}]`;
+      assertSettingsRecord(binding, bindingLabel);
+      for (const [field, maximum] of [["id", 100], ["label", 200], ["category", 100], ["target", 300], ["shortcut", 100]]) {
+        if (typeof binding[field] !== "string" || binding[field].length > maximum) {
+          throw new Error(`${bindingLabel}.${field} is invalid.`);
+        }
+      }
+    });
+  }
 
   if (settings.toolbarLayout !== undefined) {
     const layout = settings.toolbarLayout;
@@ -472,6 +506,7 @@ const assertEditorSettings = (settings) => {
       for (const field of [
         "alwaysOnTop",
         "keepToolActive",
+        "ratio",
         "allowEditing",
         "allowMoving",
         "pageInteractionWithSelect",
@@ -667,6 +702,7 @@ export function assertValidBoard(page) {
     for (const booleanField of [
       "keepRatio",
       "mediaControlsHidden",
+      "mediaDisabled",
       "mediaLoop",
       "webRememberSession",
       "webAdBlock",

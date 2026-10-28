@@ -1,4 +1,5 @@
 import React, { useEffect } from "react";
+import { ArrowLeft } from "lucide-react";
 import type { Injector } from "@univerjs/core";
 import {
   DesktopSidebarService,
@@ -115,21 +116,26 @@ export function HostedOverlays() {
           data-hosted-sheet-sidebar
           role="complementary"
           aria-label="Spreadsheet details"
-          className="univer-relative univer-bg-white univer-text-gray-900"
+          className="univer-relative univer-flex univer-min-h-0 univer-flex-col univer-overflow-hidden univer-bg-white univer-text-gray-900"
+          style={{ maxHeight: "calc(100vh - 8rem)" }}
         >
           <div className="univer-flex univer-items-center univer-justify-between univer-gap-2 univer-py-2 univer-font-semibold">
             <EngineLabel options={options.header} />
             <button
-              aria-label="Close spreadsheet details"
+              aria-label="Back to spreadsheet tools"
+              title="Back"
               onClick={() => sidebar.close(options.id)}
             >
-              ×
+              <ArrowLeft className="h-4 w-4" />
             </button>
           </div>
           <div
             ref={(element) => {
               if (element) sidebar.setContainer(element);
             }}
+            data-sheet-detail-scroll="true"
+            className="univer-min-h-0 univer-overflow-y-auto"
+            style={{ maxHeight: "calc(100vh - 12rem)", overflowY: "auto" }}
             onScroll={(event) => sidebar.scrollEvent$.next(event.nativeEvent)}
           >
             <EngineLabel options={options.children} />

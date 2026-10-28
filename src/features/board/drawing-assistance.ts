@@ -145,7 +145,8 @@ export function guessClosedDrawingShape(
   if (distance(points[0], points[points.length - 1]) > closureTolerance) return null;
 
   const vertices = getClosedVertices(simplifiedOutline, scale * 0.012);
-  if (!isConvexPolygon(vertices)) return null;
+  if (!isConvexPolygon(vertices))
+    return isClosedCircleCandidate(points, clampedStrength) ? { type: "ellipse" } : null;
   const fitTolerance = 0.045 + strengthProgress * 0.105;
   if (polygonFitError(points, vertices, scale) > fitTolerance) return null;
   const polygonShapeFitTolerance = 0.035 + strengthProgress * 0.025;
